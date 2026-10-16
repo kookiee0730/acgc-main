@@ -1,13 +1,10 @@
 # Vercel Deployment
 
-## Services
+## Deployment
 
-Import the repository as a Vercel project and set its Framework to **Services**. The root `vercel.json` defines both services and routes `/api/*` to the backend and all other paths to the frontend:
+Deploy the Vite frontend as a Vercel project with root directory `.`, build command `npm run build`, and output directory `dist`. The root `vercel.json` proxies `/api/*` to the backend deployment at `https://acgc-main-wtzi.vercel.app` and sends other paths to the frontend app.
 
-- Frontend service: root directory `.`; framework Vite; route `/`.
-- Backend service: root directory `backend`; entry point `server.js`; framework Express; route `/api`.
-
-The frontend uses the same-origin `/api` base by default, so `VITE_API_BASE_URL` is not needed when both services share this routing. Deploy after changing the Vercel project Framework setting; the deleted `acgc-backend.vercel.app` target is no longer used.
+The frontend API client reads `VITE_API_BASE_URL` (not `VITE_API_URL`). It defaults to the same-origin `/api` proxy, so no Vite API variable is required when the rewrite is deployed. If setting the variable in Vercel, use `VITE_API_BASE_URL=https://acgc-main-wtzi.vercel.app` and redeploy the frontend for the value to take effect.
 
 ## Cloudinary Storage
 
