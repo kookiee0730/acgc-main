@@ -2,12 +2,12 @@
 
 ## Services
 
-Import the repository as a Vercel project and group the detected applications as Services:
+Import the repository as a Vercel project and set its Framework to **Services**. The root `vercel.json` defines both services and routes `/api/*` to the backend and all other paths to the frontend:
 
-- Frontend service: root directory `.`; framework Vite; build command `npm run build`; output directory `dist`; route `/`.
-- Backend service: root directory `backend`; framework Express; start command `npm start`; route `/api`.
+- Frontend service: root directory `.`; framework Vite; route `/`.
+- Backend service: root directory `backend`; entry point `server.js`; framework Express; route `/api`.
 
-The frontend uses the same-origin `/api` base by default, so `VITE_API_BASE_URL` is not needed when both services share this routing.
+The frontend uses the same-origin `/api` base by default, so `VITE_API_BASE_URL` is not needed when both services share this routing. Deploy after changing the Vercel project Framework setting; the deleted `acgc-backend.vercel.app` target is no longer used.
 
 ## Cloudinary Storage
 
