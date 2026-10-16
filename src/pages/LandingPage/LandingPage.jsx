@@ -1354,14 +1354,14 @@ function LandingPage() {
                     )}
                   </div>
                   <div className="absolute inset-x-0 bottom-0 flex items-end justify-end gap-3 p-3 max-md:p-1.5">
-                    <div className="flex gap-1.5 max-md:gap-1">
+                    <div className="hidden gap-1.5 md:flex">
                       <button
                         type="button"
                         onClick={(event) => {
                           event.stopPropagation();
                           openProductDetails(product);
                         }}
-                        className="inline-flex size-8 items-center justify-center rounded-xl border border-red-200 bg-white/90 text-red-700 shadow-lg transition hover:border-red-300 hover:bg-red-600 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 max-md:size-7 max-md:rounded-lg"
+                        className="inline-flex size-8 items-center justify-center rounded-xl border border-red-200 bg-white/90 text-red-700 shadow-lg transition hover:border-red-300 hover:bg-red-600 hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
                         aria-label="View product details"
                         title="View product details"
                       >
@@ -1374,13 +1374,13 @@ function LandingPage() {
                           handleAddToCart(product);
                         }}
                         disabled={addingCartProductId === String(productId)}
-                        className="inline-flex size-8 items-center justify-center rounded-xl border border-slate-200 bg-white/90 text-slate-700 shadow-lg transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-50 max-md:size-9 max-md:rounded-lg"
+                        className="inline-flex size-8 items-center justify-center rounded-xl border border-slate-200 bg-white/90 text-slate-700 shadow-lg transition hover:border-slate-300 hover:bg-slate-100 hover:text-slate-900 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-50"
                         aria-label="Add to cart"
                         title="Add to cart"
                       >
                         {addingCartProductId === String(productId)
                           ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
-                          : <ShoppingCart size={14} aria-hidden="true" />}
+                          : <ShoppingCart size={16} aria-hidden="true" />}
                       </button>
                     </div>
                   </div>
@@ -1414,10 +1414,39 @@ function LandingPage() {
                     </p>
                   </div>
 
-                  <div className="mt-auto border-t border-slate-200 pt-3 max-md:pt-1.5">
+                  <div className="mt-auto flex items-end justify-between gap-2 border-t border-slate-200 pt-3 max-md:flex-col max-md:items-stretch max-md:gap-2 max-md:pt-1.5">
                     <div className="min-w-0">
                       <p className="text-[10px] uppercase tracking-[0.14em] text-slate-500 max-md:text-[8px]">Starting from</p>
                       <p className="mt-1 truncate text-[22px] font-black text-red-700 max-md:text-base">{getProductPrice(product)}</p>
+                    </div>
+                    <div className="flex w-full shrink-0 items-center justify-end gap-1 md:hidden">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          openProductDetails(product);
+                        }}
+                        className="inline-flex size-8 items-center justify-center rounded-lg border border-red-200 bg-white text-red-700"
+                        aria-label="View product details"
+                        title="View product details"
+                      >
+                        <Package size={14} aria-hidden="true" />
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          handleAddToCart(product);
+                        }}
+                        disabled={addingCartProductId === String(productId)}
+                        className="inline-flex size-8 items-center justify-center rounded-lg border border-slate-200 bg-white text-slate-700 disabled:cursor-not-allowed disabled:opacity-50"
+                        aria-label="Add to cart"
+                        title="Add to cart"
+                      >
+                        {addingCartProductId === String(productId)
+                          ? <LoaderCircle size={14} className="animate-spin" aria-hidden="true" />
+                          : <ShoppingCart size={14} aria-hidden="true" />}
+                      </button>
                     </div>
                   </div>
                 </div>
