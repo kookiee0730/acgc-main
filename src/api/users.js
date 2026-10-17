@@ -51,10 +51,14 @@ export const uploadSystemBackup = (file) => {
       multipart: file.size > 100 * 1024 * 1024,
     }).then((result) => {
       const uploaded = result.files?.[0];
-      if (!uploaded?.public_id || !uploaded?.format) throw new Error("Backup upload did not return a Cloudinary asset ID.");
+      // Cloudinary raw uploads can omit `format` when the extension is already
+      // part of the public ID. Keep the original backup extension for the
+      // authenticated download URL in that case.
+      const format = uploaded?.format || file.name.split(".").pop()?.toLowerCase();
+      if (!uploaded?.public_id || !format) throw new Error("Backup upload did not return a Cloudinary asset ID.");
       return apiFetch("/auth/system-settings/backups/import-cloudinary", {
         method: "POST",
-        body: JSON.stringify({ public_id: uploaded.public_id, format: uploaded.format }),
+        body: JSON.stringify({ public_id: uploaded.public_id, format }),
       });
     });
   }
