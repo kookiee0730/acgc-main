@@ -332,6 +332,7 @@ function ProgressMonitor() {
   const [cancelConfirm, setCancelConfirm] = useState({ open: false, id: null });
   const [cancellingId, setCancellingId] = useState(null);
   const [startingProjectId, setStartingProjectId] = useState(null);
+  const [startConfirm, setStartConfirm] = useState(null);
 
   const rowsPerPage = 10;
 
@@ -567,13 +568,21 @@ function ProgressMonitor() {
       setCurrentPage(1);
       recordActivity(user, `Started project ${project.product} in order ${targetOrderId}.`, "Progress Monitor");
       toast.success("Project started at Cutting.");
+      return true;
     } catch (error) {
       const serverError = error?.data?.error;
       const errorMessage = error?.data?.message || error?.message || "Unable to start project.";
       toast.error(serverError ? `${errorMessage}: ${serverError}` : errorMessage);
+      return false;
     } finally {
       setStartingProjectId(null);
     }
+  };
+
+  const handleConfirmStartProject = async () => {
+    if (!startConfirm) return;
+    const started = await handleStartProject(startConfirm);
+    if (started) setStartConfirm(null);
   };
 
   const handleTimelineOrderChange = (savedOrder) => {
@@ -779,13 +788,14 @@ function ProgressMonitor() {
       <div className="flex-1 min-h-0 flex flex-col">
         <Navbar />
 
-        <main className="flex-1 min-h-0 overflow-y-auto p-6">
+        <main className="flex-1 min-h-0 overflow-y-auto p-6 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] lg:!pb-24">
 
           <AdminPageHeader
             title="Progress Monitor"
             description="Monitor fabrication and installation progress."
+            statsClassName="grid-cols-1 lg:grid-cols-3 gap-2 sm:gap-3"
             stats={[
-              { label: "Projects", value: projectList.length, color: "text-blue-200" },
+              { label: "Total Projects", value: projectList.length, color: "text-blue-200" },
               { label: "In Progress", value: projectList.filter((project) => project.progress < 100 && project.status !== "Cancelled").length, color: "text-amber-200" },
               { label: "Completed", value: projectList.filter((project) => project.status === "Completed" || project.progress >= 100).length, color: "text-emerald-300" },
             ]}
@@ -867,7 +877,7 @@ function ProgressMonitor() {
                       <th className="p-4 text-left">Est. Installation</th>
                       <th className="p-4 text-left">Progress</th>
                       {statusFilter === "All" && <th className="p-4 text-left">Status</th>}
-                      <th className="p-4 text-center">Actions</th>
+                      <th className="p-4 pr-6 text-right">Actions</th>
                     </tr>
                   </thead>
                   <tbody>
@@ -897,13 +907,13 @@ function ProgressMonitor() {
                           <span className="font-semibold text-sm">{project.progress}%</span>
                         </td>
                         {statusFilter === "All" && <td className="p-4"><span className={`rounded-full px-3 py-1 ${darkMode ? "bg-slate-800 text-slate-200" : "bg-gray-100 text-slate-700"}`}>{project.status}</span></td>}
-                        <td className="p-4">
-                          <div className="flex justify-center gap-2">
+                        <td className="py-3 pl-4 pr-6">
+                          <div className="flex justify-end gap-2.5">
                             <button onClick={() => { setSelectedProject(project); setShowViewModal(true); }} className={`rounded-lg p-2 ${darkMode ? "bg-blue-950/60 text-blue-300 hover:bg-blue-900/70" : "bg-blue-100 text-blue-600"}`} aria-label={`View ${project.product} progress`}>
                               <Eye size={18} />
                             </button>
                             {project.status === "Pending" ? (
-                              <button onClick={() => handleStartProject(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
+                              <button onClick={() => setStartConfirm(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
                                 <Play size={18} />
                               </button>
                             ) : Number(project.progress) < 100 && (
@@ -966,12 +976,12 @@ function ProgressMonitor() {
                       <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{project.installation}</p>
                     </div>
                   </div>
-                  <div className="mt-3 flex justify-end gap-2">
+                  <div className="mt-3 flex justify-end gap-2.5 pr-1">
                     <button onClick={() => { setSelectedProject(project); setShowViewModal(true); }} className={`rounded-lg p-2 ${darkMode ? "bg-blue-950/60 text-blue-300 hover:bg-blue-900/70" : "bg-blue-100 text-blue-600"}`} aria-label={`View ${project.product} progress`}>
                       <Eye size={18} />
                     </button>
                     {project.status === "Pending" ? (
-                      <button onClick={() => handleStartProject(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
+                      <button onClick={() => setStartConfirm(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
                         <Play size={18} />
                       </button>
                     ) : Number(project.progress) < 100 && (
@@ -1065,6 +1075,40 @@ function ProgressMonitor() {
                   </button>
                 </div>
               </div>
+            </div>
+          )}
+
+          {startConfirm && (
+            <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" role="presentation">
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="confirm-start-project-title"
+                className={`relative w-full max-w-md rounded-3xl p-6 shadow-lg ${darkMode ? "bg-[#132238] text-slate-100" : "bg-white text-slate-900"}`}
+              >
+                <h2 id="confirm-start-project-title" className="mb-2 text-2xl font-bold">Start Project</h2>
+                <p className={`mb-6 text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
+                  Start {startConfirm.product} at Cutting? This will move the project into production.
+                </p>
+                <div className="flex justify-end gap-3">
+                  <button
+                    type="button"
+                    onClick={() => setStartConfirm(null)}
+                    disabled={startingProjectId === startConfirm.id}
+                    className={`rounded-lg px-4 py-2 transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-gray-100 text-slate-700 hover:bg-gray-200"}`}
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleConfirmStartProject}
+                    disabled={startingProjectId === startConfirm.id}
+                    className="rounded-lg bg-emerald-600 px-4 py-2 font-semibold text-white transition hover:bg-emerald-700 disabled:cursor-wait disabled:opacity-50"
+                  >
+                    {startingProjectId === startConfirm.id ? "Starting..." : "Confirm Start"}
+                  </button>
+                </div>
+              </section>
             </div>
           )}
 

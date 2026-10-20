@@ -386,7 +386,7 @@ export const buildOrderEmail = (event, order, { audience = "customer", ...extra 
   const content = getEventContent(event, order, audience, extra);
   const actionUrl = buildFrontendUrl(content.path, { orderId: order?._id || order?.id || "" });
   const supportEmail = process.env.SUPPORT_EMAIL || "acgc.services00@gmail.com";
-  const { text, html } = buildCustomerEmailTemplate({
+  const { text, html, attachments } = buildCustomerEmailTemplate({
     title: content.title,
     summary: content.summary,
     status: content.status,
@@ -398,7 +398,7 @@ export const buildOrderEmail = (event, order, { audience = "customer", ...extra 
     supportEmail,
     supportPhone: process.env.SUPPORT_PHONE,
   });
-  return { subject: content.subject, text, html };
+  return { subject: content.subject, text, html, attachments };
 };
 
 export const sendOrderNotification = async (event, order, options = {}) => {

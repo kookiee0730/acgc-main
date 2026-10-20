@@ -4,7 +4,7 @@ const CustomerNotificationSchema = new mongoose.Schema({
   customer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
   order: { type: mongoose.Schema.Types.ObjectId, ref: "Order", required: true },
   eventKey: { type: String, required: true },
-  type: { type: String, enum: ["installation_up_next", "installation_completed"], required: true },
+  type: { type: String, enum: ["installation_up_next", "installation_completed", "site_inspection_today", "order_cancellation_warning", "order_cancellation_cooldown"], required: true },
   title: { type: String, required: true },
   message: { type: String, required: true },
   tracking: { type: String, default: "" },

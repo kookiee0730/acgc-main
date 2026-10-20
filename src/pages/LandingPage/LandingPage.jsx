@@ -920,7 +920,7 @@ function LandingPage() {
   };
 
   return (
-  <div className="flex min-h-screen flex-col overflow-x-hidden bg-white text-gray-900">
+  <div className="landing-page-shell flex min-h-screen flex-col overflow-x-hidden bg-white pb-[calc(10rem+env(safe-area-inset-bottom))] text-gray-900 lg:pb-0">
       <Toaster position="bottom-right" />
 
       {/* NAVBAR */}
@@ -967,7 +967,7 @@ function LandingPage() {
               aria-current={active === item.id ? "page" : undefined}
               className={`rounded-full px-4 py-2 text-base font-medium transition-colors motion-reduce:transition-none ${
                 active === item.id
-                    ? "border border-slate-200 bg-slate-100 text-red-700"
+                    ? "border border-slate-200 bg-slate-100 text-red-600 shadow-sm"
                     : "text-slate-700 hover:bg-slate-100"
                   } focus:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2`}
             >
@@ -1006,7 +1006,7 @@ function LandingPage() {
                 type="button"
                 onClick={() => scrollToSection(item.id)}
                 aria-current={active === item.id ? "page" : undefined}
-                className={`min-h-8 rounded-lg px-1 text-[11px] font-semibold transition-colors motion-reduce:transition-none ${active === item.id ? "bg-red-50 text-red-700" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500`}
+                className={`min-h-8 rounded-lg px-1 text-[11px] font-semibold transition-colors motion-reduce:transition-none ${active === item.id ? "border border-slate-200 bg-slate-100 text-red-600 shadow-sm" : "text-slate-600 hover:bg-slate-100 hover:text-slate-900"} focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500`}
               >
                 {item.name}
               </button>

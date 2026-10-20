@@ -19,8 +19,8 @@ import {
 const gzipAsync = promisify(gzip);
 const gunzipAsync = promisify(gunzip);
 const BACKUP_FORMAT = "acgc-system-backup-v1";
-const VALID_TYPES = new Set(["Weekly", "Monthly", "Yearly", "Full System", "Pre-Restore", "Imported"]);
-const SCHEDULED_BACKUP_TYPES = { weekly: "Weekly", monthly: "Monthly", yearly: "Yearly" };
+const VALID_TYPES = new Set(["Daily", "Weekly", "Monthly", "Full System", "Pre-Restore", "Imported"]);
+const SCHEDULED_BACKUP_TYPES = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
 let scheduledBackupTimer;
 
 const getBackupDirectory = () => path.join(process.cwd(), "backups");
@@ -30,6 +30,29 @@ const usesCloudinaryStorage = () => isVercelRuntime() || hasCloudinaryConfig();
 const isCloudinaryBackup = (backup) => backup?.storage === "cloudinary" || (!backup?.storage && isVercelRuntime());
 
 const backupError = (message, status = 400) => Object.assign(new Error(message), { status });
+
+const getBackupBaseName = ({ type, date }) => {
+  const timestampDate = new Date(date || Date.now());
+  const month = new Intl.DateTimeFormat("en-US", { month: "short", timeZone: "UTC" }).format(timestampDate);
+  const day = String(timestampDate.getUTCDate()).padStart(2, "0");
+  const year = timestampDate.getUTCFullYear();
+  const hour24 = timestampDate.getUTCHours();
+  const hour12 = String(hour24 % 12 || 12).padStart(2, "0");
+  const minute = String(timestampDate.getUTCMinutes()).padStart(2, "0");
+  const meridiem = hour24 < 12 ? "AM" : "PM";
+  const prefixByType = {
+    Daily: "ACGC_Database_Daily",
+    Weekly: "ACGC_Database_Weekly",
+    Monthly: "ACGC_Database_Monthly",
+    "Full System": "ACGC_System_Full",
+    "Pre-Restore": "ACGC_System_Pre-Restore",
+    Imported: "ACGC_Database_Imported",
+  };
+  const prefix = prefixByType[type] || `ACGC_Database_${String(type || "Backup").replace(/[^A-Za-z0-9]+/g, "_")}`;
+  return `${prefix}_${month}-${day}-${year}_${hour12}-${minute}${meridiem}_UTC`;
+};
+
+const getBackupFilename = (backup) => `${getBackupBaseName(backup)}.zip`;
 
 const assertBackupId = (backupId) => {
   if (!/^[A-Za-z0-9_-]{1,100}$/.test(backupId || "")) {
@@ -82,6 +105,7 @@ const createSnapshotBuffer = async () => {
 
   const snapshot = {
     format: BACKUP_FORMAT,
+    databaseName: database.databaseName,
     createdAt: new Date().toISOString(),
     collections,
     uploads: [],
@@ -350,13 +374,21 @@ export const hydrateBackupHistorySizes = async (backupHistory = []) => {
 
   return Promise.all(backupHistory.map(async (backup) => {
     if (!backup || typeof backup !== "object") return backup;
-    if (Number.isFinite(Number(backup.sizeBytes)) && Number(backup.sizeBytes) > 0) return backup;
+    const normalizedBackup = {
+      ...backup,
+      name: getBackupBaseName({
+        databaseName: backup.databaseName,
+        type: backup.type,
+        date: backup.date,
+      }),
+    };
+    if (Number.isFinite(Number(backup.sizeBytes)) && Number(backup.sizeBytes) > 0) return normalizedBackup;
 
     const sizeBytes = await getStoredBackupSizeBytes(backup);
-    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return backup;
+    if (!Number.isFinite(sizeBytes) || sizeBytes <= 0) return normalizedBackup;
 
     return {
-      ...backup,
+      ...normalizedBackup,
       sizeBytes,
       size: getBackupSizeInMB(sizeBytes),
     };
@@ -496,7 +528,8 @@ export const createSystemBackup = async (type, trigger = "Manual") => {
     const { checksum, verified, storage } = await storeBackupBuffer(id, backupBuffer, { type, trigger });
     const backup = {
       id,
-      name: `${type.toUpperCase().replace(/\s+/g, "_")}_BACKUP_${now.toISOString().slice(0, 10)}`,
+      name: getBackupBaseName({ databaseName: snapshot.databaseName, type, date: now }),
+      databaseName: snapshot.databaseName,
       type,
       trigger,
       date: now.toISOString(),
@@ -539,7 +572,7 @@ export const createSystemBackup = async (type, trigger = "Manual") => {
 
 export const importSystemBackup = async (source) => {
   const uploadedBuffer = Buffer.isBuffer(source) ? source : await fs.readFile(source);
-  await parseSnapshot(uploadedBuffer);
+  const snapshot = await parseSnapshot(uploadedBuffer);
   const backupBuffer = isZipBackup(uploadedBuffer)
     ? uploadedBuffer
     : await encryptZipBackupBuffer(await getCompressedSnapshotBuffer(uploadedBuffer), undefined, await requireBackupFilePassword());
@@ -549,7 +582,8 @@ export const importSystemBackup = async (source) => {
   const type = "Imported";
   const backup = {
     id,
-    name: `IMPORTED_BACKUP_${now.toISOString().slice(0, 10)}`,
+    name: getBackupBaseName({ databaseName: snapshot.databaseName || "imported_data", type, date: now }),
+    databaseName: snapshot.databaseName || null,
     type,
     trigger: "Manual",
     date: now.toISOString(),
@@ -607,8 +641,8 @@ export const getSystemBackupDownload = async (backupId) => {
   const { backup } = await findBackupRecord(backupId);
   if (isCloudinaryBackup(backup)) {
     return {
-      redirectUrl: getPrivateRawDownloadUrl(getBackupCloudinaryPublicId(backupId), "zip"),
-      filename: `${backup.name}.zip`,
+      remoteUrl: getPrivateRawDownloadUrl(getBackupCloudinaryPublicId(backupId), "zip"),
+      filename: getBackupFilename(backup),
     };
   }
 
@@ -618,7 +652,7 @@ export const getSystemBackupDownload = async (backupId) => {
   } catch {
     throw backupError("Backup file is not available for download.", 404);
   }
-  return { buffer, filename: `${backup.name}.zip` };
+  return { buffer, filename: getBackupFilename(backup) };
 };
 
 const restoreSystemBackupLocked = async (backupId, recoveryPassword) => {
@@ -807,22 +841,27 @@ const getScheduledBackupKey = (schedule, date) => {
   return `${schedule}:${dateKey}`;
 };
 
-const isScheduledBackupDue = (schedule, date) => {
+const normalizeBackupTime = (time) => /^([01]\d|2[0-3]):([0-5]\d)$/.test(time || "") ? time : "00:00";
+
+const isScheduledBackupDue = (schedule, date, time = "00:00") => {
   const manila = getManilaWallDate(date);
+  const [hour, minute] = normalizeBackupTime(time).split(":").map(Number);
+  if (manila.getUTCHours() < hour || (manila.getUTCHours() === hour && manila.getUTCMinutes() < minute)) return false;
+  if (schedule === "daily") return true;
   if (schedule === "weekly") return manila.getUTCDay() === 0;
   if (schedule === "monthly") return manila.getUTCDate() === 1;
-  if (schedule === "yearly") return manila.getUTCMonth() === 11 && manila.getUTCDate() === 31;
   return false;
 };
 
-export const getNextScheduledBackupAt = (schedule, from = new Date()) => {
+export const getNextScheduledBackupAt = (schedule, time = "00:00", from = new Date()) => {
   if (!SCHEDULED_BACKUP_TYPES[schedule]) return null;
+  const [hour, minute] = normalizeBackupTime(time).split(":").map(Number);
   const manilaNow = getManilaWallDate(from);
   const startOfTodayManila = Date.UTC(manilaNow.getUTCFullYear(), manilaNow.getUTCMonth(), manilaNow.getUTCDate());
   for (let addDays = 0; addDays <= 370; addDays += 1) {
-    const runAt = new Date(startOfTodayManila + addDays * 86_400_000 - MANILA_OFFSET_MS);
+    const runAt = new Date(startOfTodayManila + addDays * 86_400_000 + hour * 3_600_000 + minute * 60_000 - MANILA_OFFSET_MS);
     if (runAt.getTime() <= from.getTime()) continue;
-    if (isScheduledBackupDue(schedule, runAt)) return runAt.toISOString();
+    if (isScheduledBackupDue(schedule, runAt, time)) return runAt.toISOString();
   }
   return null;
 };
@@ -832,31 +871,67 @@ export const runScheduledBackup = async () => {
 
   const now = new Date();
   const settings = await SystemSetting.findOne({ key: "global" })
-    .select("backup_schedule last_scheduled_backup_key")
+    .select("backup_schedule backup_schedule_time last_scheduled_backup_key scheduled_backup_lock backup_history")
     .lean();
   const schedule = settings?.backup_schedule;
-  if (!settings || !SCHEDULED_BACKUP_TYPES[schedule] || !isScheduledBackupDue(schedule, now)) return;
+  const scheduleTime = normalizeBackupTime(settings?.backup_schedule_time);
+  if (!settings || !SCHEDULED_BACKUP_TYPES[schedule] || !isScheduledBackupDue(schedule, now, scheduleTime)) return;
 
   const scheduleKey = getScheduledBackupKey(schedule, now);
-  if (settings.last_scheduled_backup_key === scheduleKey) return;
+  const backupType = SCHEDULED_BACKUP_TYPES[schedule];
+  if (settings.last_scheduled_backup_key === scheduleKey) {
+    const completedForKey = (settings.backup_history || []).some((backup) => (
+      backup?.trigger === "Scheduled" &&
+      backup?.type === backupType &&
+      backup?.date &&
+      getScheduledBackupKey(schedule, new Date(backup.date)) === scheduleKey
+    ));
+    if (completedForKey) return;
+    // Older scheduler versions wrote this key before creating the backup. Clear
+    // abandoned claims so the scheduled run can be retried.
+    const [, year, month, day] = scheduleKey.match(/^[^:]+:(\d{4})-(\d{2})-(\d{2})$/) || [];
+    const dayStartUtc = Date.UTC(Number(year), Number(month) - 1, Number(day)) - MANILA_OFFSET_MS;
+    await SystemSetting.updateOne(
+      {
+        _id: settings._id,
+        last_scheduled_backup_key: scheduleKey,
+        backup_history: {
+          $not: {
+            $elemMatch: {
+              trigger: "Scheduled",
+              type: backupType,
+              date: { $gte: new Date(dayStartUtc), $lt: new Date(dayStartUtc + 86_400_000) },
+            },
+          },
+        },
+      },
+      { $unset: { last_scheduled_backup_key: 1 } },
+    );
+  }
 
+  const staleLockBefore = new Date(now.getTime() - 10 * 60_000);
   const claim = await SystemSetting.findOneAndUpdate(
     {
       _id: settings._id,
       backup_schedule: schedule,
+      last_scheduled_backup_key: { $ne: scheduleKey },
       $or: [
-        { last_scheduled_backup_key: { $exists: false } },
-        { last_scheduled_backup_key: null },
-        { last_scheduled_backup_key: { $ne: scheduleKey } },
+        { scheduled_backup_lock: { $exists: false } },
+        { scheduled_backup_lock: null },
+        { "scheduled_backup_lock.claimed_at": { $lt: staleLockBefore } },
       ],
     },
-    { $set: { last_scheduled_backup_key: scheduleKey } },
+    { $set: { scheduled_backup_lock: { key: scheduleKey, claimed_at: now } } },
     { returnDocument: "after" }
   ).lean();
   if (!claim) return;
 
   try {
-    const result = await createSystemBackup(SCHEDULED_BACKUP_TYPES[schedule], "Scheduled");
+    const result = await createSystemBackup(backupType, "Scheduled");
+    await SystemSetting.updateOne(
+      { _id: settings._id, "scheduled_backup_lock.key": scheduleKey },
+      { $set: { last_scheduled_backup_key: scheduleKey }, $unset: { scheduled_backup_lock: 1 } },
+    );
     await BackupOperationAudit.create({
       actor_role: "system",
       action: "create",
@@ -874,8 +949,8 @@ export const runScheduledBackup = async () => {
       details: `Scheduled ${schedule} backup failed: ${error.message}`,
     }).catch((auditError) => console.error("Unable to record scheduled backup failure:", auditError.message));
     await SystemSetting.updateOne(
-      { _id: settings._id, last_scheduled_backup_key: scheduleKey },
-      { $unset: { last_scheduled_backup_key: 1 }, $set: { backup_status: "Failed" } }
+      { _id: settings._id, "scheduled_backup_lock.key": scheduleKey },
+      { $unset: { scheduled_backup_lock: 1 }, $set: { backup_status: "Failed" } }
     );
     throw error;
   }

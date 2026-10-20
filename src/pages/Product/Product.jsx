@@ -33,6 +33,8 @@ import { recordActivity } from "@/lib/activityLog";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import { resolveBackendImageUrl } from "@/lib/resolveBackendImageUrl";
 import { getDefaultExtraChargeSelections, getDefaultProductLineTotal, getProductLineTotal } from "@/lib/productPricing";
+import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
+import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
 import { getProductEstimatorState } from "@/components/ProductPriceEstimator";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 
@@ -294,6 +296,24 @@ function ProductFormModal({
   deleteCatalogOption,
 }) {
   const { darkMode } = useAdminTheme();
+  const initialProductSnapshot = useRef(createUnsavedSnapshot({ ...newProduct, imageFiles: Object.keys(newProduct.imageFiles || {}) }));
+  const [confirmExit, setConfirmExit] = useState(false);
+  const productSnapshot = createUnsavedSnapshot({ ...newProduct, imageFiles: Object.keys(newProduct.imageFiles || {}) });
+  const hasUnsavedChanges = productSnapshot !== initialProductSnapshot.current;
+  const requestClose = () => {
+    if (saving || uploading) return;
+    if (hasUnsavedChanges) setConfirmExit(true);
+    else closeModal();
+  };
+  useEffect(() => {
+    const onKeyDown = (event) => {
+      if (event.key !== "Escape" || confirmExit) return;
+      event.preventDefault();
+      requestClose();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [confirmExit, hasUnsavedChanges, saving, uploading]);
   const updateField = (field, value) => setNewProduct((product) => ({ ...product, [field]: value }));
   const [extraChargesOpen, setExtraChargesOpen] = useState(() => Boolean(newProduct.extra_charges?.length));
   const [sizeLimitsOpen, setSizeLimitsOpen] = useState(() => Object.values(newProduct.size_limits || {}).some((value) => Number(value) > 0));
@@ -514,8 +534,16 @@ function ProductFormModal({
     : Number(newProduct.estimated_price_override) > 0
       ? getProductLineTotal(estimateProduct, estimateItem)
       : Number(newProduct.estimated_price || 0);
-  const baseEstimate = getProductLineTotal({ ...estimateProduct, extra_charges: [] }, estimateItem);
-  const configuredChargeTotal = Math.max(0, displayedEstimatedPrice - baseEstimate);
+  const baseEstimate = getProductLineTotal(
+    { ...estimateProduct, estimated_price_override: 0, extra_charges: [] },
+    { ...estimateItem, estimated_price_override: 0 },
+  );
+  const defaultTotalWithCharges = getProductLineTotal(
+    { ...estimateProduct, estimated_price_override: 0 },
+    { ...estimateItem, estimated_price_override: 0 },
+  );
+  const configuredChargeTotal = defaultTotalWithCharges - baseEstimate;
+  const overrideAdjustment = displayedEstimatedPrice - defaultTotalWithCharges;
   const estimatedMeasureLabel = pricingMethodValue === "blade"
     ? "Default blade count"
     : pricingMethodValue === "per_meter" ? "Length" : pricingMethodValue === "per_piece" ? "Quantity" : "Estimated area";
@@ -630,7 +658,7 @@ function ProductFormModal({
           </div>
           <button
             type="button"
-            onClick={closeModal}
+            onClick={requestClose}
             disabled={saving || uploading}
             aria-label="Close product form"
             className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border transition disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-rose-100 bg-white text-slate-500 hover:bg-rose-50 hover:text-slate-900"}`}
@@ -639,7 +667,7 @@ function ProductFormModal({
           </button>
         </header>
 
-        <div className={`min-h-0 flex-1 space-y-7 overflow-y-auto px-5 py-5 sm:px-7 sm:py-6 ${darkMode ? "bg-slate-900" : "bg-white"}`}>
+        <div className={`min-h-0 flex-1 space-y-7 overflow-y-auto px-5 py-5 !pb-[calc(6rem+env(safe-area-inset-bottom))] sm:px-7 sm:py-6 sm:!pb-6 ${darkMode ? "bg-slate-900" : "bg-white"}`}>
           {modalError && (
             <div role="alert" className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-medium text-red-800">
               {modalError}
@@ -944,8 +972,8 @@ function ProductFormModal({
               <input type="number" min="0" step="0.01" value={newProduct.estimated_price_override || ""} onChange={(event) => updateField("estimated_price_override", event.target.value)} placeholder={pricingMethodValue === "blade" ? "Lowest price per blade" : "Auto-calculated"} className={fieldClass} />
               <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                 {pricingMethodValue === "blade"
-                  ? "The default price customers see on the product card. Leave blank to show the lowest price per blade instead."
-                  : "The default price customers see on the product card. Leave blank to use the calculated price."}
+                  ? "Sets the base price for the default blade and frame selection. Required charges are added separately; optional charges are added only when selected."
+                  : "Sets the product base price. Required charges are added separately; optional charges are added only when selected."}
               </p>
             </div>
 
@@ -956,7 +984,7 @@ function ProductFormModal({
               </button>
               {extraChargesOpen && (
                 <div className={`space-y-3 border-t p-4 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
-                  <p className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Configured charges are included in customer and inspection estimates.</p>
+                  <p className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Required charges are included. Optional charges stay unchecked until the customer selects them.</p>
                   {extraCharges.map((charge, index) => (
                     <div key={`extra-charge-${index}`} className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(110px,0.8fr)_minmax(90px,0.6fr)_minmax(135px,0.8fr)_auto]">
                       <input aria-label={`Extra charge ${index + 1} name`} value={charge.name || ""} onChange={(event) => setNewProduct((product) => ({ ...product, extra_charges: product.extra_charges.map((item, itemIndex) => itemIndex === index ? { ...item, name: event.target.value } : item) }))} placeholder="Charge name" className={fieldClass} />
@@ -967,20 +995,14 @@ function ProductFormModal({
                         <option value="percentage">Percent of base</option>
                       </select>
                       <input aria-label={`Extra charge ${index + 1} amount`} type="number" min="0" step="0.01" value={charge.amount ?? ""} onChange={(event) => setNewProduct((product) => ({ ...product, extra_charges: product.extra_charges.map((item, itemIndex) => itemIndex === index ? { ...item, amount: event.target.value } : item) }))} placeholder={charge.type === "percentage" ? "10" : "0.00"} className={fieldClass} />
-                      <select aria-label={`Extra charge ${index + 1} customer selection`} value={charge.is_optional ? "optional" : "required"} onChange={(event) => setNewProduct((product) => ({ ...product, extra_charges: product.extra_charges.map((item, itemIndex) => itemIndex === index ? { ...item, is_optional: event.target.value === "optional", is_default_selected: item.is_default_selected !== false } : item) }))} className={fieldClass}>
+                      <select aria-label={`Extra charge ${index + 1} customer selection`} value={charge.is_optional ? "optional" : "required"} onChange={(event) => setNewProduct((product) => ({ ...product, extra_charges: product.extra_charges.map((item, itemIndex) => itemIndex === index ? { ...item, is_optional: event.target.value === "optional", is_default_selected: false } : item) }))} className={fieldClass}>
                         <option value="required">Required</option>
                         <option value="optional">Optional (customer choice)</option>
                       </select>
                       <button type="button" aria-label={`Remove extra charge ${index + 1}`} onClick={() => updateField("extra_charges", extraCharges.filter((_, itemIndex) => itemIndex !== index))} className={`inline-flex h-12 w-12 items-center justify-center rounded-xl border ${darkMode ? "border-slate-700 text-red-300 hover:bg-slate-800" : "border-slate-200 text-red-700 hover:bg-rose-50"}`}><Trash2 size={16} /></button>
-                      {charge.is_optional && (
-                        <label className={`sm:col-span-5 flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-slate-50"}`}>
-                          <input type="checkbox" checked={charge.is_default_selected !== false} onChange={(event) => setNewProduct((product) => ({ ...product, extra_charges: product.extra_charges.map((item, itemIndex) => itemIndex === index ? { ...item, is_default_selected: event.target.checked } : item) }))} className="mt-1 accent-red-700" />
-                          <span><span className={`block text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>Checked by default</span><span className={`mt-0.5 block text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Customers see a checkbox and can untick this charge.</span></span>
-                        </label>
-                      )}
                     </div>
                   ))}
-                  <button type="button" onClick={() => updateField("extra_charges", [...extraCharges, { name: "", type: "fixed", amount: "", is_active: true, is_optional: true, is_default_selected: true }])} className={`inline-flex items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-sm font-semibold ${darkMode ? "border-slate-600 text-red-300 hover:bg-slate-800" : "border-red-300 text-red-800 hover:bg-rose-50"}`}><Plus size={15} />Add charge</button>
+                  <button type="button" onClick={() => updateField("extra_charges", [...extraCharges, { name: "", type: "fixed", amount: "", is_active: true, is_optional: true, is_default_selected: false }])} className={`inline-flex items-center gap-2 rounded-lg border border-dashed px-3 py-2 text-sm font-semibold ${darkMode ? "border-slate-600 text-red-300 hover:bg-slate-800" : "border-red-300 text-red-800 hover:bg-rose-50"}`}><Plus size={15} />Add charge</button>
                 </div>
               )}
             </div>
@@ -1026,6 +1048,12 @@ function ProductFormModal({
                     <div className="flex items-center justify-between gap-4">
                       <span>Extra charges</span>
                       <span className={`shrink-0 text-right font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{currency(configuredChargeTotal)}</span>
+                    </div>
+                  )}
+                  {Number(newProduct.estimated_price_override) > 0 && Math.abs(overrideAdjustment) > 0.01 && (
+                    <div className="flex items-center justify-between gap-4">
+                      <span>Override adjustment</span>
+                      <span className={`shrink-0 text-right font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{currency(overrideAdjustment)}</span>
                     </div>
                   )}
                   <div className={`flex items-center justify-between gap-4 border-t pt-2 ${darkMode ? "border-red-900 text-red-300" : "border-rose-300 text-red-950"}`}>
@@ -1089,8 +1117,8 @@ function ProductFormModal({
           </section>
         </div>
 
-        <footer className={`flex shrink-0 justify-end gap-3 border-t px-5 py-3 sm:px-7 ${darkMode ? "border-slate-700 bg-slate-800" : "border-rose-100 bg-[#fff8f7]"}`}>
-          <button type="button" onClick={closeModal} disabled={saving || uploading} className={`rounded-xl border px-5 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:bg-slate-700" : "border-rose-200 bg-white text-slate-700 hover:bg-rose-50"}`}>
+        <footer className={`sticky bottom-0 z-20 flex shrink-0 justify-end gap-3 border-t px-5 py-3 sm:px-7 lg:static lg:z-auto ${darkMode ? "border-slate-700 bg-slate-800" : "border-rose-100 bg-[#fff8f7]"}`}>
+          <button type="button" onClick={requestClose} disabled={saving || uploading} className={`rounded-xl border px-5 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:bg-slate-700" : "border-rose-200 bg-white text-slate-700 hover:bg-rose-50"}`}>
             Cancel
           </button>
           <button type="button" onClick={saveProduct} disabled={saving || uploading} className={`inline-flex items-center gap-2 rounded-xl px-5 py-2.5 text-sm font-bold text-white transition disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "bg-red-700 hover:bg-red-600" : "bg-red-900 hover:bg-red-800"}`}>
@@ -1099,6 +1127,7 @@ function ProductFormModal({
           </button>
         </footer>
       </section>
+      <UnsavedChangesDialog open={confirmExit} darkMode={darkMode} onStay={() => setConfirmExit(false)} onDiscard={closeModal} />
     </div>
   );
 }
@@ -2202,7 +2231,7 @@ function Products() {
           amount: Number(charge.amount) || 0,
           is_active: charge.is_active !== false,
           is_optional: Boolean(charge.is_optional),
-          is_default_selected: charge.is_default_selected !== false,
+          is_default_selected: false,
         })),
         size_limits: {
           min_width: Number(newProduct.size_limits?.min_width) || 0,
@@ -2336,13 +2365,13 @@ function Products() {
 
         <Navbar />
 
-        <main className={`min-h-0 flex-1 overflow-y-auto px-4 py-3 sm:px-6 ${darkMode ? "text-slate-100" : ""}`}>
+        <main className={`min-h-0 flex-1 overflow-y-auto px-4 py-3 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:px-6 sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] lg:!pb-24 ${darkMode ? "text-slate-100" : ""}`}>
 
           <AdminPageHeader
             title="Product Management"
             description="Glass & Aluminum Business · Admin Panel"
             className={`!rounded-2xl !px-5 !py-4 shadow-[0_4px_18px_rgba(15,23,42,0.06)] ${darkMode ? "!bg-slate-900 !text-white" : "!bg-none bg-white"}`}
-            statsClassName="grid-cols-4 gap-2"
+            statsClassName="grid-cols-1 lg:grid-cols-4 gap-2"
             stats={[
               { label: "Total Products", value: products.length, color: "text-red-800" },
               { label: "Active", value: products.filter((product) => product.is_active).length, color: "text-emerald-600" },
@@ -2440,8 +2469,7 @@ function Products() {
                       const pricingMethod = product.pricing_method || PRICING_METHOD[product.product_name] || "";
                       const hasConfiguredBladePricing = pricingMethod === "blade" && (product.blade_glass_types?.length || product.blade_frame_types?.length);
                       const hasEstimatedCostOverride = pricingMethod === "fixed"
-                        && Number(product.estimated_price_override) > 0
-                        && !(Number(product.base_price) > 0 || Number(product.unit_price) > 0);
+                        && Number(product.estimated_price_override) > 0;
                       const unitPriceLabel = pricingMethod === "sqft" && productAreaSqft > 0 && estimatedCost > 0
                         ? `₱${(Number(product.price_per_sqft) || estimatedCost / productAreaSqft).toLocaleString("en-PH", { maximumFractionDigits: 2 })} / sq ft`
                         : getProductPriceLabel(product);

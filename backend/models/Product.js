@@ -6,7 +6,7 @@ const ExtraChargeSchema = new mongoose.Schema({
   amount: { type: Number, min: 0, default: 0 },
   is_active: { type: Boolean, default: true },
   is_optional: { type: Boolean, default: false },
-  is_default_selected: { type: Boolean, default: true },
+  is_default_selected: { type: Boolean, default: false },
 }, { _id: false });
 
 const SizeLimitsSchema = new mongoose.Schema({

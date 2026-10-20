@@ -22,6 +22,31 @@ const parseEmailAddress = (value, fallbackName = "ACGC Services") => {
   };
 };
 
+const resolveSenderAddress = (mailOptions) => {
+  const brevoSender = process.env.BREVO_SENDER_EMAIL?.trim();
+  const emailFrom = process.env.EMAIL_FROM?.trim();
+  const configuredSender = brevoSender || emailFrom;
+  const isProduction = process.env.NODE_ENV === "production" || process.env.VERCEL === "1";
+  if (isProduction && !configuredSender) {
+    throw new Error("Email sender is not configured. Set EMAIL_FROM to a verified sender address; for Brevo, set BREVO_SENDER_EMAIL to that same verified address.");
+  }
+
+  const sender = configuredSender || mailOptions.from;
+  if (isProduction) {
+    const parsedSender = parseEmailAddress(sender);
+    const domain = parsedSender.email.split("@").at(-1)?.toLowerCase();
+    const emailFromDomain = parseEmailAddress(emailFrom).email.split("@").at(-1)?.toLowerCase();
+    const brevoSenderDomain = parseEmailAddress(brevoSender).email.split("@").at(-1)?.toLowerCase();
+    if (!domain || domain === "localhost" || domain.endsWith(".local") || domain === "example.com") {
+      throw new Error("Production email requires a real, verified sender domain. Configure EMAIL_FROM and the matching provider sender.");
+    }
+    if (emailFromDomain && brevoSenderDomain && emailFromDomain !== brevoSenderDomain) {
+      throw new Error("EMAIL_FROM and BREVO_SENDER_EMAIL must use the same domain so sender authentication can align.");
+    }
+  }
+  return sender;
+};
+
 const normalizeRecipients = (value) => {
   if (Array.isArray(value)) {
     return value.flatMap(normalizeRecipients);
@@ -37,20 +62,26 @@ const normalizeAttachment = async (attachment) => {
   if (!attachment) return null;
 
   const name = attachment.filename || attachment.name || "attachment";
+  const contentId = attachment.cid || attachment.contentId;
+  const contentType = attachment.contentType || attachment.content_type;
+  const inlineMetadata = {
+    ...(contentId ? { contentId } : {}),
+    ...(contentType ? { contentType } : {}),
+  };
   if (attachment.href || attachment.url) {
-    return { name, url: attachment.href || attachment.url };
+    return { name, url: attachment.href || attachment.url, ...inlineMetadata };
   }
 
   if (attachment.path) {
     const content = await fs.readFile(attachment.path);
-    return { name, content: content.toString("base64") };
+    return { name, content: content.toString("base64"), ...inlineMetadata };
   }
 
   if (attachment.content) {
     const content = Buffer.isBuffer(attachment.content)
       ? attachment.content
       : Buffer.from(String(attachment.content));
-    return { name, content: content.toString("base64") };
+    return { name, content: content.toString("base64"), ...inlineMetadata };
   }
 
   return null;
@@ -158,7 +189,7 @@ const getSmtpConfig = () => {
       pass: smtpPassword.replace(/\s+/g, ""),
     },
     tls: {
-      rejectUnauthorized: false,
+      rejectUnauthorized: true,
     },
   };
 };
@@ -181,7 +212,7 @@ const getBrevoSmtpConfig = () => {
       pass: key.replace(/\s+/g, ""),
     },
     tls: {
-      rejectUnauthorized: false,
+      rejectUnauthorized: true,
     },
   };
 };
@@ -270,11 +301,12 @@ const hasBrevoSmtpCredentials = () =>
   );
 
 export const sendMail = async (mailOptions) => {
+  const normalizedMailOptions = { ...mailOptions, from: resolveSenderAddress(mailOptions) };
   let lastProviderError = null;
 
   if (process.env.BREVO_API_KEY?.trim()) {
     try {
-      return await sendBrevoMail(mailOptions);
+      return await sendBrevoMail(normalizedMailOptions);
     } catch (error) {
       lastProviderError = error;
       console.warn("Brevo API send failed; trying SMTP providers.", {
@@ -286,7 +318,7 @@ export const sendMail = async (mailOptions) => {
 
   if (hasBrevoSmtpCredentials() && !brevoSmtpAuthenticationFailed) {
     try {
-      return await sendSmtpMail(mailOptions);
+      return await sendSmtpMail(normalizedMailOptions);
     } catch (error) {
       lastProviderError = error;
       if (error.code === "EAUTH") {
@@ -304,7 +336,7 @@ export const sendMail = async (mailOptions) => {
 
   if (hasGenericSmtpCredentials()) {
     try {
-      return await sendGenericSmtpMail(mailOptions);
+      return await sendGenericSmtpMail(normalizedMailOptions);
     } catch (error) {
       lastProviderError = error;
     }
@@ -324,7 +356,7 @@ export const sendMail = async (mailOptions) => {
         },
       });
       isTestAccount = true;
-      return await sendSmtpMail(mailOptions);
+      return await sendSmtpMail(normalizedMailOptions);
     } catch (error) {
       lastProviderError = error;
     }
@@ -335,5 +367,5 @@ export const sendMail = async (mailOptions) => {
     throw lastProviderError;
   }
 
-  return await sendSmtpMail(mailOptions);
+  return await sendSmtpMail(normalizedMailOptions);
 };

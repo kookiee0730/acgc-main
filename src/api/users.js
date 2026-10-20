@@ -18,6 +18,12 @@ export const updateAdminUserAccess = (userId, payload) =>
     body: JSON.stringify(payload),
   });
 
+export const unrestrictCustomerOnlineOrdering = (userId) =>
+  apiFetch(`/auth/users/${userId}/unrestrict-online-ordering`, {
+    method: "PATCH",
+    body: JSON.stringify({}),
+  });
+
 export const getSystemSettings = () => apiFetch("/auth/system-settings");
 export const getPublicCustomerPermissions = () => apiFetch("/auth/customer-permissions");
 export const getCustomerPaymentContact = () => apiFetch("/auth/customer-payment-contact", { cache: "no-store" });
@@ -36,6 +42,24 @@ export const createSystemBackup = (type) =>
 
 export const setBackupRecoveryPassword = (payload) =>
   apiFetch("/auth/system-settings/backups/recovery-password", {
+    method: "PUT",
+    body: JSON.stringify(payload),
+  });
+
+export const requestBackupRecoveryPasswordReset = () =>
+  apiFetch("/auth/system-settings/backups/recovery-password/forgot", {
+    method: "POST",
+    body: JSON.stringify({}),
+  });
+
+export const verifyBackupRecoveryPasswordResetCode = (code) =>
+  apiFetch("/auth/system-settings/backups/recovery-password/forgot/verify", {
+    method: "POST",
+    body: JSON.stringify({ code }),
+  });
+
+export const resetBackupRecoveryPassword = (payload) =>
+  apiFetch("/auth/system-settings/backups/recovery-password/forgot", {
     method: "PUT",
     body: JSON.stringify(payload),
   });

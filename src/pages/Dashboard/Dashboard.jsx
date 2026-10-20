@@ -138,6 +138,7 @@ const getOrderWarrantyRecords = (order) => {
 
 function Dashboard() {
   const { user } = useAuth();
+  const hidePaymentAmounts = user?.role === "skilled_worker" && user?.staff_access?.hide_payment_amounts === true;
   const { darkMode } = useAdminTheme();
   const location = useLocation();
   const highlightedNotificationRecordId = useNotificationHighlight(location);
@@ -295,11 +296,20 @@ function Dashboard() {
       requestInFlight = true;
       if (showLoading) setOrdersLoading(true);
       try {
-        const response = await getAdminOrders({ module: "dashboard" });
-        if (active) setOrders(response.orders || []);
+        const allOrders = [];
+        let page = 1;
+        let totalPages = 1;
+        do {
+          const response = await getAdminOrders({ module: "dashboard", limit: 100, ...(page > 1 ? { page } : {}) });
+          allOrders.push(...(response.orders || []));
+          totalPages = response.pagination?.totalPages || 1;
+          page += 1;
+        } while (active && page <= totalPages);
+        if (active) {
+          setOrders(allOrders);
+        }
       } catch (error) {
         console.error("Failed to load orders:", error);
-        if (active) setOrders([]);
       } finally {
         if (active && showLoading) setOrdersLoading(false);
         requestInFlight = false;
@@ -549,7 +559,7 @@ function Dashboard() {
       <div className="flex-1 min-h-0 flex flex-col">
         <Navbar />
 
-        <main className="flex-1 min-h-0 overflow-y-auto p-6">
+        <main className="flex-1 min-h-0 overflow-y-auto p-6 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] lg:!pb-24">
           {toast.open && (
             <div className="fixed right-6 top-6 z-50 w-full max-w-sm rounded-2xl border px-4 py-3 shadow-xl transition duration-200 ease-out bg-white"
               role="status"
@@ -569,7 +579,7 @@ function Dashboard() {
               title="Dashboard"
               description="Manage inspections, projects, warranties and products from one administrative workspace."
               className="h-full min-h-[280px]"
-              statsClassName="grid-cols-3 gap-2 sm:gap-3"
+              statsClassName="grid-cols-1 lg:grid-cols-3 gap-2 sm:gap-3"
               compactStats
               statsBelow
               stats={[
@@ -771,11 +781,14 @@ function Dashboard() {
                             <td className="px-5 py-4"><ProfileAvatar name={customerName} email={order.customer?.email || order.customer_email || ""} compact /></td>
                             <td className="px-5 py-4 font-bold text-gray-900">{productName}</td>
                             <td className="px-5 py-4 text-gray-700">{formattedDate}</td>
-                            <td className="px-5 py-4 font-semibold text-gray-900">{formatCurrency(getFinalProjectCost(order))}</td>
+                            <td className="px-5 py-4 font-semibold text-gray-900">{hidePaymentAmounts ? "••••••" : formatCurrency(getFinalProjectCost(order))}</td>
                             <td className="px-5 py-4 text-right">
-                              <span className={`inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-semibold ${badgeClasses}`}>
-                                {statusText}
-                              </span>
+                              <div className="flex flex-wrap items-center justify-end gap-1.5">
+                                {order.is_rush_order && <span className="inline-flex items-center rounded-full bg-amber-100 px-2.5 py-1 text-[10px] font-black uppercase tracking-wide text-amber-800">Rush Order</span>}
+                                <span className={`inline-flex items-center rounded-lg px-3 py-1.5 text-xs font-semibold ${badgeClasses}`}>
+                                  {statusText}
+                                </span>
+                              </div>
                             </td>
                           </tr>
                         );
@@ -840,9 +853,12 @@ function Dashboard() {
                             <p className="truncate text-sm font-bold text-gray-900">{productName}</p>
                             <p className="mt-1 text-xs text-gray-500">{customerName}</p>
                           </div>
-                          <span className={`inline-flex items-center rounded-lg px-2.5 py-1 text-[10px] font-semibold ${badgeClasses}`}>
-                            {statusText}
-                          </span>
+                          <div className="flex flex-col items-end gap-1">
+                            {order.is_rush_order && <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-1 text-[9px] font-black uppercase tracking-wide text-amber-800">Rush Order</span>}
+                            <span className={`inline-flex items-center rounded-lg px-2.5 py-1 text-[10px] font-semibold ${badgeClasses}`}>
+                              {statusText}
+                            </span>
+                          </div>
                         </div>
                         <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600">
                           <div>
@@ -851,7 +867,7 @@ function Dashboard() {
                           </div>
                           <div>
                             <p className="text-[10px] uppercase tracking-wide text-gray-400">Amount</p>
-                            <p className="mt-1 font-semibold text-gray-900">{formatCurrency(getFinalProjectCost(order))}</p>
+                            <p className="mt-1 font-semibold text-gray-900">{hidePaymentAmounts ? "••••••" : formatCurrency(getFinalProjectCost(order))}</p>
                           </div>
                         </div>
                       </div>
@@ -902,7 +918,7 @@ function Dashboard() {
           </section>
 
           <div className="mt-6 grid grid-cols-1 gap-6 xl:grid-cols-2">
-            <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <section className="flex h-full flex-col rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">Active Projects</h2>
@@ -912,7 +928,7 @@ function Dashboard() {
                 </div>
               </div>
 
-              <div className="mt-5 space-y-3">
+              <div className="mt-5 flex-1 space-y-3">
                 {activeProjects.length > 0 ? activeProjects.map((order) => {
                   const customerName = order.customer
                     ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() || order.customer.email || "Customer"
@@ -945,7 +961,7 @@ function Dashboard() {
                 )}
               </div>
               {activeProjectsCount > 0 && (
-                <div className="mt-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:flex-row">
+                <div className="mt-auto flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:flex-row">
                   <div className="flex flex-wrap items-center justify-center gap-2" role="navigation" aria-label="Active projects pagination">
                     <button
                       type="button"
@@ -983,7 +999,7 @@ function Dashboard() {
               )}
             </section>
 
-            <section className="rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
+            <section className="flex h-full flex-col rounded-3xl border border-gray-200 bg-white p-6 shadow-sm">
               <div className="flex items-start justify-between gap-4">
                 <div>
                   <h2 className="text-xl font-bold text-gray-900">Active Warranties</h2>
@@ -993,7 +1009,7 @@ function Dashboard() {
                 </div>
               </div>
 
-              <div className="mt-5 space-y-3">
+              <div className="mt-5 flex-1 space-y-3">
                 {warrantiesToDisplay.length > 0 ? warrantiesToDisplay.map(({ key, order, item, period }) => {
                   const customerName = order.customer
                     ? `${order.customer.first_name || ""} ${order.customer.last_name || ""}`.trim() || order.customer.email || "Customer"
@@ -1025,7 +1041,7 @@ function Dashboard() {
                 )}
               </div>
               {allWarrantiesToDisplay.length > 0 && (
-                <div className="mt-4 flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:flex-row">
+                <div className="mt-auto flex flex-col items-center justify-center gap-3 rounded-xl border border-gray-200 bg-gray-50 p-3 sm:flex-row">
                   <div className="flex flex-wrap items-center justify-center gap-2" role="navigation" aria-label="Active warranties pagination">
                     <button
                       type="button"
@@ -1071,6 +1087,7 @@ function Dashboard() {
         order={selectedOrder}
         scrollToWarranty={scrollToWarrantyOnOpen}
         darkMode={darkMode}
+        hidePaymentAmounts={hidePaymentAmounts}
         onClose={() => {
           setSelectedOrder(null);
           setScrollToWarrantyOnOpen(false);

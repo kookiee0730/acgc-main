@@ -44,7 +44,7 @@ const computeWarrantyExpiryDate = (start, periodValue) => {
   return expiry;
 };
 
-function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarranty = false, darkMode = false }) {
+function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarranty = false, darkMode = false, hidePaymentAmounts = false }) {
   const contentRef = useRef(null);
   const warrantyHeadingRef = useRef(null);
 
@@ -206,7 +206,7 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                 const itemName = item.name || item.product_name || `Item ${index + 1}`;
                 return <div key={`${itemName}-${index}`} className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[13px]">
                   <div className="font-semibold text-slate-800">{itemName}</div>
-                  <div className="mt-1 text-slate-600">Size: {item.width || "—"}W x {item.height || "—"}H | Qty: {item.quantity || 1} | Base Rate: ₱{Number(item.unit_price || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/sqft</div>
+                  <div className="mt-1 text-slate-600">Size: {item.width || "—"}W x {item.height || "—"}H | Qty: {item.quantity || 1} | Base Rate: {hidePaymentAmounts ? "••••••" : `₱${Number(item.unit_price || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}/sqft`}</div>
                 </div>;
               })}
             </div> : <div className="rounded-md border border-slate-200 bg-slate-50 px-3 py-2 text-[13px] text-slate-600">No item measurements available.</div>}
@@ -215,9 +215,9 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
           <section className="mt-3 rounded-md border border-slate-200 bg-white p-3">
             <h3 className="mb-3 border-b border-slate-200 pb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">PAYMENT BREAKDOWN</h3>
             <div className="space-y-2 text-[13px]">
-              <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Total Project Amount</span><span className="font-semibold text-slate-800">₱{paymentSummary.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
-              <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Amount Paid</span><span className="font-semibold text-slate-800">₱{paymentSummary.paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
-              <div className="flex items-center justify-between gap-4"><span className="text-slate-600">Remaining Balance</span><span className="font-bold text-red-600">₱{paymentSummary.remainingAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span></div>
+              <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Total Project Amount</span><span className="font-semibold text-slate-800">{hidePaymentAmounts ? "••••••" : `₱${paymentSummary.totalAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></div>
+              <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Amount Paid</span><span className="font-semibold text-slate-800">{hidePaymentAmounts ? "••••••" : `₱${paymentSummary.paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></div>
+              <div className="flex items-center justify-between gap-4"><span className="text-slate-600">Remaining Balance</span><span className="font-bold text-red-600">{hidePaymentAmounts ? "••••••" : `₱${paymentSummary.remainingAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></div>
               <div className="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100"><div className="h-full rounded-full bg-emerald-500" style={{ width: `${paymentSummary.totalAmount > 0 ? Math.min((paymentSummary.paidAmount / paymentSummary.totalAmount) * 100, 100) : 0}%` }} /></div>
             </div>
           </section>

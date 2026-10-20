@@ -43,6 +43,7 @@ import {
   ArrowUpRight,
   X,
   ClipboardList,
+  CalendarDays,
   CreditCard,
   Trash2,
   Paperclip,
@@ -70,6 +71,8 @@ import {
 } from "@/api/orders";
 import { uploadFiles } from "@/api/uploads";
 import ContractModal from "../../components/ContractModal";
+import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
+import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
 import AboutBusinessContent from "@/components/AboutBusinessContent";
 import FilterDropdown from "@/components/FilterDropdown";
 import OtpCodeInput from "@/components/OtpCodeInput";
@@ -302,6 +305,9 @@ function CustomerDashboard() {
     return API_HOST ? `${API_HOST}/${url}` : url;
   };
   const { user, loading, updateProfile, refreshUser, logout } = useAuth();
+  const onlineOrderCooldownUntil = user?.online_order_cooldown_until ? new Date(user.online_order_cooldown_until) : null;
+  const onlineOrderCooldownActive = Boolean(onlineOrderCooldownUntil && onlineOrderCooldownUntil.getTime() > Date.now());
+  const willTriggerCancellationCooldown = (Number(user?.customer_cancellation_count || 0) + 1) % 3 === 0;
   const customerPermissions = useCustomerPermissions();
   const orderOwnerId = user?.id || user?._id;
   const navigate = useNavigate();
@@ -368,6 +374,36 @@ function CustomerDashboard() {
   });
   const [orders, setOrders] = useState([]);
   const [customerPaymentContactPhone, setCustomerPaymentContactPhone] = useState("");
+  const onlineOrderCooldownMessage = onlineOrderCooldownActive
+    ? `Online ordering is restricted for 7 days, until ${formatDateToMMMDDYYYY(onlineOrderCooldownUntil)}. Please visit our shop or contact us by phone${customerPaymentContactPhone ? `: ${customerPaymentContactPhone}` : ""} to place an order during this period.`
+    : "";
+  const withAdminContactPhone = (message) => {
+    const text = String(message || "").trim();
+    return customerPaymentContactPhone && !text.includes(customerPaymentContactPhone)
+      ? `${text} Contact the shop at ${customerPaymentContactPhone} during this period.`
+      : text;
+  };
+  const renderAdminContactMessage = (message) => {
+    const text = String(message || "");
+    if (!customerPaymentContactPhone || !text.includes(customerPaymentContactPhone)) return text;
+
+    const [before, ...remaining] = text.split(customerPaymentContactPhone);
+    const after = remaining.join(customerPaymentContactPhone);
+    const telephoneNumber = customerPaymentContactPhone.replace(/[^\d+]/g, "");
+    return (
+      <>
+        {before}
+        <a
+          href={`tel:${telephoneNumber}`}
+          className="whitespace-nowrap font-bold no-underline"
+          aria-label={`Call ${customerPaymentContactPhone}`}
+        >
+          <Phone size={14} className="mr-1 inline-block align-[-2px]" aria-hidden="true" /><strong className="underline underline-offset-2">{customerPaymentContactPhone}</strong>
+        </a>
+        {after}
+      </>
+    );
+  };
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [cartItems, setCartItems] = useState([]);
   const [cartPricingProducts, setCartPricingProducts] = useState([]);
@@ -511,9 +547,85 @@ function CustomerDashboard() {
   const [orderNowProduct, setOrderNowProduct] = useState(null);
   const [orderNowQuantity, setOrderNowQuantity] = useState(1);
   const [orderNowExtraCharges, setOrderNowExtraCharges] = useState([]);
+  const [showCustomerExitConfirm, setShowCustomerExitConfirm] = useState(false);
+  const pendingCustomerExitRef = useRef(null);
+  const [cancelRequestModal, setCancelRequestModal] = useState({ open: false, order: null });
+  const [cancelRequestReason, setCancelRequestReason] = useState("");
+  const [cancelRequestReasonError, setCancelRequestReasonError] = useState("");
+  const estimateFormBaselineRef = useRef("");
+  const deliveryFormBaselineRef = useRef("");
+  const orderNowBaselineRef = useRef("");
+  const customerReviewBaselineRef = useRef("");
+  const batchOrderBaselineRef = useRef("");
+  const paymentProofBaselineRef = useRef("");
+  const productDetailsBaselineRef = useRef("");
   const [showOrderSuccessModal, setShowOrderSuccessModal] = useState(false);
   const [orderSuccessData, setOrderSuccessData] = useState(null);
-  const [cancelRequestModal, setCancelRequestModal] = useState({ open: false, order: null });
+
+  useEffect(() => {
+    if (showCartDecisionModal) estimateFormBaselineRef.current = createUnsavedSnapshot(estimateForm);
+  }, [showCartDecisionModal]);
+  useEffect(() => {
+    if (showDeliveryConfirmModal) deliveryFormBaselineRef.current = createUnsavedSnapshot({ form: deliveryConfirmForm, notes: deliveryConfirmNotes });
+  }, [showDeliveryConfirmModal]);
+  useEffect(() => {
+    if (showOrderNowModal) orderNowBaselineRef.current = createUnsavedSnapshot({ quantity: orderNowQuantity, extraCharges: orderNowExtraCharges });
+  }, [showOrderNowModal]);
+  useEffect(() => {
+    if (showCustomerReviewModal) customerReviewBaselineRef.current = createUnsavedSnapshot({ form: orderReviewForm, topics: selectedReviewTopics });
+  }, [showCustomerReviewModal]);
+  useEffect(() => {
+    if (showBatchOrderModal) batchOrderBaselineRef.current = createUnsavedSnapshot(batchOrderForm);
+  }, [showBatchOrderModal]);
+
+  const requestCustomerExit = (hasChanges, onDiscard) => {
+    if (!hasChanges) {
+      onDiscard();
+      return;
+    }
+    pendingCustomerExitRef.current = onDiscard;
+    setShowCustomerExitConfirm(true);
+  };
+  const discardCustomerChanges = () => {
+    const discard = pendingCustomerExitRef.current;
+    pendingCustomerExitRef.current = null;
+    setShowCustomerExitConfirm(false);
+    discard?.();
+  };
+
+  useEffect(() => {
+    const handleEscape = (event) => {
+      if (event.key !== "Escape" || showCustomerExitConfirm) return;
+      if (showCustomerReviewModal) {
+        event.preventDefault();
+        requestCloseCustomerReviewModal();
+      } else if (showDeliveryConfirmModal) {
+        event.preventDefault();
+        handleCancelDeliveryConfirm();
+      } else if (showOrderNowModal) {
+        event.preventDefault();
+        requestCloseOrderNowModal();
+      } else if (showCartDecisionModal) {
+        event.preventDefault();
+        requestCloseCartDecisionModal();
+      } else if (cancelRequestModal.open) {
+        event.preventDefault();
+        requestCloseCancelRequest();
+      } else if (showBatchOrderModal) {
+        event.preventDefault();
+        requestCloseBatchOrder();
+      } else if (paymentProofOpenOrderId) {
+        event.preventDefault();
+        requestClosePaymentProofForm();
+      } else if (selectedProduct) {
+        event.preventDefault();
+        requestCloseProductModal();
+      }
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [showCustomerExitConfirm, showCustomerReviewModal, showDeliveryConfirmModal, showOrderNowModal, showCartDecisionModal, showBatchOrderModal, cancelRequestModal.open, cancelRequestReason, paymentProofOpenOrderId, paymentProofForm, selectedProduct, productEstimatorForm, orderReviewForm, selectedReviewTopics, deliveryConfirmForm, deliveryConfirmNotes, orderNowQuantity, orderNowExtraCharges, estimateForm, batchOrderForm]);
+  const [cancelRequestSubmitting, setCancelRequestSubmitting] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState(null);
   const [highlightedOrderId, setHighlightedOrderId] = useState(null);
   const validOrderFilters = ["all", "order", "review", "completed", "reviewed", "cancel"];
@@ -1374,6 +1486,11 @@ function CustomerDashboard() {
     setGeneratedReviewSuggestions({});
   };
 
+  const requestCloseCustomerReviewModal = () => requestCustomerExit(
+    createUnsavedSnapshot({ form: orderReviewForm, topics: selectedReviewTopics }) !== customerReviewBaselineRef.current,
+    closeCustomerReviewModal,
+  );
+
   const openProductReviewModal = () => {
     if (!canUploadFeedback) {
       showPermissionNotice("Feedback access is disabled for your account.");
@@ -1896,7 +2013,7 @@ function CustomerDashboard() {
   const parseProductDimensionText = (value) => {
     if (!value) return {};
     const text = String(value);
-    const match = text.match(/(\d+(?:\.\d+)?)\s*(?:x|×|by)\s*(\d+(?:\.\d+)?)/i);
+    const match = text.match(/(\d+(?:\.\d+)?)\s*(?:x|Ã—|by)\s*(\d+(?:\.\d+)?)/i);
     const unitMatch = text.match(/\b(cm|mm|m|ft|in|inch|inches|feet|meter|meters)\b|"/i);
     const unitMap = {
       inch: "in",
@@ -1977,8 +2094,8 @@ function CustomerDashboard() {
       const quantity = Math.max(1, Number(dimensions.quantity ?? itemOrDimensions?.quantity) || 1);
       return `${quantity} piece${quantity === 1 ? "" : "s"}`;
     }
-    if (!areOrderItemDimensionsValid(dimensions)) return "—";
-    return `${dimensions.width} ${dimensions.unit} × ${dimensions.height} ${dimensions.unit}`;
+    if (!areOrderItemDimensionsValid(dimensions)) return "â€”";
+    return `${dimensions.width} ${dimensions.unit} Ã— ${dimensions.height} ${dimensions.unit}`;
   };
 
   const buildCustomerOrderItem = (product, options = {}) => {
@@ -2472,6 +2589,10 @@ function CustomerDashboard() {
   };
 
   const openCartDecisionModal = (product, step = "choice") => {
+    if (onlineOrderCooldownActive && step !== "estimate") {
+      showPermissionNotice(onlineOrderCooldownMessage);
+      return;
+    }
     if (step === "estimate" && !canEstimatePricing) {
       showPermissionNotice("Pricing estimates are disabled for your account.");
       return;
@@ -2496,6 +2617,11 @@ function CustomerDashboard() {
     setCartActionError("");
     setEstimateFlowType(null);
   };
+
+  const requestCloseCartDecisionModal = () => requestCustomerExit(
+    createUnsavedSnapshot(estimateForm) !== estimateFormBaselineRef.current,
+    closeCartDecisionModal,
+  );
 
   const handleCartDecisionNoAdd = async () => {
     if (!cartDecisionProduct) return;
@@ -2553,6 +2679,10 @@ function CustomerDashboard() {
   };
 
   const openOrderReviewModal = () => {
+    if (onlineOrderCooldownActive) {
+      setCartActionError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!canRequestOrders) {
       setCartActionError("Order requests are disabled for your account.");
       return;
@@ -2580,6 +2710,10 @@ function CustomerDashboard() {
   };
 
   const handleEstimateAfterEstimation = async () => {
+    if (onlineOrderCooldownActive) {
+      setCartActionError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!canRequestOrders) {
       setCartActionError("Your estimate is ready, but order requests are disabled for your account.");
       return;
@@ -2647,6 +2781,10 @@ function CustomerDashboard() {
   };
 
   const handleConfirmAndContinue = async () => {
+    if (onlineOrderCooldownActive) {
+      setDeliveryConfirmError(onlineOrderCooldownMessage);
+      return;
+    }
     if (deliveryConfirmMode === "estimate") {
       const bladeCountError = getProductEstimatorState(cartDecisionProduct, estimateForm).bladeCountError;
       if (bladeCountError) {
@@ -2693,6 +2831,10 @@ function CustomerDashboard() {
   };
 
   const handleSubmitOrderRequest = async () => {
+    if (onlineOrderCooldownUntil && onlineOrderCooldownUntil.getTime() > Date.now()) {
+      setCartActionError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!orderReviewAgreed) {
       setCartActionError("Please confirm the payment policy before submitting.");
       return;
@@ -2956,13 +3098,16 @@ function CustomerDashboard() {
     setSelectedProduct(product);
     setSelectedProductImageIndex(0);
     setCartActionError("");
-    setProductEstimatorForm({
-      unit: product?.custom_frame_size_unit || "in",
-      width: "0",
-      height: "0",
+    const defaultDimensions = getProductDefaultDimensions(product, 1);
+    const initialEstimatorForm = {
+      unit: defaultDimensions.unit || product?.custom_frame_size_unit || "in",
+      width: defaultDimensions.width > 0 ? String(defaultDimensions.width) : "0",
+      height: defaultDimensions.height > 0 ? String(defaultDimensions.height) : "0",
       extra_charges: getDefaultExtraChargeSelections(product),
       ...getDefaultBladeSelections(product),
-    });
+    };
+    setProductEstimatorForm(initialEstimatorForm);
+    productDetailsBaselineRef.current = createUnsavedSnapshot(initialEstimatorForm);
     setShowAboutProduct(false);
   };
 
@@ -2977,7 +3122,16 @@ function CustomerDashboard() {
     setShowAboutProduct(false);
   };
 
+  const requestCloseProductModal = () => requestCustomerExit(
+    createUnsavedSnapshot(productEstimatorForm) !== productDetailsBaselineRef.current,
+    closeProductModal,
+  );
+
   const openOrderNowModal = (product) => {
+    if (onlineOrderCooldownActive) {
+      toast.error(onlineOrderCooldownMessage);
+      return;
+    }
     if (!canRequestOrders) {
       showPermissionNotice("Order requests are disabled for your account.");
       return;
@@ -3004,6 +3158,10 @@ function CustomerDashboard() {
   };
 
   const openEstimatedProductOrder = (product) => {
+    if (onlineOrderCooldownActive) {
+      toast.error(onlineOrderCooldownMessage);
+      return;
+    }
     if (!canRequestOrders) {
       showPermissionNotice("Order requests are disabled for your account.");
       return;
@@ -3040,11 +3198,20 @@ function CustomerDashboard() {
     setCartActionError("");
   };
 
+  const requestCloseOrderNowModal = () => requestCustomerExit(
+    createUnsavedSnapshot({ quantity: orderNowQuantity, extraCharges: orderNowExtraCharges }) !== orderNowBaselineRef.current,
+    closeOrderNowModal,
+  );
+
   const handleOrderNowQuantityChange = (delta) => {
     setOrderNowQuantity((prev) => Math.max(1, prev + delta));
   };
 
   const openOrderNowReviewModal = () => {
+    if (onlineOrderCooldownActive) {
+      setCartActionError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!orderNowProduct) return;
     setDeliveryConfirmMode("orderNow");
     setDeliveryConfirmForm({
@@ -3060,6 +3227,10 @@ function CustomerDashboard() {
   };
 
   const handleSubmitOrderNow = async () => {
+    if (onlineOrderCooldownUntil && onlineOrderCooldownUntil.getTime() > Date.now()) {
+      setCartActionError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!orderNowProduct) return;
 
     const quantity = Math.max(1, Number(orderNowQuantity) || 1);
@@ -3116,7 +3287,7 @@ function CustomerDashboard() {
     }));
   };
 
-  const handleCancelDeliveryConfirm = () => {
+  const performCancelDeliveryConfirm = () => {
     setDeliveryConfirmError("");
     setShowDeliveryConfirmModal(false);
     if (pendingLandingActionIdRef.current) {
@@ -3142,6 +3313,11 @@ function CustomerDashboard() {
       setCartDecisionProduct(null);
     }
   };
+
+  const handleCancelDeliveryConfirm = () => requestCustomerExit(
+    createUnsavedSnapshot({ form: deliveryConfirmForm, notes: deliveryConfirmNotes }) !== deliveryFormBaselineRef.current,
+    performCancelDeliveryConfirm,
+  );
 
   const handleTrackingSubmit = async () => {
     if (!canTrackProducts) {
@@ -3449,6 +3625,10 @@ function CustomerDashboard() {
   };
 
   const openBatchOrderModal = () => {
+    if (onlineOrderCooldownActive) {
+      setCheckoutError(onlineOrderCooldownMessage);
+      return;
+    }
     if (cartItems.length === 0) {
       setCheckoutError("Your cart is empty.");
       return;
@@ -3480,18 +3660,41 @@ function CustomerDashboard() {
     setBatchOrderAgreed(false);
     setActiveTab("cart");
   };
+  const requestCloseBatchOrder = () => requestCustomerExit(
+    createUnsavedSnapshot(batchOrderForm) !== batchOrderBaselineRef.current,
+    closeBatchOrderModal,
+  );
 
   const handleOpenPaymentProofForm = (orderId) => {
     setPaymentProofOpenOrderId(orderId);
     setPaymentProofError("");
     setPaymentProofLoading(false);
     setPaymentProofForm({ amount: "", fileName: "" });
+    paymentProofBaselineRef.current = createUnsavedSnapshot({ amount: "", fileName: "" });
   };
+
+  const requestClosePaymentProofForm = () => requestCustomerExit(
+    createUnsavedSnapshot(paymentProofForm) !== paymentProofBaselineRef.current,
+    () => {
+      setPaymentProofOpenOrderId(null);
+      setPaymentProofError("");
+      setPaymentProofForm({ amount: "", fileName: "" });
+    },
+  );
 
   const handleCancelRequest = (order) => {
     if (!order || String(order.status || "").toLowerCase() === "cancelled") return;
+    setCancelRequestReason("");
+    setCancelRequestReasonError("");
     setCancelRequestModal({ open: true, order });
   };
+
+  const closeCancelRequest = () => {
+    setCancelRequestModal({ open: false, order: null });
+    setCancelRequestReason("");
+    setCancelRequestReasonError("");
+  };
+  const requestCloseCancelRequest = () => requestCustomerExit(Boolean(cancelRequestReason.trim()), closeCancelRequest);
 
   const confirmCancelRequest = async () => {
     if (!cancelRequestModal.order || String(cancelRequestModal.order.status || "").toLowerCase() === "cancelled") {
@@ -3499,10 +3702,17 @@ function CustomerDashboard() {
       return;
     }
 
+    const reason = cancelRequestReason.trim();
+    if (!reason) {
+      setCancelRequestReasonError("Please tell us why you are cancelling this request.");
+      return;
+    }
+
     const orderIdentifier = cancelRequestModal.order._id || cancelRequestModal.order.id || cancelRequestModal.order.tracking;
 
     try {
-      const response = await cancelCustomerOrder(orderIdentifier);
+      setCancelRequestSubmitting(true);
+      const response = await cancelCustomerOrder(orderIdentifier, { reason });
       const updatedOrder = response.order || {
         ...cancelRequestModal.order,
         status: "cancelled",
@@ -3517,9 +3727,14 @@ function CustomerDashboard() {
 
       setExpandedOrderId((prev) => (prev === orderIdentifier ? null : prev));
       setCancelRequestModal({ open: false, order: null });
-      toast.success(response.message || "Order request cancelled.");
+      setCancelRequestReason("");
+      setCancelRequestReasonError("");
+      await refreshUser().catch(() => {});
+      toast.success(withAdminContactPhone(response.message || "Order request cancelled."));
     } catch (error) {
       toast.error(error?.data?.message || error?.message || "Unable to cancel this order request.");
+    } finally {
+      setCancelRequestSubmitting(false);
     }
   };
 
@@ -3681,6 +3896,10 @@ function CustomerDashboard() {
   };
 
   const handleCheckout = () => {
+    if (onlineOrderCooldownActive) {
+      setCheckoutError(onlineOrderCooldownMessage);
+      return;
+    }
     if (cartItems.length === 0) {
       setCheckoutError("Your cart is empty.");
       return;
@@ -3705,6 +3924,10 @@ function CustomerDashboard() {
   };
 
   const handleConfirmBatchOrder = async () => {
+    if (onlineOrderCooldownUntil && onlineOrderCooldownUntil.getTime() > Date.now()) {
+      setCheckoutError(onlineOrderCooldownMessage);
+      return;
+    }
     if (!batchOrderAgreed) return;
     if (!isValidPhilippinePhone(batchOrderForm.phone)) {
       setCheckoutError(getPhilippinePhoneError(batchOrderForm.phone));
@@ -3932,7 +4155,18 @@ function CustomerDashboard() {
   function getCartPricingContext(item) {
     const productId = item.product_id || item._id || item.product?._id || item.product?.id;
     const product = cartPricingProducts.find((candidate) => String(candidate._id || candidate.id) === String(productId)) || item;
-    if (!isBladePricingProduct(product)) return { product, item };
+    const currentCharges = getDefaultExtraChargeSelections(product);
+    const previousCharges = Array.isArray(item.extra_charges) ? item.extra_charges : [];
+    const extraCharges = currentCharges.map((charge, index) => {
+      const previous = previousCharges.find((candidate) => candidate.name === charge.name) || previousCharges[index];
+      return {
+        ...charge,
+        is_selected: charge.is_optional === true
+          ? (typeof previous?.is_selected === "boolean" ? previous.is_selected : false)
+          : true,
+      };
+    });
+    if (!isBladePricingProduct(product)) return { product, item: { ...item, extra_charges: extraCharges } };
 
     const glassTypes = Array.isArray(product.blade_glass_types) ? product.blade_glass_types : [];
     const frameTypes = Array.isArray(product.blade_frame_types) ? product.blade_frame_types : [];
@@ -3951,17 +4185,6 @@ function CustomerDashboard() {
     const glassName = selectedGlassExists
       ? item.blade_glass_type
       : product.default_blade_glass_type || glassTypes[0]?.name || "";
-    const currentCharges = getDefaultExtraChargeSelections(product);
-    const previousCharges = Array.isArray(item.extra_charges) ? item.extra_charges : [];
-    const extraCharges = currentCharges.map((charge, index) => {
-      const previous = previousCharges.find((candidate) => candidate.name === charge.name) || previousCharges[index];
-      return {
-        ...charge,
-        is_selected: charge.is_optional === true
-          ? (typeof previous?.is_selected === "boolean" ? previous.is_selected : charge.is_selected)
-          : true,
-      };
-    });
     const pricingItem = {
       ...item,
       quantity: Math.max(1, Number(item.quantity) || 1),
@@ -3980,7 +4203,16 @@ function CustomerDashboard() {
 
   const getCartBladePriceBreakdown = (item) => {
     const { product, item: pricingItem } = getCartPricingContext(item);
-    if (!isBladePricingProduct(product)) return [];
+    const hasOverride = Number(product.estimated_price_override) > 0;
+    const breakdown = getProductLineBreakdown(product, {
+      ...pricingItem,
+      quantity: Math.max(1, Number(item.quantity || item.dimensions?.quantity) || 1),
+      width: item.dimensions?.width ?? item.width,
+      height: item.dimensions?.height ?? item.height,
+      measurement_unit: item.dimensions?.unit || item.measurement_unit || item.measurementUnit || "in",
+    });
+    const details = [];
+    if (isBladePricingProduct(product) && !hasOverride) {
     const glassTypes = Array.isArray(product.blade_glass_types) ? product.blade_glass_types : [];
     const frameTypes = Array.isArray(product.blade_frame_types) ? product.blade_frame_types : [];
     const glass = glassTypes.find((candidate) => candidate.name === pricingItem.blade_glass_type);
@@ -3990,10 +4222,11 @@ function CustomerDashboard() {
     const saleMode = pricingItem.sale_mode;
     const frameName = pricingItem.custom_frame_size ? "Custom frame" : frame?.name || "Frame";
     const framePrice = Number(pricingItem.frame_price) || 0;
-    const breakdown = getProductLineBreakdown(product, pricingItem);
-    const details = [`${pricingItem.blade_glass_type || "Glass"}${saleMode === "frame" ? ` · ${frameName} frame` : ""} · ${bladeCount} blade${bladeCount === 1 ? "" : "s"}`];
+    details.push(`${pricingItem.blade_glass_type || "Glass"}${saleMode === "frame" ? ` · ${frameName} frame` : ""} · ${bladeCount} blade${bladeCount === 1 ? "" : "s"}`);
     if (bladeRate > 0) details.push(`${formatCurrency(bladeRate)}/blade`);
     if (framePrice > 0) details.push(`+ Frame (${frameName}): ${formatCurrency(framePrice)}`);
+    }
+    if (hasOverride) details.push(`Product base price: ${formatCurrency(product.estimated_price_override)}`);
     breakdown.extraCharges.forEach((charge) => {
       if (charge.total > 0) details.push(`+ ${charge.name}: ${formatCurrency(charge.total)}`);
     });
@@ -4196,8 +4429,8 @@ function CustomerDashboard() {
       name: item.name || "Item",
       category: item.category || item.product_type || "General",
       quantity: item.quantity || 0,
-      width: item.width || "—",
-      height: item.height || "—",
+      width: item.width || "â€”",
+      height: item.height || "â€”",
       area: item.area || 0,
       unitPrice: Number(item.unit_price || 0),
       amount: Number(item.line_total || (item.is_estimate ? item.estimated_price : 0) || (item.quantity || 0) * Number(item.unit_price || 0)),
@@ -4439,6 +4672,9 @@ function CustomerDashboard() {
     setOrderPage(orderIndex >= 0 ? Math.floor(orderIndex / ORDER_PAGE_SIZE) + 1 : 1);
     const isDelayNotification = notification?.notificationType === "delay";
     const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(notification?.notificationType);
+    const isSiteInspectionNotification = notification?.notificationType === "site_inspection_today";
+    const isCancellationCooldownNotification = notification?.notificationType === "order_cancellation_cooldown";
+    const isCancellationWarningNotification = notification?.notificationType === "order_cancellation_warning";
     setTimelineNotificationTarget(isDelayNotification ? {
       stageKey: notification.delayStageKey,
       stageName: notification.delayStageName,
@@ -4448,7 +4684,7 @@ function CustomerDashboard() {
       stageName: notification.stageName || "Installation",
       itemIndex: notification.itemIndex,
     } : null);
-    setSelectedOrderForModal(isDelayNotification || isInstallationNotification ? order : null);
+    setSelectedOrderForModal(isDelayNotification || isInstallationNotification || isSiteInspectionNotification || isCancellationCooldownNotification || isCancellationWarningNotification ? order : null);
     setExpandedOrderId(orderIdentifier);
     setHighlightedOrderId(orderIdentifier);
     setActiveTab("orders");
@@ -4512,7 +4748,7 @@ function CustomerDashboard() {
   const estimateHeight = Number(estimateForm.height) || 0;
   const estimateQuantity = Math.max(1, Number(estimateForm.quantity) || 1);
   const selectedUnitLabel = estimateForm.unit === 'in' ? 'in' : estimateForm.unit === 'ft' ? 'ft' : estimateForm.unit === 'cm' ? 'cm' : 'm';
-  const selectedAreaUnitLabel = estimateForm.unit === 'in' ? 'in²' : estimateForm.unit === 'ft' ? 'ft²' : estimateForm.unit === 'cm' ? 'cm²' : 'm²';
+  const selectedAreaUnitLabel = estimateForm.unit === 'in' ? 'inÂ²' : estimateForm.unit === 'ft' ? 'ftÂ²' : estimateForm.unit === 'cm' ? 'cmÂ²' : 'mÂ²';
   const estimateAreaSelectedUnit = estimateWidth && estimateHeight ? estimateWidth * estimateHeight : 0;
   const estimateTotalAreaSelectedUnit = estimateAreaSelectedUnit * estimateQuantity;
   
@@ -4530,7 +4766,7 @@ function CustomerDashboard() {
     overrideRate: getProductEstimateRate(cartDecisionProduct),
     customization: cartDecisionProduct.customization || false,
     customization_fee: cartDecisionProduct.customization_fee || 0,
-  }) : { estimated_area: 0, estimated_price: 0, rate: 0, areaDisplay: '—', rateNote: '' };
+  }) : { estimated_area: 0, estimated_price: 0, rate: 0, areaDisplay: 'â€”', rateNote: '' };
   const estimateResult = cartDecisionProduct
     ? {
         ...rawEstimateResult,
@@ -4692,13 +4928,13 @@ function CustomerDashboard() {
   const confirmWidth = deliveryConfirmMode === "orderNow"
     ? orderNowDimensions?.width
       ? `${orderNowDimensions.width} ${orderNowDimensions.unit || "in"}`
-      : "—"
-    : estimateWidth ? `${estimateWidth} ${selectedUnitLabel}` : "—";
+      : "â€”"
+    : estimateWidth ? `${estimateWidth} ${selectedUnitLabel}` : "â€”";
   const confirmHeight = deliveryConfirmMode === "orderNow"
     ? orderNowDimensions?.height
       ? `${orderNowDimensions.height} ${orderNowDimensions.unit || "in"}`
-      : "—"
-    : estimateHeight ? `${estimateHeight} ${selectedUnitLabel}` : "—";
+      : "â€”"
+    : estimateHeight ? `${estimateHeight} ${selectedUnitLabel}` : "â€”";
   const confirmPrice = deliveryConfirmMode === "orderNow" ? orderNowSubtotal : estimateTotalCost;
   const confirmSubtotal = deliveryConfirmMode === "orderNow" ? orderNowSubtotal : estimateSubtotal;
   const confirmAdditionalCharges = deliveryConfirmMode === "orderNow" ? orderNowAdditionalCharges : estimateCustomizationFee;
@@ -4733,7 +4969,7 @@ function CustomerDashboard() {
     ? (confirmProduct?.extra_charges || []).flatMap((charge, index) => {
         if (charge.is_active === false) return [];
         const selection = confirmBladeSelections.extra_charges?.[index];
-        if (charge.is_optional && (selection?.is_selected ?? charge.is_default_selected !== false) === false) return [];
+        if (charge.is_optional && (selection?.is_selected ?? false) === false) return [];
         const amount = getProductLineTotal(
           { ...confirmProduct, extra_charges: [charge] },
           { ...confirmBladePricingItem, extra_charges: [{ is_selected: true }] },
@@ -4772,7 +5008,7 @@ function CustomerDashboard() {
   }
 
   return (
-    <div className={`admin-theme-shell customer-dashboard-shell relative flex min-h-screen flex-col overflow-x-clip pb-[calc(6rem+env(safe-area-inset-bottom))] lg:pb-0 ${darkMode
+    <div className={`admin-theme-shell customer-dashboard-shell relative flex min-h-screen flex-col overflow-x-clip pb-[calc(10rem+env(safe-area-inset-bottom))] lg:pb-0 ${darkMode
       ? "admin-theme-dark"
       : "admin-theme-light"
     }`}>
@@ -4840,29 +5076,12 @@ function CustomerDashboard() {
           </button>
 
           <div className="flex shrink-0 items-center gap-0.5 sm:gap-1 lg:gap-2">
-            {canRequestOrders && (
-              <button
-                onClick={() => setActiveTab("cart")}
-                className={`order-1 relative hidden p-2.5 text-sm font-semibold transition lg:inline-flex ${
-                  darkMode ? "text-slate-200 hover:text-white" : "text-slate-700 hover:text-slate-900"
-                }`}
-                aria-label="Cart"
-                title="Cart"
-              >
-                <ShoppingCart className="h-6 w-6 lg:h-8 lg:w-8" strokeWidth={2.2} />
-                {cartQuantity > 0 && (
-                  <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 animate-pulse items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow-md shadow-red-500/40">
-                    {cartQuantity}
-                  </span>
-                )}
-              </button>
-            )}
             <button
               onClick={() => setActiveTab("products")}
               aria-current={activeTab === "products" ? "page" : undefined}
               className={`order-3 hidden rounded-full border px-4 py-2 text-base font-semibold transition lg:order-4 lg:inline-flex ${
                 activeTab === "products"
-                  ? darkMode ? "border-red-400/40 bg-red-950/60 text-red-200" : "border-red-200 bg-red-50 text-red-800"
+                  ? darkMode ? "border border-slate-700 bg-slate-800 text-white shadow-sm" : "border-slate-200 bg-slate-100 text-red-600 shadow-sm"
                   : darkMode ? "border-transparent text-slate-200 hover:bg-slate-800" : "border-transparent text-slate-700 hover:bg-slate-100"
               }`}
             >
@@ -4873,7 +5092,7 @@ function CustomerDashboard() {
               aria-current={activeTab === "orders" ? "page" : undefined}
               className={`order-4 hidden rounded-full border px-4 py-2 text-base font-semibold transition lg:order-5 lg:inline-flex ${
                 activeTab === "orders"
-                  ? darkMode ? "border-red-400/40 bg-red-950/60 text-red-200" : "border-red-200 bg-red-50 text-red-800"
+                  ? darkMode ? "border border-slate-700 bg-slate-800 text-white shadow-sm" : "border-slate-200 bg-slate-100 text-red-600 shadow-sm"
                   : darkMode ? "border-transparent text-slate-200 hover:bg-slate-800" : "border-transparent text-slate-700 hover:bg-slate-100"
               }`}
             >
@@ -4884,7 +5103,7 @@ function CustomerDashboard() {
               aria-current={activeTab === "about" ? "page" : undefined}
               className={`order-5 hidden rounded-full border px-4 py-2 text-base font-semibold transition lg:order-6 lg:inline-flex ${
                 activeTab === "about"
-                  ? darkMode ? "border-red-400/40 bg-red-950/60 text-red-200" : "border-red-200 bg-red-50 text-red-800"
+                  ? darkMode ? "border border-slate-700 bg-slate-800 text-white shadow-sm" : "border-slate-200 bg-slate-100 text-red-600 shadow-sm"
                   : darkMode ? "border-transparent text-slate-200 hover:bg-slate-800" : "border-transparent text-slate-700 hover:bg-slate-100"
               }`}
             >
@@ -4991,11 +5210,29 @@ function CustomerDashboard() {
                             const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                             const isDelayNotification = order.notificationType === "delay";
                             const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
+                            const isSiteInspectionNotification = order.notificationType === "site_inspection_today";
+                            const isCancellationCooldownNotification = order.notificationType === "order_cancellation_cooldown";
+                            const isCancellationWarningNotification = order.notificationType === "order_cancellation_warning";
+                            const isCancellationPolicyNotification = isCancellationCooldownNotification || isCancellationWarningNotification;
                             const isContractReady =
                               status === "contract_sent" ||
                               (status === "site_inspection" && contractStatus === "sent") ||
                               contractStatus === "sent";
                             const notificationDetails = () => {
+                              if (isSiteInspectionNotification) {
+                                return {
+                                  title: order.title || "Site Inspection Scheduled for Today",
+                                  message: order.message || `Your site inspection for order ${order.tracking} is scheduled for ${formatDateToMMMDDYYYY(order.inspection_date)}.`,
+                                  color: "text-blue-600",
+                                };
+                              }
+                              if (isCancellationPolicyNotification) {
+                                return {
+                                  title: order.title || (isCancellationCooldownNotification ? "7-Day Online Ordering Restriction" : "Cancellation Policy Reminder"),
+                                  message: withAdminContactPhone(order.message || "Reaching 3 cancellations will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction."),
+                                  color: isCancellationCooldownNotification ? "text-red-600" : "text-amber-600",
+                                };
+                              }
                               if (order.notificationType === "installation_up_next") {
                                 return {
                                   title: order.title || "Installation Coming Up",
@@ -5113,7 +5350,7 @@ function CustomerDashboard() {
                               status === "contract_sent" ||
                               contractStatus === "sent" ||
                               (status === "site_inspection" && contractStatus === "sent");
-                            const isContractNotification = !isPaymentNotification && !isDelayNotification && !isInstallationNotification && (
+                            const isContractNotification = !isPaymentNotification && !isDelayNotification && !isInstallationNotification && !isSiteInspectionNotification && (
                               order.notificationType === "contract" ||
                               hasContractBeenSent ||
                               ["contract_accepted"].includes(status) ||
@@ -5125,7 +5362,11 @@ function CustomerDashboard() {
                                 ? CreditCard
                                 : isDelayNotification
                                   ? AlertTriangle
-                                  : isContractNotification
+                                  : isCancellationPolicyNotification
+                                    ? AlertTriangle
+                                  : isSiteInspectionNotification
+                                    ? CalendarDays
+                                    : isContractNotification
                                     ? FileText
                                     : Bell;
 
@@ -5155,7 +5396,7 @@ function CustomerDashboard() {
                                       <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold uppercase sm:px-2 sm:text-[10px] ${getOrderStatusClasses(isDelayNotification ? "Delayed" : order.status)}`}>{isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status)}</span>
                                     </div>
                                     <p className={`mt-0.5 text-[11px] leading-4 sm:text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
-                                      {details.message}
+                                      {renderAdminContactMessage(details.message)}
                                     </p>
                                     <p className={`mt-1 text-[10px] sm:text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                                       {product.name || "Project"} · {order.tracking || "Order update"} · <span title={formatDateTimeToMMMDDYYYY(order.notificationDate) || undefined}>{formatTimeAgo(order.notificationDate)}</span>
@@ -5181,7 +5422,7 @@ function CustomerDashboard() {
                 </div>
               )}
             </div>
-            <div className="relative order-8 hidden lg:order-7 lg:block">
+            <div className="relative order-8 hidden items-center gap-1 lg:order-7 lg:flex">
               <button
                 onClick={() => setActiveTab("profile")}
                 className={`flex h-9 w-9 items-center justify-center rounded-full p-2 text-base font-semibold transition sm:h-10 sm:w-auto sm:gap-2 sm:px-4 sm:py-2 ${
@@ -5199,6 +5440,26 @@ function CustomerDashboard() {
               >
                 <span className="text-base font-semibold">Profile</span>
               </button>
+              {canRequestOrders && (
+                <button
+                  onClick={() => setActiveTab("cart")}
+                  className={`relative inline-flex h-9 w-9 items-center justify-center rounded-full p-2 transition sm:h-10 sm:w-10 ${
+                    activeTab === "cart"
+                      ? darkMode ? "border border-slate-700 bg-slate-800 text-white shadow-sm" : "border border-slate-200 bg-slate-100 text-red-600 shadow-sm"
+                      : darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-slate-100"
+                  }`}
+                  aria-current={activeTab === "cart" ? "page" : undefined}
+                  aria-label="Cart"
+                  title="Cart"
+                >
+                  <ShoppingCart className="h-5 w-5" strokeWidth={2.2} />
+                  {cartQuantity > 0 && (
+                    <span className="absolute -right-1 -top-1 inline-flex h-5 min-w-5 animate-pulse items-center justify-center rounded-full bg-red-600 px-1 text-[10px] font-bold text-white shadow-md shadow-red-500/40">
+                      {cartQuantity}
+                    </span>
+                  )}
+                </button>
+              )}
 
               {confirmOpen && createPortal(
                 <div className="customer-modal-overlay fixed inset-0 z-[100] flex min-h-screen items-center justify-center p-4">
@@ -5271,7 +5532,7 @@ function CustomerDashboard() {
               aria-label={tab === "cart" && cartQuantity > 0 ? `Cart, ${cartQuantity} ${cartQuantity === 1 ? "item" : "items"}` : label}
               aria-current={isActive ? "page" : undefined}
               title={label}
-              className={`group flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${isActive ? darkMode ? "text-white" : "text-slate-900" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
+              className={`group flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${isActive ? darkMode ? "bg-slate-800 text-white" : "border border-slate-200 bg-slate-100 text-red-600 shadow-sm" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
             >
               <span className="relative inline-flex">
                 <span
@@ -5281,7 +5542,7 @@ function CustomerDashboard() {
                     isActive
                       ? darkMode
                         ? "border-slate-900 bg-gradient-to-br from-brand-dark-fill via-brand to-red-700 text-white ring-red-300/30 shadow-black/50"
-                        : "border-white bg-gradient-to-br from-brand via-red-800 to-red-600 text-white ring-red-400/35 shadow-red-900/35"
+                        : "border-slate-200 bg-slate-100 text-red-600 ring-slate-200 shadow-slate-400/20"
                       : darkMode
                         ? "text-slate-300 group-hover:bg-white/[0.06]"
                         : "text-slate-600 group-hover:bg-black/[0.04]",
@@ -5511,6 +5772,11 @@ function CustomerDashboard() {
       )}
 
       <div className="mx-auto flex w-full max-w-7xl flex-1 flex-col p-3 sm:p-4 md:p-6">
+        {onlineOrderCooldownActive && activeTab !== "cart" && (
+          <div role="alert" className={`mb-4 rounded-2xl border px-4 py-3 text-sm font-semibold ${darkMode ? "border-amber-700 bg-amber-950/40 text-amber-100" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+            {renderAdminContactMessage(onlineOrderCooldownMessage)}
+          </div>
+        )}
         {activeTab === "products" && (
           <>
             <div>
@@ -5614,7 +5880,7 @@ function CustomerDashboard() {
                                     event.stopPropagation();
                                     openOrderNowModal(product);
                                   }}
-                                  className={`inline-flex size-[32px] items-center justify-center rounded-xl border shadow-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-red-400/50 bg-slate-900/90 text-red-200 hover:border-red-400 hover:bg-red-500 hover:text-white" : "border-red-200 bg-white/90 text-red-700 hover:border-red-300 hover:bg-red-600 hover:text-white"}`}
+                                  className={`inline-flex size-[32px] items-center justify-center rounded-xl border shadow-lg transition duration-150 hover:-translate-y-0.5 hover:shadow-xl active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 motion-reduce:transform-none ${darkMode ? "border-red-400/50 bg-slate-900/90 text-red-200 hover:!border-red-700 hover:!bg-red-700 hover:!text-white active:!bg-red-800" : "border-red-200 bg-white/90 text-red-700 hover:!border-red-700 hover:!bg-red-700 hover:!text-white active:!bg-red-800"}`}
                                   aria-label="Place order"
                                   title="Place order"
                                 >
@@ -5650,7 +5916,7 @@ function CustomerDashboard() {
                               <span className="flex items-center gap-1 text-amber-400">{renderRatingStars(productReviewStats[product._id || product.id]?.averageRating || 0, 13)}</span>
                               <span className={`truncate ${darkMode ? "font-medium text-slate-200" : "font-medium text-slate-800"}`}>
                                 {productReviewStats[product._id || product.id]?.averageRating > 0
-                                  ? `${productReviewStats[product._id || product.id].averageRating.toFixed(1)} • ${productReviewStats[product._id || product.id].ratingsCount} reviews`
+                                  ? `${productReviewStats[product._id || product.id].averageRating.toFixed(1)} â€¢ ${productReviewStats[product._id || product.id].ratingsCount} reviews`
                                   : "No ratings yet"}
                               </span>
                             </div>
@@ -5677,7 +5943,7 @@ function CustomerDashboard() {
                             ) : product.width && product.height ? (
                               <p className="flex items-center justify-between gap-2 text-[11px]">
                                 <span className={darkMode ? "text-slate-400" : "text-slate-500"}>Dimensions</span>
-                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.width} × {product.height}</span>
+                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.width} Ã— {product.height}</span>
                               </p>
                             ) : null}
 
@@ -5701,7 +5967,7 @@ function CustomerDashboard() {
                                       event.stopPropagation();
                                       openOrderNowModal(product);
                                     }}
-                                    className={`inline-flex size-8 items-center justify-center rounded-lg border ${darkMode ? "border-red-400/50 bg-slate-900 text-red-200" : "border-red-200 bg-white text-red-700"}`}
+                                    className={`inline-flex size-8 items-center justify-center rounded-lg border shadow-sm transition duration-150 hover:-translate-y-0.5 hover:shadow-md active:translate-y-0 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 motion-reduce:transform-none ${darkMode ? "border-red-400/50 bg-slate-900 text-red-200 hover:!border-red-700 hover:!bg-red-700 hover:!text-white active:!bg-red-800" : "border-red-200 bg-white text-red-700 hover:!border-red-700 hover:!bg-red-700 hover:!text-white active:!bg-red-800"}`}
                                     aria-label="Place order"
                                     title="Place order"
                                   >
@@ -5826,7 +6092,7 @@ function CustomerDashboard() {
                         </div>
                         <button
                           type="button"
-                          onClick={closeProductModal}
+                          onClick={requestCloseProductModal}
                           aria-label="Close product details"
                           className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-white/10 text-white transition hover:bg-white/15 focus:outline-none focus:ring-2 focus:ring-white/60 sm:h-9 sm:w-9"
                         >
@@ -5844,7 +6110,7 @@ function CustomerDashboard() {
                   {isProductModalReadOnly && (
                     <button
                       type="button"
-                      onClick={closeProductModal}
+                      onClick={requestCloseProductModal}
                       aria-label="Close product details"
                       className={`absolute right-4 top-4 z-10 flex h-10 w-10 items-center justify-center rounded-full shadow-md transition ${darkMode ? "bg-slate-800 text-slate-200 hover:bg-slate-700" : "bg-white text-slate-700 hover:bg-slate-100"}`}
                     >
@@ -5854,6 +6120,12 @@ function CustomerDashboard() {
 
                   {/* Scrollable Content */}
                   <div className="flex-1 overflow-y-auto">
+                    {onlineOrderCooldownActive && (
+                      <div role="alert" className={`mx-4 mt-4 rounded-xl border p-4 sm:mx-5 ${darkMode ? "border-rose-500/50 bg-rose-950/35 text-rose-100" : "border-rose-300 bg-rose-50 text-rose-900"}`}>
+                        <p className="text-sm font-black">Online ordering is restricted for 7 days</p>
+                        <p className="mt-1 text-sm leading-5">{renderAdminContactMessage(onlineOrderCooldownMessage)}</p>
+                      </div>
+                    )}
                     <div className={`grid items-start gap-5 p-4 sm:p-5 ${isProductModalReadOnly ? "md:grid-cols-[minmax(0,1.1fr)_minmax(300px,0.9fr)] lg:gap-8 lg:p-7" : "md:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)] lg:gap-7 lg:p-6"}`}>
                       {/* Left: Product Image & Description */}
                       <div className={`min-w-0 space-y-4 ${isProductModalReadOnly ? darkMode ? "rounded-xl bg-slate-800 p-2" : "rounded-xl bg-slate-50 p-2" : ""}`}>
@@ -5974,6 +6246,11 @@ function CustomerDashboard() {
                             onFormChange={setProductEstimatorForm}
                             darkMode={darkMode}
                             formatCurrency={formatCurrency}
+                            defaultMeasurements={(() => {
+                              const dimensions = getProductDefaultDimensions(selectedProduct, 1);
+                              const usesLength = ["meter", "per_meter"].includes(String(selectedProduct?.pricing_method || selectedProduct?.unit || "").toLowerCase());
+                              return dimensions.width > 0 && (usesLength || dimensions.height > 0) ? dimensions : null;
+                            })()}
                           />
                         )}
                         {false && <section className={`overflow-hidden rounded-xl border border-t-2 p-3.5 ${darkMode ? "border-slate-700 border-t-red-500 bg-slate-900" : "border-slate-200 border-t-red-600 bg-white"}`} aria-labelledby="product-estimator-title">
@@ -5993,7 +6270,7 @@ function CustomerDashboard() {
                                 className={`h-9 w-full rounded-lg border px-2 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/15 ${darkMode ? "border-slate-600 bg-slate-800 text-white" : "border-slate-200 bg-white text-slate-900"}`}
                               />
                             </label>
-                            <span className={`mt-6 text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`} aria-hidden="true">×</span>
+                            <span className={`mt-6 text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`} aria-hidden="true">Ã—</span>
                             <label className="min-w-0">
                               <span className={`mb-1 block text-[9px] font-bold uppercase tracking-wider ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Height</span>
                               <input
@@ -6070,7 +6347,7 @@ function CustomerDashboard() {
                                 const selectedCharge = productEstimatorForm.extra_charges?.[index];
                                 const checked = typeof selectedCharge?.is_selected === "boolean"
                                   ? selectedCharge.is_selected
-                                  : charge.is_default_selected !== false;
+                                  : false;
                                 const chargeRateLabel = charge.type === "percentage"
                                   ? `${Number(charge.amount) || 0}% of subtotal`
                                   : `${formatCurrency(charge.amount)}${charge.type === "per_blade" ? " / blade" : charge.type === "per_sqft" ? " / sq ft" : " / item"}`;
@@ -6104,12 +6381,12 @@ function CustomerDashboard() {
                                   {isBladeEstimator
                                     ? `${estimatorBladeCount} blade(s)`
                                     : isMeterEstimator
-                                    ? productEstimatorResult?.areaDisplay || "—"
+                                    ? productEstimatorResult?.areaDisplay || "â€”"
                                     : isPieceEstimator
                                     ? productEstimatorResult?.areaDisplay || "1 piece"
                                     : Number(productEstimatorResult?.estimated_area) > 0
                                     ? `${Number(productEstimatorResult.estimated_area).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} sq ft`
-                                    : productEstimatorResult?.areaDisplay || "—"}
+                                    : productEstimatorResult?.areaDisplay || "â€”"}
                                 </span>
                               </div>
                               {(!isBladeEstimator || selectedProduct.show_price_per_blade !== false) && <div className="flex items-center justify-between gap-3">
@@ -6169,7 +6446,8 @@ function CustomerDashboard() {
                             }
                             closeProductModal();
                           }}
-                          className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-600 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-red-700"
+                          disabled={onlineOrderCooldownActive}
+                          className="flex w-full items-center justify-center gap-2 rounded-xl bg-red-600 py-3 text-sm font-bold text-white shadow-sm transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <Package size={20} />
                           Place Order
@@ -6220,7 +6498,8 @@ function CustomerDashboard() {
                             }
                             if (addedToCart) closeProductModal();
                           }}
-                          className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#101114] py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#050608]"
+                          disabled={onlineOrderCooldownActive}
+                          className="flex w-full items-center justify-center gap-2 rounded-xl bg-[#101114] py-3 text-sm font-bold text-white shadow-sm transition hover:bg-[#050608] disabled:cursor-not-allowed disabled:opacity-50"
                         >
                           <ShoppingCart size={20} />
                           Add to Cart
@@ -6309,8 +6588,8 @@ function CustomerDashboard() {
                         </h3>
                         <p className="text-red-100 mt-1">{cartDecisionStep === "choice" ? "Decide how to add this product to your cart" : "Enter measurements for a personalized estimate"}</p>
                       </div>
-                      <button onClick={closeCartDecisionModal} className="text-white hover:bg-red-800 p-2 rounded-full transition">
-                        <span className="text-3xl">×</span>
+                      <button onClick={requestCloseCartDecisionModal} className="text-white hover:bg-red-800 p-2 rounded-full transition">
+                        <span className="text-3xl">Ã—</span>
                       </button>
                     </div>
                   </div>
@@ -6369,7 +6648,7 @@ function CustomerDashboard() {
 
                         {/* Cancel */}
                         <button
-                          onClick={closeCartDecisionModal}
+                          onClick={requestCloseCartDecisionModal}
                           className="w-full rounded-2xl border-2 border-gray-200 bg-white text-gray-700 font-semibold py-3 hover:bg-gray-50 transition"
                         >
                           Cancel
@@ -6504,15 +6783,15 @@ function CustomerDashboard() {
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Width</span>
-                                  <span className="font-bold text-black-900">{estimateForm.width ? `${estimateForm.width} ${estimateForm.unit}` : '—'}</span>
+                                  <span className="font-bold text-black-900">{estimateForm.width ? `${estimateForm.width} ${estimateForm.unit}` : 'â€”'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Height</span>
-                                  <span className="font-bold text-black-900">{estimateForm.height ? `${estimateForm.height} ${estimateForm.unit}` : '—'}</span>
+                                  <span className="font-bold text-black-900">{estimateForm.height ? `${estimateForm.height} ${estimateForm.unit}` : 'â€”'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Area per unit</span>
-                                  <span className="font-bold text-black-900">{estimateAreaSelectedUnit ? `${estimateAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : '—'}</span>
+                                  <span className="font-bold text-black-900">{estimateAreaSelectedUnit ? `${estimateAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : 'â€”'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Total Quantity</span>
@@ -6520,7 +6799,7 @@ function CustomerDashboard() {
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-gradient-to-r from-yellow-400 to-yellow-500 text-yellow-900 font-bold rounded-lg">
                                   <span className="text-black font-semibold">Total Area</span>
-                                  <span className="font-bold text-black-900 text-lg">{estimateTotalAreaSelectedUnit ? `${estimateTotalAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : '—'}</span>
+                                  <span className="font-bold text-black-900 text-lg">{estimateTotalAreaSelectedUnit ? `${estimateTotalAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : 'â€”'}</span>
                                 </div>
                               </div>
                             </div>
@@ -6540,7 +6819,7 @@ function CustomerDashboard() {
                                   <p className="text-xs text-black-500 mb-1">Calculation</p>
                                   <p className="text-sm font-semibold text-gray-900">
                                     {estimateWidth && estimateHeight
-                                      ? `₱${estimateUnitRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} × ${estimateTotalArea.toFixed(2)} sq ft`
+                                      ? `₱${estimateUnitRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Ã— ${estimateTotalArea.toFixed(2)} sq ft`
                                       : "Fill measurements"}
                                   </p>
                                 </div>
@@ -6553,7 +6832,7 @@ function CustomerDashboard() {
                               <p className="text-4xl font-bold">
                                 {estimateWidth && estimateHeight
                                   ? `₱${estimateTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                                  : "—"}
+                                  : "â€”"}
                               </p>
                               <p className="text-xs text-red-100 mt-2">*Final price may vary based on final specifications</p>
                             </div>
@@ -6575,7 +6854,7 @@ function CustomerDashboard() {
                     {cartDecisionStep === "choice" ? null : (
                       <div className="flex flex-col gap-3 sm:flex-row sm:justify-end">
                         <button
-                          onClick={closeCartDecisionModal}
+                          onClick={requestCloseCartDecisionModal}
                           className="rounded-xl border-2 border-gray-300 bg-white text-gray-700 font-semibold py-3 px-6 hover:bg-gray-50 transition"
                         >
                           Cancel
@@ -6760,7 +7039,7 @@ function CustomerDashboard() {
                                   </div>
                                   <div>
                                     <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Glass</p>
-                                    <p className={`mt-2 font-semibold ${darkMode ? "text-white" : "text-gray-900"}`}>{confirmGlassType?.name || confirmBladeSelections.blade_glass_type || "—"}</p>
+                                    <p className={`mt-2 font-semibold ${darkMode ? "text-white" : "text-gray-900"}`}>{confirmGlassType?.name || confirmBladeSelections.blade_glass_type || "â€”"}</p>
                                   </div>
                                   <div>
                                     <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Frame</p>
@@ -6937,8 +7216,8 @@ function CustomerDashboard() {
                             <p className="text-xs uppercase tracking-[0.24em] text-gray-500">Dimensions</p>
                             <p className="mt-2 text-lg font-semibold text-gray-900">
                               {orderNowProduct.width && orderNowProduct.height
-                                ? `${orderNowProduct.width}" × ${orderNowProduct.height}"`
-                                : orderNowProduct.dimensions || orderNowProduct.standard_size || orderNowProduct.size || "—"}
+                                ? `${orderNowProduct.width}" Ã— ${orderNowProduct.height}"`
+                                : orderNowProduct.dimensions || orderNowProduct.standard_size || orderNowProduct.size || "â€”"}
                             </p>
                           </div>
                         </div>
@@ -6971,7 +7250,7 @@ function CustomerDashboard() {
                             <h4 className="text-sm font-semibold text-gray-700">Optional charges</h4>
                             {(orderNowProduct.extra_charges || []).map((charge, index) => {
                               if (!charge.is_optional) return null;
-                              const checked = orderNowExtraCharges[index]?.is_selected ?? charge.is_default_selected !== false;
+                              const checked = orderNowExtraCharges[index]?.is_selected ?? false;
                               const rateLabel = charge.type === "percentage"
                                 ? `${Number(charge.amount) || 0}% of subtotal`
                                 : `${formatCurrency(charge.amount)}${charge.type === "per_blade" ? " / blade" : charge.type === "per_sqft" ? " / sq ft" : " / item"}`;
@@ -7032,7 +7311,7 @@ function CustomerDashboard() {
                   <div className="flex flex-col gap-3 border-t border-gray-200 bg-gray-50 px-6 py-4 sm:flex-row sm:justify-end">
                     <button
                       type="button"
-                      onClick={closeOrderNowModal}
+                      onClick={requestCloseOrderNowModal}
                       className="rounded-xl border border-gray-300 bg-white px-5 py-3 text-sm font-semibold text-gray-700 hover:bg-gray-100 transition"
                     >
                       Cancel
@@ -7057,7 +7336,7 @@ function CustomerDashboard() {
                     <div className="flex items-center justify-between gap-4">
                       <button
                         type="button"
-                        onClick={closeBatchOrderModal}
+                        onClick={requestCloseBatchOrder}
                         className={`inline-flex items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold transition ${darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-slate-100"}`}
                       >
                         <ArrowLeft size={16} />
@@ -7065,7 +7344,7 @@ function CustomerDashboard() {
                       </button>
                       <button
                         type="button"
-                        onClick={closeBatchOrderModal}
+                        onClick={requestCloseBatchOrder}
                         aria-label="Close order request"
                         className={`rounded-full border p-2 transition ${darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-500 hover:bg-slate-100"}`}
                       >
@@ -7212,7 +7491,7 @@ function CustomerDashboard() {
                   <div className={`sticky bottom-0 z-10 flex flex-shrink-0 flex-col-reverse gap-2 border-t px-4 py-3 sm:flex-row sm:justify-end sm:gap-3 sm:px-5 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-slate-50"}`}>
                     <button
                       type="button"
-                      onClick={closeBatchOrderModal}
+                      onClick={requestCloseBatchOrder}
                       className={`w-full rounded-xl border px-5 py-3 text-sm font-semibold transition sm:w-auto ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`}
                     >
                       Cancel
@@ -7684,7 +7963,7 @@ function CustomerDashboard() {
                   const orderPreviewItem = isBatchOrder
                     ? orderItems.find((item) => getOrderItemImage(item) !== PRODUCT_IMAGE_PLACEHOLDER) || product
                     : product;
-                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
+                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
                   const orderStatusLabel = getOrderStatusLabel(order.status);
                   const hasContractBeenSent =
                     normalizeOrderStatusKey(order?.status) === "contract_sent" ||
@@ -7751,7 +8030,7 @@ function CustomerDashboard() {
                               </span>
                             </div>
                             <div className={`mt-1 flex flex-wrap items-center gap-x-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                              <span>{order.tracking || order._id || "—"}</span>
+                              <span>{order.tracking || order._id || "â€”"}</span>
                               <span aria-hidden="true">·</span>
                               <span>{orderDisplayQuantity}</span>
                             </div>
@@ -7811,7 +8090,7 @@ function CustomerDashboard() {
                                 {isBatchOrder ? "Batch order" : orderDisplayName}
                               </h4>
                               <p className={`mt-1 text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
-                                {order.tracking || order._id || "—"} · {orderDate}
+                                {order.tracking || order._id || "â€”"} · {orderDate}
                               </p>
                             </div>
                             <div className="flex flex-wrap items-center justify-start gap-2 sm:justify-end">
@@ -7875,6 +8154,19 @@ function CustomerDashboard() {
                                       <p className={`mt-1 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                                         {getConfirmationItemDimensionText(item)}
                                       </p>
+                                      {(() => {
+                                        const priceBreakdown = getProductLineBreakdown(item, item);
+                                        return (priceBreakdown.baseTotal > 0 || priceBreakdown.extraCharges.length > 0) ? (
+                                          <div className={`mt-1 space-y-0.5 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                                            <p>Base price: {formatCurrency(priceBreakdown.baseTotal)}</p>
+                                            {priceBreakdown.extraCharges.map((charge, chargeIndex) => (
+                                              <p key={`${orderId}-item-${itemIndex}-charge-${chargeIndex}`}>
+                                                + {charge.name}: {formatCurrency(charge.total)}
+                                              </p>
+                                            ))}
+                                          </div>
+                                        ) : null;
+                                      })()}
                                     </div>
                                   </div>
                                   <div className="text-right">
@@ -7998,7 +8290,7 @@ function CustomerDashboard() {
                                   <div>
                                     <p className="font-bold">Payment Amount Discrepancy · {String(discrepancy.status || "pending_review").replaceAll("_", " ")}</p>
                                     <p className="mt-1">Customer-reported: <strong>{formatCurrency(Number(discrepancy.customer_reported_amount))}</strong> · Admin-recorded: <strong>{formatCurrency(Number(discrepancy.admin_recorded_amount))}</strong> · Difference: <strong>{formatCurrency(Number(discrepancy.difference))}</strong></p>
-                                    <p className="mt-1">The recorded amount differs from the amount you submitted. If you believe it is incorrect, contact us for clarification{discrepancyContact ? <> at 📞 <a className="inline-block whitespace-nowrap font-bold underline underline-offset-2" href={discrepancyContact.href}>{discrepancyContact.display}</a>.</> : ". Please contact the system administrator for assistance."}</p>
+                                    <p className="mt-1">The recorded amount differs from the amount you submitted. If you believe it is incorrect, contact us for clarification{discrepancyContact ? <> at <a className="inline-block whitespace-nowrap font-bold underline underline-offset-2" href={discrepancyContact.href}><Phone size={14} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />{discrepancyContact.display}</a>.</> : ". Please contact the system administrator for assistance."}</p>
                                   </div>
                                 </div>
                               </div>
@@ -8100,7 +8392,7 @@ function CustomerDashboard() {
                             ) : latestPaymentProof.status === "pending" ? (
                               <div className={`rounded-xl border px-4 py-3 text-sm font-medium sm:col-span-2 ${darkMode ? "border-sky-800 bg-sky-950/50 text-sky-200" : "border-sky-200 bg-sky-50 text-sky-800"}`}>
                                 <p>
-                                  We've notified admin that you paid {formatCurrency(paymentProofSubmission?.amount ?? latestPaymentProof.submittedAmount ?? order.payment_proof_amount ?? 0)}. This is pending confirmation — we'll notify you here once it's verified.
+                                  We've notified admin that you paid {formatCurrency(paymentProofSubmission?.amount ?? latestPaymentProof.submittedAmount ?? order.payment_proof_amount ?? 0)}. This is pending confirmation â€” we'll notify you here once it's verified.
                                 </p>
                                 <p className="mt-2 text-xs">
                                   Current remaining balance: {formatCurrency(balanceAmount)}. You can submit another payment after this proof is confirmed.
@@ -8152,7 +8444,7 @@ function CustomerDashboard() {
                                     />
                                     {isPaymentBelowRequired && (
                                       <p role="alert" className={`mt-2 rounded-lg border px-3 py-2 text-xs leading-5 ${darkMode ? "border-amber-700 bg-amber-950/40 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
-                                        This amount is below the required payment of {formatCurrency(downpaymentBalance)} and cannot be submitted. Please contact us{paymentSupportContact ? <> at<a href={paymentSupportContact.href} className="inline-block whitespace-nowrap font-bold underline underline-offset-2">📞{paymentSupportContact.display}</a></> : " to discuss payment options"}.
+                                        This amount is below the required payment of {formatCurrency(downpaymentBalance)} and cannot be submitted. Please contact us{paymentSupportContact ? <> at <a href={paymentSupportContact.href} className="inline-block whitespace-nowrap font-bold underline underline-offset-2"><Phone size={14} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />{paymentSupportContact.display}</a></> : " to discuss payment options"}.
                                       </p>
                                     )}
                                   </div>
@@ -8186,11 +8478,7 @@ function CustomerDashboard() {
                                 <div className="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                                   <button
                                     type="button"
-                                    onClick={() => {
-                                      setPaymentProofOpenOrderId(null);
-                                      setPaymentProofError("");
-                                      setPaymentProofForm({ amount: "", fileName: "" });
-                                    }}
+                                    onClick={requestClosePaymentProofForm}
                                     className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
                                   >
                                     Cancel
@@ -8289,12 +8577,44 @@ function CustomerDashboard() {
                   <p className={`mt-2 text-center text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
                     This will mark the current order request as cancelled. You can still review it afterwards in your order list.
                   </p>
+                  {willTriggerCancellationCooldown && (
+                    <div role="alert" className={`mt-4 rounded-xl border p-3 text-left text-sm ${darkMode ? "border-red-500/40 bg-red-950/40 text-red-100" : "border-red-200 bg-red-50 text-red-800"}`}>
+                      <p className="font-black">Security policy warning</p>
+                      <p className="mt-1 leading-5">Proceeding will trigger a 7-day online ordering restriction under our security policy. During those 7 days, please visit our shop or contact us by phone to place an order.</p>
+                    </div>
+                  )}
+
+                  <div className="mt-5">
+                    <label htmlFor="customer-cancellation-reason" className="mb-2 block text-left text-sm font-bold">
+                      Reason for cancellation <span className="text-red-600">*</span>
+                    </label>
+                    <textarea
+                      id="customer-cancellation-reason"
+                      value={cancelRequestReason}
+                      onChange={(event) => {
+                        setCancelRequestReason(event.target.value);
+                        if (cancelRequestReasonError) setCancelRequestReasonError("");
+                      }}
+                      rows={3}
+                      maxLength={500}
+                      placeholder="Tell us why you want to cancel this request..."
+                      aria-invalid={Boolean(cancelRequestReasonError)}
+                      aria-describedby={cancelRequestReasonError ? "customer-cancellation-reason-error" : undefined}
+                      className={`w-full resize-none rounded-xl border px-3 py-2.5 text-sm outline-none transition focus:ring-2 focus:ring-red-500/20 ${cancelRequestReasonError ? "border-red-500 focus:border-red-500" : darkMode ? "border-slate-600 bg-slate-900 text-slate-100 placeholder:text-slate-500 focus:border-red-400" : "border-slate-300 bg-white text-slate-900 placeholder:text-slate-400 focus:border-red-500"}`}
+                    />
+                    {cancelRequestReasonError ? (
+                      <p id="customer-cancellation-reason-error" className="mt-1.5 text-left text-xs font-medium text-red-600">{cancelRequestReasonError}</p>
+                    ) : (
+                      <p className={`mt-1.5 text-left text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Required · Up to 500 characters</p>
+                    )}
+                  </div>
 
                   <div className="mt-6 flex gap-3">
                     <button
                       type="button"
                       data-close-modal
-                      onClick={() => setCancelRequestModal({ open: false, order: null })}
+                      onClick={requestCloseCancelRequest}
+                      disabled={cancelRequestSubmitting}
                       className={`flex-1 rounded-xl px-4 py-3 text-sm font-black transition ${darkMode ? "bg-slate-700 text-slate-100 hover:bg-slate-600" : "bg-slate-200 text-slate-700 hover:bg-slate-300"}`}
                     >
                       Keep request
@@ -8302,9 +8622,10 @@ function CustomerDashboard() {
                     <button
                       type="button"
                       onClick={confirmCancelRequest}
-                      className="flex-1 rounded-xl bg-red-600 px-4 py-3 text-sm font-black text-white transition hover:bg-red-700"
+                      disabled={cancelRequestSubmitting}
+                      className="flex-1 rounded-xl bg-red-600 px-4 py-3 text-sm font-black text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-60"
                     >
-                      Confirm cancel
+                      {cancelRequestSubmitting ? "Cancelling..." : willTriggerCancellationCooldown ? "I understand, cancel" : "Confirm cancel"}
                     </button>
                   </div>
                 </div>
@@ -8363,7 +8684,7 @@ function CustomerDashboard() {
                     </span>
                   </div>
                   <span className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                    {reviewDetailsOrder.review?.submittedAt ? formatDateToMMMDDYYYY(reviewDetailsOrder.review.submittedAt) : "—"}
+                    {reviewDetailsOrder.review?.submittedAt ? formatDateToMMMDDYYYY(reviewDetailsOrder.review.submittedAt) : "â€”"}
                   </span>
                 </div>
                 {reviewDetailsOrder.review?.title && <h3 className="text-base font-semibold">{reviewDetailsOrder.review.title}</h3>}
@@ -8446,11 +8767,11 @@ function CustomerDashboard() {
                 </div>
                 <button
                   type="button"
-                  onClick={closeCustomerReviewModal}
+                  onClick={requestCloseCustomerReviewModal}
                   aria-label="Close review form"
                   className={`inline-flex h-9 w-9 items-center justify-center rounded-full border text-lg transition ${darkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-100"}`}
                 >
-                  ×
+                  Ã—
                 </button>
               </div>
               <div className="flex-1 space-y-4 overflow-y-auto p-5">
@@ -8510,7 +8831,7 @@ function CustomerDashboard() {
                       className={`mt-1.5 min-h-[160px] w-full resize-y rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-red-500 ${darkMode ? "border-slate-700 bg-slate-800 text-white placeholder:text-slate-500" : "border-slate-200 bg-white text-slate-900 placeholder:text-slate-400"}`}
                     />
                     <p className={`mt-1 flex justify-between text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                      <span>Required. 10–500 characters.</span>
+                      <span>Required. 10â€“500 characters.</span>
                       <span>{orderReviewForm.comment.length}/500</span>
                     </p>
                   </div>
@@ -8552,7 +8873,7 @@ function CustomerDashboard() {
                               aria-label={`Remove photo ${index + 1}`}
                               className="absolute right-1 top-1 inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-700 shadow"
                             >
-                              ×
+                              Ã—
                             </button>
                           </div>
                         ))}
@@ -8567,7 +8888,7 @@ function CustomerDashboard() {
               <div className={`flex flex-col-reverse gap-2 border-t px-5 py-3 sm:flex-row sm:justify-end ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-slate-50"}`}>
                 <button
                   type="button"
-                  onClick={closeCustomerReviewModal}
+                  onClick={requestCloseCustomerReviewModal}
                   className={`rounded-xl border px-4 py-2.5 text-sm font-semibold transition ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`}
                 >
                   Cancel
@@ -8770,11 +9091,19 @@ function CustomerDashboard() {
             <div className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-center sm:justify-between">
               <div>
                 <p className={`text-xs font-bold uppercase tracking-[0.16em] ${darkMode ? "text-red-300" : "text-red-700"}`}>Your order</p>
-                <h2 className={`mt-1 text-2xl font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>Shopping Cart</h2>
+                <div className="mt-1 flex flex-wrap items-center gap-3">
+                  <h2 className={`text-2xl font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>Shopping Cart</h2>
+                  {onlineOrderCooldownActive && (
+                    <div role="alert" className={`inline-flex max-w-full items-start gap-2 rounded-xl border px-3 py-2 text-xs font-medium leading-5 ${darkMode ? "border-rose-500/50 bg-rose-950/35 text-rose-100" : "border-rose-300 bg-rose-50 text-rose-900"}`}>
+                      <AlertTriangle size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
+                      <span>{renderAdminContactMessage(onlineOrderCooldownMessage)}</span>
+                    </div>
+                  )}
+                </div>
               </div>
-              <div className={`inline-flex w-fit items-center gap-2 rounded-full px-3 py-2 text-sm font-semibold ${darkMode ? "bg-slate-800 text-slate-200" : "bg-slate-100 text-slate-700"}`}>
+              <div className={`inline-flex w-fit shrink-0 items-center gap-2 whitespace-nowrap rounded-full px-3 py-2 text-sm font-semibold ${darkMode ? "bg-slate-800 text-slate-200" : "bg-slate-100 text-slate-700"}`}>
                 <ShoppingCart size={16} aria-hidden="true" />
-                {cartQuantity} item{cartQuantity === 1 ? "" : "s"}
+                <span>{cartQuantity} item{cartQuantity === 1 ? "" : "s"}</span>
               </div>
             </div>
             {cartActionError && (
@@ -8868,7 +9197,7 @@ function CustomerDashboard() {
                               <div className={`mt-1 flex flex-wrap items-center gap-3 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                                 <span>Qty: {item.quantity}</span>
                                 {item.is_estimate && item.width && item.height && (
-                                  <span>{item.width} {item.measurementUnit || item.unit || ""} × {item.height} {item.measurementUnit || item.unit || ""}</span>
+                                  <span>{item.width} {item.measurementUnit || item.unit || ""} Ã— {item.height} {item.measurementUnit || item.unit || ""}</span>
                                 )}
                               </div>
                             );
@@ -8943,7 +9272,7 @@ function CustomerDashboard() {
                     <button
                       type="button"
                       onClick={openBatchOrderModal}
-                      disabled={checkoutLoading || selectedItemCount === 0}
+                      disabled={onlineOrderCooldownActive || checkoutLoading || selectedItemCount === 0}
                       className="w-full rounded-lg bg-red-600 px-4 py-3 text-sm font-bold text-white transition hover:bg-red-700 disabled:cursor-not-allowed disabled:opacity-50"
                     >
                       Checkout Selected ({selectedItemCount})
@@ -9031,17 +9360,25 @@ function CustomerDashboard() {
                       const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                     const isDelayNotification = order.notificationType === "delay";
                       const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
+                    const isSiteInspectionNotification = order.notificationType === "site_inspection_today";
+                    const isCancellationCooldownNotification = order.notificationType === "order_cancellation_cooldown";
+                    const isCancellationWarningNotification = order.notificationType === "order_cancellation_warning";
+                    const isCancellationPolicyNotification = isCancellationCooldownNotification || isCancellationWarningNotification;
                     const isContractReady =
                       status === "contract_sent" ||
                       (status === "site_inspection" && contractStatus === "sent") ||
                       contractStatus === "sent";
-                    const isContractNotification = !isPaymentNotification && !isDelayNotification && !isInstallationNotification && (
+                    const isContractNotification = !isPaymentNotification && !isDelayNotification && !isInstallationNotification && !isSiteInspectionNotification && (
                       order.notificationType === "contract" ||
                       isContractReady ||
                       status === "contract_accepted" ||
                       contractStatus === "accepted"
                     );
                     const notificationMessage = () => {
+                      if (isSiteInspectionNotification) {
+                        return order.message || `Your site inspection for order ${order.tracking} is scheduled for ${formatDateToMMMDDYYYY(order.inspection_date)}.`;
+                      }
+                      if (isCancellationPolicyNotification) return withAdminContactPhone(order.message || "Reaching 3 cancellations will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction.");
                       if (order.notificationType === "installation_up_next") {
                         return order.message || "Your ACGC order is up next for installation. Our team will begin the installation stage soon. Please stay tuned for updates.";
                       }
@@ -9099,15 +9436,20 @@ function CustomerDashboard() {
                       transaction_approved: "Transaction approved",
                       installation_up_next: "Installation Coming Up",
                       installation_completed: "Installation Completed",
+                      site_inspection_today: "Site Inspection Scheduled for Today",
+                      order_cancellation_warning: "Cancellation Policy Reminder",
+                      order_cancellation_cooldown: "7-Day Online Ordering Restriction",
                     }[order.notificationType];
 
                     const notificationIcon = () => {
-                      if (order.notificationType === "payment_rejected") return "text-red-600";
+                      if (order.notificationType === "payment_rejected" || isCancellationCooldownNotification) return "text-red-600";
+                      if (isCancellationWarningNotification) return "text-amber-600";
                       if (order.notificationType === "payment_amount_updated") return "text-amber-600";
                       if (order.notificationType === "payment_discrepancy") return "text-amber-600";
                       if (order.notificationType === "payment_discrepancy_resolved") return "text-emerald-600";
                       if (["downpayment_exception_approved", "downpayment_exception_pending"].includes(order.notificationType)) return "text-amber-600";
                       if (order.notificationType === "installation_up_next") return "text-blue-600";
+                      if (isSiteInspectionNotification) return "text-blue-600";
                       if (order.notificationType === "installation_completed") return "text-emerald-600";
                       if (isPaymentNotification) return "text-emerald-600";
                       if (normalizeOrderStatusKey(order?.status) === "completed") return "text-emerald-600";
@@ -9127,7 +9469,7 @@ function CustomerDashboard() {
                       >
                         <div className="flex gap-3 sm:gap-4">
                           <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl sm:h-12 sm:w-12 ${darkMode ? "bg-slate-700" : "bg-slate-100"} ${notificationIcon()}`}>
-                            {isPaymentNotification ? <CreditCard size={18} /> : isDelayNotification ? <AlertTriangle size={18} /> : isContractNotification ? <FileText size={18} /> : status === "completed" ? <CheckCircle size={18} /> : <Bell size={18} />}
+                              {isPaymentNotification ? <CreditCard size={18} /> : isDelayNotification || isCancellationPolicyNotification ? <AlertTriangle size={18} /> : isSiteInspectionNotification || isInstallationNotification ? <CalendarDays size={18} /> : isContractNotification ? <FileText size={18} /> : status === "completed" ? <CheckCircle size={18} /> : <Bell size={18} />}
                           </div>
 
                           <div className="min-w-0 flex-1">
@@ -9137,7 +9479,7 @@ function CustomerDashboard() {
                                   <h3 className={`text-sm font-bold break-words sm:text-base ${darkMode ? "text-white" : "text-slate-950"}`}>{order.title || paymentNotificationTitle || (isInstallationNotification ? ({ installation_up_next: "Installation Coming Up", installation_completed: "Installation Completed" }[order.notificationType]) : null) || product.name || "Project Update"}</h3>
                                   {!isRead && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[9px] font-bold uppercase text-red-700">New</span>}
                                 </div>
-                                <p className={`mt-1 text-xs leading-5 sm:text-sm ${isRead ? darkMode ? "text-slate-400" : "text-slate-500" : darkMode ? "text-slate-200" : "text-slate-700"}`}>{notificationMessage()}</p>
+                                <p className={`mt-1 text-xs leading-5 sm:text-sm ${isRead ? darkMode ? "text-slate-400" : "text-slate-500" : darkMode ? "text-slate-200" : "text-slate-700"}`}>{renderAdminContactMessage(notificationMessage())}</p>
                                 <p className={`mt-2 text-[10px] font-medium uppercase tracking-wide sm:text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>{order.tracking}</p>
                               </div>
                               <span className={`inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-[10px] font-semibold sm:text-xs ${getOrderStatusClasses(isDelayNotification ? "Delayed" : order.status)}`}>
@@ -9304,7 +9646,7 @@ function CustomerDashboard() {
                     const orderPreviewItem = isBatchOrder
                       ? orderItems.find((item) => getOrderItemImage(item) !== PRODUCT_IMAGE_PLACEHOLDER) || product
                       : product;
-                    const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
+                    const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
 
                     return (
                       <div
@@ -9333,7 +9675,7 @@ function CustomerDashboard() {
                                 </span>
                               </div>
                               <div className={`mt-1 flex flex-wrap items-center gap-x-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                                <span>{order.tracking || order._id || "—"}</span>
+                                <span>{order.tracking || order._id || "â€”"}</span>
                                 <span aria-hidden="true">·</span>
                                 <span>{orderDisplayQuantity}</span>
                               </div>
@@ -9935,8 +10277,8 @@ function CustomerDashboard() {
                     <tbody>
                       {warrantiesInTab.map((order) => {
                         const product = order.items?.[0] || {};
-                        const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "—";
-                        const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "—";
+                        const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "â€”";
+                        const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "â€”";
                         const isActive = warrantyHistoryTab === "active";
                         const statusClass = isActive
                           ? "bg-emerald-100 text-emerald-700"
@@ -9945,11 +10287,11 @@ function CustomerDashboard() {
 
                         return (
                           <tr key={order.warranty_record_id || order._id || order.tracking} className={`border-t transition ${darkMode ? "border-slate-700 hover:bg-slate-700/60" : "border-red-100 hover:bg-red-50/70"}`}>
-                            <td className="px-6 py-5 align-middle text-sm font-black text-red-700 text-center">{order.tracking || order._id || "—"}</td>
+                            <td className="px-6 py-5 align-middle text-sm font-black text-red-700 text-center">{order.tracking || order._id || "â€”"}</td>
                             <td className={`px-6 py-5 align-middle text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
                               <span className={`font-black ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Product"}</span>
                             </td>
-                            <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{order.warranty_period || "—"}</td>
+                            <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{order.warranty_period || "â€”"}</td>
                             <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{warrantyStartDate}</td>
                             <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{warrantyExpiryDate}</td>
                             <td className="px-6 py-5 align-middle text-center">
@@ -9975,8 +10317,8 @@ function CustomerDashboard() {
                 <div className="space-y-3 md:hidden">
                   {warrantiesInTab.map((order) => {
                     const product = order.items?.[0] || {};
-                    const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "—";
-                    const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "—";
+                    const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "â€”";
+                    const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "â€”";
                     const isActive = warrantyHistoryTab === "active";
                     const statusClass = isActive
                       ? darkMode ? "bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700"
@@ -9987,14 +10329,14 @@ function CustomerDashboard() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <h3 className={`break-words text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Product"}</h3>
-                            <p className="mt-1 break-all font-mono text-xs text-slate-500">{order.tracking || order._id || "—"}</p>
+                            <p className="mt-1 break-all font-mono text-xs text-slate-500">{order.tracking || order._id || "â€”"}</p>
                           </div>
                           <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${statusClass}`}>{isActive ? "Active" : "Expired"}</span>
                         </div>
                         <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3">
                           <div className="min-w-0">
                             <dt className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Warranty</dt>
-                            <dd className={`mt-1 text-sm ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{order.warranty_period || "—"}</dd>
+                            <dd className={`mt-1 text-sm ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{order.warranty_period || "â€”"}</dd>
                           </div>
                           <div className="min-w-0">
                             <dt className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Start date</dt>
@@ -10035,7 +10377,7 @@ function CustomerDashboard() {
                     : darkMode
                       ? "border border-red-400/30 bg-red-500/15 text-red-300"
                       : "bg-red-100 text-red-700";
-                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
+                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
 
                   return (
                     <article key={order._id || order.tracking} className={`overflow-hidden rounded-[20px] border shadow-[0_8px_18px_rgba(15,23,42,0.04)] transition hover:shadow-[0_10px_24px_rgba(15,23,42,0.08)] ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
@@ -10046,7 +10388,7 @@ function CustomerDashboard() {
                           </div>
                           <div className="min-w-0">
                             <p className={`truncate text-base font-black ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Project"}</p>
-                            <p className={`mt-1 text-xs font-semibold ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{order.tracking || order._id || "—"}</p>
+                            <p className={`mt-1 text-xs font-semibold ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{order.tracking || order._id || "â€”"}</p>
                           </div>
                         </div>
 
@@ -10151,7 +10493,7 @@ function CustomerDashboard() {
             </div>
 
             <div className="mt-7 border-t border-white/15 pt-4.5 text-center text-[13px] text-slate-300">
-              © 2026 ACGC Aluminum Services — All Rights Reserved.
+              Â© 2026 ACGC Aluminum Services â€” All Rights Reserved.
             </div>
           </div>
           </footer>
@@ -10212,6 +10554,16 @@ function CustomerDashboard() {
             </section>
           </div>
         )}
+
+        <UnsavedChangesDialog
+          open={showCustomerExitConfirm}
+          darkMode={darkMode}
+          onStay={() => {
+            pendingCustomerExitRef.current = null;
+            setShowCustomerExitConfirm(false);
+          }}
+          onDiscard={discardCustomerChanges}
+        />
 
         <ContractModal
           isOpen={showContractModal}

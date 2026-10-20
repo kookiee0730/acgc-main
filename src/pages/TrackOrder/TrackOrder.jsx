@@ -215,7 +215,7 @@ function TrackOrder() {
 
       {/* TRACK FORM */}
 
-      <main className="flex-grow px-4 pb-12 pt-24 sm:px-6 sm:pb-16 sm:pt-36">
+      <main className="flex-grow px-4 pb-12 pt-24 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:px-6 sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] sm:pt-36 lg:!pb-16">
 
         <div className="mx-auto max-w-7xl">
 

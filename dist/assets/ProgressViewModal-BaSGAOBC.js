@@ -1,1 +1,0 @@
-import"./chunk-Cyuzqnbw.js";import{M as e,b as t}from"./createLucideIcon-CpaG9ejL.js";import{t as n}from"./OrderTimelineModal-DSlhz8Yh.js";import{u as r}from"./index-CtsLLafW.js";e();var i=t();function a({project:e,onClose:t}){let{darkMode:a}=r();if(!e)return null;let o=e.rawOrder||e;return(0,i.jsx)(n,{order:o,darkMode:a,onClose:t},o?._id||o?.id)}export{a as t};

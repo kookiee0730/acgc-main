@@ -95,6 +95,15 @@ const UserSchema = new mongoose.Schema(
       type: Boolean,
       default: false,
     },
+    customer_cancellation_count: {
+      type: Number,
+      min: 0,
+      default: 0,
+    },
+    online_order_cooldown_until: {
+      type: Date,
+      default: null,
+    },
     email_verification_token: {
       type: String,
       default: null,

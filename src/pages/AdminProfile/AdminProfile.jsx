@@ -578,7 +578,7 @@ function AdminProfile() {
       <div className="flex-1 min-h-0 flex flex-col">
         <Navbar />
 
-        <main className="min-w-0 flex-1 min-h-0 overflow-y-auto px-4 pb-24 pt-4 sm:px-6 sm:pb-8 sm:pt-6 xl:px-8">
+        <main className="min-w-0 flex-1 min-h-0 overflow-y-auto px-4 !pb-[calc(10rem+env(safe-area-inset-bottom))] pt-4 sm:px-6 sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] sm:pt-6 lg:!pb-24 xl:px-8">
           <AdminPageHeader
             title={`${profileType} Profile`}
             description={`Manage your ${profileType.toLowerCase()} account settings and security.`}
@@ -911,7 +911,7 @@ function AdminProfile() {
               </div>
 
               {activeTab !== "activity" && (
-                <div className={`sticky bottom-0 z-20 -mx-4 mt-6 flex justify-end border-t px-4 py-3 backdrop-blur sm:static sm:mx-0 sm:mt-8 sm:border-0 sm:bg-transparent sm:px-0 sm:py-0 ${darkMode ? "border-slate-700 bg-slate-900/95" : "border-slate-200 bg-white/95"}`}>
+                <div className={`mt-6 flex justify-end border-t px-4 py-3 sm:mt-8 sm:border-0 sm:bg-transparent sm:px-0 sm:py-0 ${darkMode ? "border-slate-700 bg-slate-900/95" : "border-slate-200 bg-white/95"}`}>
                   <button
                     onClick={handleSave}
                     disabled={saving || !profileHasChanges()}

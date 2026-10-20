@@ -51,6 +51,61 @@ const buildReviewNotificationMessage = (order, review, productName = order.items
 };
 
 const privatePaymentDocumentsDirectory = path.resolve(process.cwd(), "private-payment-documents");
+const RUSH_ORDER_DAILY_LIMIT = 2;
+const RUSH_ORDER_TIME_ZONE = "Asia/Manila";
+
+const getPhilippineDateKey = (value) => {
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone: RUSH_ORDER_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const values = Object.fromEntries(parts.map(({ type, value: partValue }) => [type, partValue]));
+  return `${values.year}-${values.month}-${values.day}`;
+};
+
+const getPhilippineDateRange = (value) => {
+  const dateKey = getPhilippineDateKey(value);
+  if (!dateKey) return null;
+  const start = new Date(`${dateKey}T00:00:00+08:00`);
+  return { dateKey, start, end: new Date(start.getTime() + 24 * 60 * 60 * 1000) };
+};
+
+const countSelectedRushItems = (items = []) => (Array.isArray(items) ? items : []).filter((item) => (
+  Array.isArray(item?.extra_charges)
+  && item.extra_charges.some((charge) => (
+    charge?.is_active !== false
+    && charge?.is_selected === true
+    && /rush/i.test(String(charge?.name || charge?.label || ""))
+  ))
+)).length;
+
+const countRushOrdersOnDate = async (value, excludedOrderId = null) => {
+  const range = getPhilippineDateRange(value);
+  if (!range) return 0;
+  const orders = await Order.find({
+    inspection_date: { $gte: range.start, $lt: range.end },
+    status: { $not: /^(cancelled|canceled)$/i },
+    ...(excludedOrderId ? { _id: { $ne: excludedOrderId } } : {}),
+  }).select("is_rush_order items.extra_charges").lean();
+  return orders.reduce((total, order) => total + Math.max(
+    countSelectedRushItems(order.items),
+    order.is_rush_order === true ? 1 : 0,
+  ), 0);
+};
+
+const getOnlineOrderCooldownMessage = (cooldownUntil) => {
+  const cooldownDate = new Intl.DateTimeFormat("en-PH", {
+    timeZone: RUSH_ORDER_TIME_ZONE,
+    year: "numeric",
+    month: "long",
+    day: "numeric",
+  }).format(cooldownUntil);
+  return `Online ordering is temporarily restricted after three order cancellations. You can place another online order after ${cooldownDate}. During this period, please visit our shop or contact us by phone.`;
+};
 
 const getPaymentDocumentDisplayName = (user) => [user?.first_name, user?.last_name].filter(Boolean).join(" ") || user?.email || "Administrator";
 
@@ -503,6 +558,38 @@ const getItemAmountValue = (item) => {
   return unitPrice > 0 ? unitPrice * quantity : 0;
 };
 
+// Reprice against the current catalog when creating a new order. The returned
+// amount includes only required extras and optional extras selected by the
+// customer, using catalog amounts rather than values supplied by the browser.
+const getCatalogProductLineTotal = (product = {}, item = {}) => {
+  return getMeasuredProductLineTotal(product, item);
+};
+
+const applyCatalogExtraChargeSelections = (product = {}, item = {}, { allowAmountOverrides = false } = {}) => {
+  const catalogCharges = Array.isArray(product.extra_charges) ? product.extra_charges : [];
+  const requestedCharges = Array.isArray(item.extra_charges) ? item.extra_charges : [];
+  const extra_charges = catalogCharges.map((charge, index) => {
+    const chargeId = String(charge?._id || "");
+    const requested = (chargeId && requestedCharges.find((entry) => String(entry?._id || "") === chargeId))
+      || requestedCharges.find((entry) => entry?.name && entry.name === charge.name)
+      || requestedCharges[index];
+    return {
+      ...charge,
+      amount: allowAmountOverrides
+        && Number.isFinite(Number(requested?.amount))
+        && Number(requested.amount) >= 0
+        ? Number(requested.amount)
+        : charge.amount,
+      // Charge labels, types, and amounts come from the catalog. The customer
+      // can submit only the selection state, never a client-supplied amount.
+      is_selected: charge?.is_optional === true
+        ? requested?.is_selected === true && charge?.is_active !== false
+        : charge?.is_active !== false,
+    };
+  });
+  return { ...item, extra_charges };
+};
+
 const repriceInspectionItems = async (items) => {
   const sanitizedItems = sanitizeOrderItems(items);
   const productIds = [...new Set(sanitizedItems.map((item) => item.product_id).filter(Boolean))];
@@ -525,18 +612,22 @@ const repriceInspectionItems = async (items) => {
 
   return sanitizedItems.map((item) => {
     const product = productsById.get(String(item.product_id));
+    const pricedItem = applyCatalogExtraChargeSelections(product, item, { allowAmountOverrides: true });
 
-    const priceSnapshot = buildProductPriceSnapshot(product, item);
-    const itemOverride = item.estimation_mode === "manual"
-      ? Number(item.manual_estimated_total) || 0
+    const priceSnapshot = buildProductPriceSnapshot(product, pricedItem);
+    const itemOverride = pricedItem.estimation_mode === "manual"
+      ? Number(pricedItem.manual_estimated_total) || 0
       : 0;
     const lineTotal = itemOverride > 0
       ? itemOverride
-      : getMeasuredProductLineTotal(product, item);
+      : getCatalogProductLineTotal(product, pricedItem);
 
     return {
-      ...item,
+      ...pricedItem,
       ...priceSnapshot,
+      // Keep admin-entered charge amounts from the sanitized inspection item.
+      // The product price snapshot is for pricing fields and must not restore catalog defaults.
+      extra_charges: pricedItem.extra_charges,
       estimated_price: lineTotal,
       line_total: lineTotal,
     };
@@ -592,8 +683,8 @@ export const listOrders = async (req, res) => {
 
     const orders = await Order.find(filter)
       .sort({ createdAt: -1 })
-      .populate("customer", "first_name last_name email phone street_address city province zip_code")
-      .populate("items.product_id", "image_url image images name product_name category product_type unit pricing_method unit_price base_price price_per_sqft price_per_blade blade_count estimated_price estimated_price_override width height measurement_unit standard_size")
+      .populate("customer", "first_name last_name email phone street_address city province zip_code customer_cancellation_count online_order_cooldown_until")
+      .populate("items.product_id", "image_url image images name product_name category product_type unit pricing_method unit_price base_price price_per_sqft price_per_blade blade_count blade_glass_types sell_blades_only sell_with_frame blade_frame_types allow_custom_frame_size custom_frame_price minimum_blades maximum_blades customer_can_choose_blade_count default_blade_glass_type default_sale_mode default_frame_type show_price_per_blade customization customization_fee extra_charges size_limits estimated_price estimated_price_override estimated_area width height measurement_unit standard_size")
       .lean();
 
     if (req.user.role === "customer" && orders.length > 0) {
@@ -635,6 +726,15 @@ export const listOrders = async (req, res) => {
 export const createOrder = async (req, res) => {
   try {
     const { items, shipping_address, customer_phone, order_type } = req.body;
+    const customerAccount = await User.findById(req.user.id).select("online_order_cooldown_until").lean();
+    if (customerAccount?.online_order_cooldown_until && new Date(customerAccount.online_order_cooldown_until) > new Date()) {
+      return res.status(423).json({
+        success: false,
+        code: "ONLINE_ORDER_COOLDOWN",
+        message: getOnlineOrderCooldownMessage(new Date(customerAccount.online_order_cooldown_until)),
+        cooldown_until: customerAccount.online_order_cooldown_until,
+      });
+    }
     const requestedCartItemIds = Array.isArray(req.body.cart_item_ids)
       ? [...new Set(req.body.cart_item_ids.map((cartId) => String(cartId || "").trim()).filter(Boolean))]
       : [];
@@ -683,7 +783,15 @@ export const createOrder = async (req, res) => {
 
     const pricedItems = sanitizedItems.map((item) => {
       const product = productsById.get(String(item.product_id));
-      return { ...item, ...buildProductPriceSnapshot(product, item) };
+      const pricedItem = applyCatalogExtraChargeSelections(product, item);
+      const priceSnapshot = buildProductPriceSnapshot(product, pricedItem);
+      const lineTotal = getCatalogProductLineTotal(product, pricedItem);
+      return {
+        ...pricedItem,
+        ...priceSnapshot,
+        estimated_price: lineTotal,
+        line_total: lineTotal,
+      };
     });
 
     const total_amount = pricedItems.reduce((sum, item) => sum + getItemAmountValue(item), 0);
@@ -760,6 +868,7 @@ export const createOrderAsAdmin = async (req, res) => {
       inspection_date,
       estimated_installation_date,
       inspection_notes,
+      is_rush_order,
     } = req.body;
 
     if (req.body.manual_override !== undefined && req.body.manual_override !== null && String(req.body.manual_override).trim() !== ""
@@ -774,6 +883,25 @@ export const createOrderAsAdmin = async (req, res) => {
     const installationDateError = getInstallationDateError(inspection_date, estimated_installation_date);
     if (installationDateError) {
       return res.status(400).json({ success: false, message: installationDateError });
+    }
+
+    const requestedRushSlots = Math.max(countSelectedRushItems(items), is_rush_order === true ? 1 : 0);
+    if (requestedRushSlots > 0 && !inspection_date) {
+      return res.status(400).json({ success: false, message: "A scheduled inspection date is required for a Rush Order." });
+    }
+    if (requestedRushSlots > 0) {
+      const rushOrderCount = await countRushOrdersOnDate(inspection_date);
+      if (rushOrderCount + requestedRushSlots > RUSH_ORDER_DAILY_LIMIT) {
+        const requestedTotal = rushOrderCount + requestedRushSlots;
+        return res.status(409).json({
+          success: false,
+          code: "RUSH_ORDER_DAILY_LIMIT",
+          message: `This order would use ${requestedTotal} Rush Order slots on the selected date. The daily maximum is ${RUSH_ORDER_DAILY_LIMIT}.`,
+          rush_order_count: rushOrderCount,
+          requested_rush_order_count: requestedRushSlots,
+          rush_order_limit: RUSH_ORDER_DAILY_LIMIT,
+        });
+      }
     }
 
     const normalizedOrderType = order_type === "walk_in_customer" ? "walk_in_customer" : "online_order";
@@ -847,9 +975,10 @@ export const createOrderAsAdmin = async (req, res) => {
       contract_status: hasSignedWalkInContract ? "accepted" : "pending",
       payment_status: "pending",
       status: hasSignedWalkInContract ? "contract_accepted" : "site_inspection",
-      inspection_status: hasSignedWalkInContract ? "completed" : "pending",
+      inspection_status: hasSignedWalkInContract ? "completed" : inspection_date ? "scheduled" : "pending",
       inspection_completed_at: hasSignedWalkInContract ? walkInSignedAt : null,
       inspection_date: inspection_date ? new Date(inspection_date) : null,
+      is_rush_order: is_rush_order === true,
       estimated_installation_date: estimated_installation_date ? new Date(estimated_installation_date) : null,
       inspection_notes: inspection_notes || "",
       // Walk-in specific
@@ -934,7 +1063,7 @@ export const trackOrder = async (req, res) => {
 
 export const getAdminOrders = async (req, res) => {
   try {
-    if (!["admin", "skilled_worker"].includes(req.user.role)) {
+    if (!["admin", "super_admin", "skilled_worker"].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: "Staff access required" });
     }
 
@@ -983,20 +1112,20 @@ export const getAdminOrders = async (req, res) => {
     const pageValue = Math.max(Number(req.query.page) || 1, 1);
     const skipValue = limitValue ? (pageValue - 1) * limitValue : 0;
     const baseFields = [
-      "customer customer_name customer_email customer_phone shipping_address items total_amount estimated_cost final_project_cost",
+      "customer customer_name customer_email customer_phone has_account_on_website shipping_address items total_amount estimated_cost final_project_cost",
       "payment_terms downpayment_amount required_downpayment_amount amount_paid payment_status payment_records payment_proof_amount payment_proof_submitted_at payment_proof_confirmed_at payment_proof_file_name payment_proof_file_url payment_method transaction_number",
-      "status order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
+      "status cancellation_reason customer_cancellation_count_at_cancel is_rush_order order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
       "tracking inspection_status inspection_completed_at inspection_date estimated_installation_date inspection_notes issues_found",
-      "progress progress_stages attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
+      "progress progress_stages attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
     ].join(" ");
     const moduleFields = {
       dashboard: [
         "customer customer_name customer_email customer_phone items total_amount estimated_cost final_project_cost",
-        "status contract_status contractStatus contractSentAt contractDeclineReason acceptedByCustomer acceptedAt transactionCreated tracking createdAt updatedAt",
+        "status is_rush_order contract_status contractStatus contractSentAt contractDeclineReason acceptedByCustomer acceptedAt transactionCreated tracking createdAt updatedAt",
       ].join(" "),
       notifications: [
         "customer customer_name customer_email customer_phone items total_amount final_project_cost",
-        "status contract_status contractStatus contractSentAt payment_status payment_records payment_proof_amount payment_proof_submitted_at tracking inspection_status inspection_date createdAt updatedAt",
+        "status cancellation_reason customer_cancellation_count_at_cancel order_type contract_status contractStatus contractSentAt payment_status payment_records payment_proof_amount payment_proof_submitted_at tracking inspection_status inspection_date createdAt updatedAt",
       ].join(" "),
       transactions: baseFields,
       site_inspection: baseFields,
@@ -1008,7 +1137,7 @@ export const getAdminOrders = async (req, res) => {
     const query = Order.find(filter)
       .select(selectedFields)
       .populate("items.product_id", "image_url image images name category product_type width height measurement_unit standard_size")
-      .populate("customer", "first_name last_name email phone street_address city province zip_code")
+      .populate("customer", "first_name last_name email phone street_address city province zip_code customer_cancellation_count online_order_cooldown_until")
       .sort({ createdAt: -1 })
       .lean();
 
@@ -1035,13 +1164,13 @@ export const getAdminOrders = async (req, res) => {
 
 export const getAdminOrderById = async (req, res) => {
   try {
-    if (!["admin", "skilled_worker"].includes(req.user.role)) {
+    if (!["admin", "super_admin", "skilled_worker"].includes(req.user.role)) {
       return res.status(403).json({ success: false, message: "Staff access required" });
     }
 
     const { orderId } = req.params;
     const order = await Order.findById(orderId)
-      .populate("customer", "first_name last_name email phone street_address city province zip_code")
+      .populate("customer", "first_name last_name email phone street_address city province zip_code customer_cancellation_count online_order_cooldown_until")
       .populate("items.product_id", "image_url image images name category product_type width height measurement_unit standard_size");
 
     if (!order) {
@@ -1576,6 +1705,9 @@ export const updateOrderStatus = async (req, res) => {
     }
 
     if (status) order.status = status;
+    if (String(status || "").toLowerCase() === "cancelled" && (req.body?.reason !== undefined || req.body?.cancellation_reason !== undefined)) {
+      order.cancellation_reason = String(req.body.reason || req.body.cancellation_reason || "").trim();
+    }
     if (contract_status) order.contract_status = contract_status;
     if (required_downpayment_amount !== undefined) {
       const nextRequiredAmount = Math.min(
@@ -2166,17 +2298,101 @@ export const cancelCustomerOrder = async (req, res) => {
     }
 
     const cancellationReason = String(req.body?.reason || req.body?.cancellation_reason || "").trim();
-    order.status = "cancelled";
-    if (order.contract_status === "accepted") {
-      order.contract_status = "declined";
+    const cancellationDate = new Date();
+    const updatedOrder = await Order.findOneAndUpdate(
+      {
+        _id: order._id,
+        customer: req.user.id,
+        status: { $nin: ["cancelled", "completed"] },
+        $or: [{ progress: { $lt: 100 } }, { progress: null }, { progress: { $exists: false } }],
+      },
+      { $set: {
+        status: "cancelled",
+        cancellation_reason: cancellationReason,
+        ...(order.contract_status === "accepted" ? { contract_status: "declined" } : {}),
+      } },
+      { new: true },
+    );
+
+    if (!updatedOrder) {
+      const latestOrder = await Order.findById(order._id);
+      if (latestOrder?.status === "cancelled") {
+        return res.json({ success: true, duplicate: true, order: latestOrder, message: "Order already cancelled." });
+      }
+      if (latestOrder?.status === "completed" || Number(latestOrder?.progress) >= 100) {
+        return res.status(400).json({ success: false, message: "This order has already been completed and cannot be cancelled." });
+      }
+      return res.status(409).json({ success: false, message: "This order changed and can no longer be cancelled. Refresh your orders and try again." });
     }
 
-    await order.save();
+    const customerAccount = await User.findByIdAndUpdate(
+      req.user.id,
+      { $inc: { customer_cancellation_count: 1 } },
+      { new: true },
+    ).select("customer_cancellation_count online_order_cooldown_until");
+    const cancellationCount = Number(customerAccount?.customer_cancellation_count) || 0;
+    updatedOrder.customer_cancellation_count_at_cancel = cancellationCount;
+    await updatedOrder.save();
+    let cooldownUntil = customerAccount?.online_order_cooldown_until || null;
+    let message = "Order cancelled successfully.";
+    const cancellationCountInCycle = cancellationCount > 0 ? ((cancellationCount - 1) % 3) + 1 : 0;
+    const formattedOrderTracking = updatedOrder.tracking || updatedOrder._id;
+    if (cancellationCountInCycle === 1) {
+      message = "Order cancelled. This is cancellation 1 of 3; a third cancellation triggers a 7-day online ordering restriction.";
+    } else if (cancellationCountInCycle === 2) {
+      message = "Order cancelled. This is cancellation 2 of 3; your next cancellation triggers a 7-day online ordering restriction.";
+    }
+    if (cancellationCountInCycle === 3) {
+      cooldownUntil = new Date(cancellationDate.getTime() + 7 * 24 * 60 * 60 * 1000);
+      await User.updateOne({ _id: req.user.id }, { $set: { online_order_cooldown_until: cooldownUntil } });
+      const formattedCooldownUntil = new Intl.DateTimeFormat("en-PH", { timeZone: RUSH_ORDER_TIME_ZONE, year: "numeric", month: "long", day: "numeric" }).format(cooldownUntil);
+      message = `Order cancelled. Online ordering is restricted for 7 days, until ${formattedCooldownUntil}. Please visit our shop or contact us by phone if you need to place an order during this period.`;
+    }
 
-    res.json({ success: true, order, message: "Order cancelled successfully." });
-    void sendOrderNotification("order_cancelled", order, {
+    const cooldownTriggered = cancellationCountInCycle === 3;
+    const eventKey = `order_cancellation_policy:${cancellationCount}`;
+    const formattedCooldownUntil = cooldownUntil
+      ? new Intl.DateTimeFormat("en-PH", { timeZone: RUSH_ORDER_TIME_ZONE, year: "numeric", month: "long", day: "numeric" }).format(cooldownUntil)
+      : "";
+    const notification = cooldownTriggered
+      ? {
+          type: "order_cancellation_cooldown",
+          title: "7-Day Online Ordering Restriction",
+          message: `Your third order cancellation has activated a 7-day restriction on online ordering. You can place another online order after ${formattedCooldownUntil}. During these 7 days, please visit our shop or contact us by phone if you need to place an order. This restriction applies to order ${formattedOrderTracking}.`,
+          stageKey: "order_cancellation_cooldown",
+          stageName: "7-Day Online Ordering Restriction",
+        }
+      : {
+          type: "order_cancellation_warning",
+          title: "Cancellation Policy Reminder",
+          message: cancellationCountInCycle === 1
+            ? `This is your first cancellation in the current policy cycle (1 of 3). Reaching 3 cancellations will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction. This reminder is for order ${formattedOrderTracking}.`
+            : `This is your second cancellation in the current policy cycle (2 of 3). Your next cancellation will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction. This reminder is for order ${formattedOrderTracking}.`,
+          stageKey: "order_cancellation_warning",
+          stageName: "Cancellation Policy Reminder",
+        };
+    await CustomerNotification.updateOne(
+      { order: updatedOrder._id, eventKey },
+      { $setOnInsert: {
+        customer: req.user.id,
+        order: updatedOrder._id,
+        eventKey,
+        ...notification,
+        tracking: updatedOrder.tracking || "",
+      } },
+      { upsert: true },
+    );
+
+    res.json({
+      success: true,
+      order: await orderWithCustomerNotifications(updatedOrder),
+      message,
+      customer_cancellation_count: cancellationCount,
+      cooldown_until: cooldownUntil,
+    });
+    void sendOrderNotification("order_cancelled", updatedOrder, {
       customerEmail: req.user.email || order.customer_email,
-      date: new Date(),
+      date: cancellationDate,
       reason: cancellationReason,
     });
   } catch (error) {
@@ -2422,7 +2638,7 @@ export const updateOrderInspection = async (req, res) => {
     }
 
     const { orderId } = req.params;
-    const { inspection_status, inspection_date, estimated_installation_date, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode } = req.body;
+    const { inspection_status, inspection_date, estimated_installation_date, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode, is_rush_order } = req.body;
 
     if (manual_override !== undefined && manual_override !== null && String(manual_override).trim() !== ""
       && (!Number.isFinite(Number(manual_override)) || Number(manual_override) < 0)) {
@@ -2499,6 +2715,29 @@ export const updateOrderInspection = async (req, res) => {
       return res.status(400).json({ success: false, message: installationDateError });
     }
 
+    const nextRushOrderValue = typeof is_rush_order === "boolean" ? is_rush_order : order.is_rush_order === true;
+    const nextInspectionDate = inspection_date !== undefined ? inspection_date : order.inspection_date;
+    const nextItems = Array.isArray(updateData.items) ? updateData.items : order.items || [];
+    const requestedRushSlots = Math.max(countSelectedRushItems(nextItems), nextRushOrderValue ? 1 : 0);
+    if (typeof is_rush_order === "boolean") updateData.is_rush_order = is_rush_order;
+    if (requestedRushSlots > 0 && !nextInspectionDate) {
+      return res.status(400).json({ success: false, message: "A scheduled inspection date is required for a Rush Order." });
+    }
+    if (requestedRushSlots > 0) {
+      const rushOrderCount = await countRushOrdersOnDate(nextInspectionDate, order._id);
+      if (rushOrderCount + requestedRushSlots > RUSH_ORDER_DAILY_LIMIT) {
+        const requestedTotal = rushOrderCount + requestedRushSlots;
+        return res.status(409).json({
+          success: false,
+          code: "RUSH_ORDER_DAILY_LIMIT",
+          message: `This order would use ${requestedTotal} Rush Order slots on the selected date. The daily maximum is ${RUSH_ORDER_DAILY_LIMIT}.`,
+          rush_order_count: rushOrderCount,
+          requested_rush_order_count: requestedRushSlots,
+          rush_order_limit: RUSH_ORDER_DAILY_LIMIT,
+        });
+      }
+    }
+
     const registeredCustomer = order.customer?._id ? order.customer : null;
     if (registeredCustomer) {
       const registeredName = `${registeredCustomer.first_name || ""} ${registeredCustomer.last_name || ""}`.trim();
@@ -2571,6 +2810,32 @@ export const updateOrderInspection = async (req, res) => {
         message: "This project's price is locked because its contract was accepted or a payment was recorded. Use the contract amendment and approval workflow before changing its price.",
       });
     }
+    const optionalChargeChanges = [];
+    if (Array.isArray(updateData.items)) {
+      currentItems.forEach((item, itemIndex) => {
+        const previousItem = order.items?.[itemIndex];
+        const previousCharges = (previousItem?.extra_charges || []).filter((charge) => charge?.is_optional === true);
+        const nextCharges = (item.extra_charges || []).filter((charge) => charge?.is_optional === true);
+        const getChargeKey = (charge, index) => String(charge?._id || charge?.name || `charge-${index}`);
+        const previousByKey = new Map(previousCharges.map((charge, index) => [getChargeKey(charge, index), charge]));
+        const nextByKey = new Map(nextCharges.map((charge, index) => [getChargeKey(charge, index), charge]));
+        const keys = new Set([...previousByKey.keys(), ...nextByKey.keys()]);
+        keys.forEach((key) => {
+          const previous = previousByKey.get(key);
+          const next = nextByKey.get(key);
+          const before = { selected: previous?.is_selected === true, amount: Number(previous?.amount) || 0 };
+          const after = { selected: next?.is_selected === true, amount: Number(next?.amount) || 0 };
+          if (before.selected !== after.selected || before.amount !== after.amount) {
+            optionalChargeChanges.push({
+              product: item.name || previousItem?.name || "Product",
+              charge: next?.name || previous?.name || "Optional charge",
+              before,
+              after,
+            });
+          }
+        });
+      });
+    }
     updateData.manual_override = updatedManualOverride;
     updateData.estimated_cost = updatedEstimatedCost;
     updateData.final_project_cost = updatedTotalAmount;
@@ -2579,7 +2844,21 @@ export const updateOrderInspection = async (req, res) => {
     updateData.downpayment_amount = updatedRequiredAmount;
     updateData.required_downpayment_amount = updatedRequiredAmount;
 
+    const previousProjectTotal = getFinalProjectCost(order);
     Object.assign(order, updateData);
+    if (optionalChargeChanges.length > 0) {
+      const actor = req.user || {};
+      order.price_change_history = order.price_change_history || [];
+      order.price_change_history.push({
+        changed_at: new Date(),
+        changed_by: actor.id || actor._id || null,
+        changed_by_name: [actor.first_name, actor.last_name].filter(Boolean).join(" "),
+        reason: "Optional charges updated during site inspection",
+        previous_total: previousProjectTotal,
+        new_total: updatedTotalAmount,
+        optional_charge_changes: optionalChargeChanges,
+      });
+    }
     if (downpayment_received === true && !wasDownpaymentReceived && (Number(order.amount_paid) || 0) < updatedRequiredAmount) {
       order.amount_paid = updatedRequiredAmount;
     }
@@ -3146,7 +3425,7 @@ export const sendWalkInApprovalEmail = async (req, res) => {
       actionLabel: "Log in to view your contract",
     });
 
-    const attachments = [generatedContractAttachment];
+    const attachments = [...(contractEmail.attachments || []), generatedContractAttachment];
     const uploadedContractAttachment = getLocalUploadedAttachment(contractLink);
     if (uploadedContractAttachment) {
       attachments.push(uploadedContractAttachment);

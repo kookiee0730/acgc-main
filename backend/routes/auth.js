@@ -5,6 +5,8 @@ import { createHash, randomBytes, randomInt, timingSafeEqual } from "node:crypto
 import mongoose from "mongoose";
 import process from "node:process";
 import { promises as fs } from "node:fs";
+import { Readable } from "node:stream";
+import { pipeline } from "node:stream/promises";
 import multer from "multer";
 import User from "../models/User.js";
 import Admin from "../models/Admin.js";
@@ -35,10 +37,12 @@ import {
 } from "../services/backupService.js";
 import {
   hashBackupRecoveryPassword,
+  validateBackupRecoveryPassword,
   verifyBackupRecoveryPassword,
 } from "../services/backupRecoverySecurity.js";
 import { buildFrontendUrl } from "../services/frontendUrl.js";
 import { buildCustomerEmailTemplate } from "../services/customerEmailTemplate.js";
+import { runSiteInspectionReminderCheck } from "../services/siteInspectionReminders.js";
 import { isPasswordPolicySatisfied, PASSWORD_POLICY_MESSAGE } from "../services/passwordPolicy.js";
 
 const backupImportUpload = multer({
@@ -119,6 +123,7 @@ const sanitizeStaffAccess = (staffAccess) => {
   return {
     profile_version: Number(staffAccess.profile_version) || 1,
     subrole: typeof staffAccess.subrole === "string" ? staffAccess.subrole.trim().slice(0, 40) : "Helper",
+    hide_payment_amounts: staffAccess.hide_payment_amounts === true,
     custom_subroles: Array.isArray(staffAccess.custom_subroles)
       ? [...new Set(staffAccess.custom_subroles.filter((item) => typeof item === "string").map((item) => item.trim()).filter(Boolean))].slice(0, 20)
       : [],
@@ -212,6 +217,12 @@ const PASSWORD_RESET_REQUEST_WINDOW_MS = 60 * 60 * 1000;
 const PASSWORD_RESET_MAX_REQUESTS = 5;
 const PASSWORD_RESET_MAX_ATTEMPTS = 5;
 const PASSWORD_RESET_REQUEST_LOCK_MS = 2 * 60 * 1000;
+const BACKUP_RECOVERY_CODE_TTL_MS = 10 * 60 * 1000;
+const BACKUP_RECOVERY_CODE_COOLDOWN_MS = 60 * 1000;
+const BACKUP_RECOVERY_CODE_REQUEST_WINDOW_MS = 60 * 60 * 1000;
+const BACKUP_RECOVERY_CODE_MAX_REQUESTS = 10;
+const BACKUP_RECOVERY_CODE_MAX_ATTEMPTS = 5;
+const BACKUP_RECOVERY_CODE_LOCK_MS = 2 * 60 * 1000;
 
 const reservePasswordResetRequest = async (Model, accountId) => {
   const now = new Date();
@@ -646,16 +657,23 @@ router.get("/system-settings", authMiddleware, async (req, res) => {
       .select("+backup_recovery_password_salt +backup_recovery_password_hash")
       .lean();
     const backupHistory = await hydrateBackupHistorySizes(settings?.backup_history);
+    const backupSchedule = ["daily", "weekly", "monthly"].includes(settings?.backup_schedule)
+      ? settings.backup_schedule
+      : "weekly";
+    const backupScheduleTime = /^([01]\d|2[0-3]):([0-5]\d)$/.test(settings?.backup_schedule_time || "")
+      ? settings.backup_schedule_time
+      : "00:00";
     res.json({
       success: true,
       maintenance_mode: settings?.maintenance_mode === true,
       global_permissions: settings?.global_permissions || null,
-      backup_schedule: settings?.backup_schedule || "weekly",
+      backup_schedule: backupSchedule,
+      backup_schedule_time: backupScheduleTime,
       backup_status: settings?.backup_status || "Success",
       last_backup_at: settings?.last_backup_at || null,
       backup_history: backupHistory,
       backup_recovery_password_configured: Boolean(settings?.backup_recovery_password_salt && settings?.backup_recovery_password_hash),
-      next_backup_at: getNextScheduledBackupAt(settings?.backup_schedule || "weekly"),
+      next_backup_at: getNextScheduledBackupAt(backupSchedule, backupScheduleTime),
     });
   } catch (error) {
     console.error("Get system settings error:", error);
@@ -699,6 +717,277 @@ router.put("/system-settings/backups/recovery-password", authMiddleware, roleMid
     return res.status(error.status || 500).json({
       success: false,
       message: error.status ? error.message : "Unable to update the recovery password.",
+    });
+  }
+});
+
+router.post("/system-settings/backups/recovery-password/forgot", authMiddleware, roleMiddleware(["admin", "super_admin"]), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const { account } = await getProfileEmailChangeAccount(req);
+    const email = String(account?.email || "").trim().toLowerCase();
+    if (!account || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ success: false, message: "Add a valid email to your administrator account before resetting the recovery password." });
+    }
+
+    const currentSettings = await SystemSetting.findOne({ key: "global" })
+      .select("+backup_recovery_password_hash")
+      .lean();
+    if (!currentSettings?.backup_recovery_password_hash) {
+      return res.status(409).json({ success: false, message: "A recovery password has not been set yet." });
+    }
+
+    const now = new Date();
+    const cooldownCutoff = new Date(now.getTime() - BACKUP_RECOVERY_CODE_COOLDOWN_MS);
+    const requestWindowCutoff = new Date(now.getTime() - BACKUP_RECOVERY_CODE_REQUEST_WINDOW_MS);
+    const requestLockUntil = new Date(now.getTime() + BACKUP_RECOVERY_CODE_LOCK_MS);
+    const commonRequestFilter = {
+      key: "global",
+      $and: [
+        { $or: [{ backup_recovery_password_reset_sent_at: null }, { backup_recovery_password_reset_sent_at: { $lte: cooldownCutoff } }] },
+        { $or: [{ backup_recovery_password_reset_lock_until: null }, { backup_recovery_password_reset_lock_until: { $lte: now } }] },
+      ],
+    };
+    const newWindowRequest = await SystemSetting.findOneAndUpdate({
+      ...commonRequestFilter,
+      $and: [
+        ...commonRequestFilter.$and,
+        { $or: [
+          { backup_recovery_password_reset_window_started_at: null },
+          { backup_recovery_password_reset_window_started_at: { $lte: requestWindowCutoff } },
+        ] },
+      ],
+    }, {
+      $set: {
+        backup_recovery_password_reset_window_started_at: now,
+        backup_recovery_password_reset_request_count: 1,
+        backup_recovery_password_reset_sent_at: now,
+        backup_recovery_password_reset_lock_until: requestLockUntil,
+        backup_recovery_password_reset_code_hash: null,
+        backup_recovery_password_reset_expires_at: null,
+        backup_recovery_password_reset_attempts: 0,
+      },
+    }, { new: true });
+    const reservedSettings = newWindowRequest || await SystemSetting.findOneAndUpdate({
+      ...commonRequestFilter,
+      backup_recovery_password_reset_window_started_at: { $gt: requestWindowCutoff },
+      backup_recovery_password_reset_request_count: { $lt: BACKUP_RECOVERY_CODE_MAX_REQUESTS },
+    }, {
+      $inc: { backup_recovery_password_reset_request_count: 1 },
+      $set: {
+        backup_recovery_password_reset_sent_at: now,
+        backup_recovery_password_reset_lock_until: requestLockUntil,
+        backup_recovery_password_reset_code_hash: null,
+        backup_recovery_password_reset_expires_at: null,
+        backup_recovery_password_reset_attempts: 0,
+      },
+    }, { new: true });
+
+    if (!reservedSettings) {
+      const currentRequest = await SystemSetting.findOne({ key: "global" })
+        .select("+backup_recovery_password_reset_code_hash +backup_recovery_password_reset_expires_at +backup_recovery_password_reset_sent_at +backup_recovery_password_reset_window_started_at +backup_recovery_password_reset_request_count +backup_recovery_password_reset_lock_until")
+        .lean();
+      if (currentRequest?.backup_recovery_password_reset_code_hash && currentRequest.backup_recovery_password_reset_expires_at > now) {
+        return res.json({
+          success: true,
+          message: "A recovery password code was already sent and is still valid. Check your administrator email.",
+          expires_at: currentRequest.backup_recovery_password_reset_expires_at.toISOString(),
+        });
+      }
+
+      const retryAt = [
+        currentRequest?.backup_recovery_password_reset_lock_until,
+        currentRequest?.backup_recovery_password_reset_sent_at
+          ? new Date(currentRequest.backup_recovery_password_reset_sent_at.getTime() + BACKUP_RECOVERY_CODE_COOLDOWN_MS)
+          : null,
+        currentRequest?.backup_recovery_password_reset_window_started_at
+          && currentRequest.backup_recovery_password_reset_request_count >= BACKUP_RECOVERY_CODE_MAX_REQUESTS
+          ? new Date(currentRequest.backup_recovery_password_reset_window_started_at.getTime() + BACKUP_RECOVERY_CODE_REQUEST_WINDOW_MS)
+          : null,
+      ].filter((date) => date instanceof Date && date > now).sort((a, b) => b - a)[0];
+      const retryAfterSeconds = retryAt ? Math.ceil((retryAt.getTime() - now.getTime()) / 1000) : BACKUP_RECOVERY_CODE_COOLDOWN_MS / 1000;
+      res.set("Retry-After", String(retryAfterSeconds));
+      return res.status(429).json({ success: false, retry_after_seconds: retryAfterSeconds, message: `Please wait ${retryAfterSeconds} seconds before requesting another recovery password code.` });
+    }
+
+    const code = String(randomInt(100000, 1000000));
+    const codeHash = hashVerificationToken(`${reservedSettings._id}:${account._id}:${email}:${code}`);
+    const expiresAt = new Date(now.getTime() + BACKUP_RECOVERY_CODE_TTL_MS);
+    const activeRequest = await SystemSetting.findOneAndUpdate({
+      _id: reservedSettings._id,
+      backup_recovery_password_reset_lock_until: requestLockUntil,
+    }, {
+      $set: {
+        backup_recovery_password_reset_code_hash: codeHash,
+        backup_recovery_password_reset_expires_at: expiresAt,
+        backup_recovery_password_reset_attempts: 0,
+      },
+    }, { new: true });
+    if (!activeRequest) {
+      return res.status(429).json({ success: false, message: "Please wait before requesting another recovery password code." });
+    }
+
+    const emailContent = buildCustomerEmailTemplate({
+      title: "Your ACGC recovery password reset code",
+      summary: `Hello ${account.first_name || "Administrator"}, enter this code to reset the backup recovery password for your account.`,
+      status: "Backup Recovery Password",
+      fields: [["Verification code", code]],
+      nextSteps: "This code expires in 10 minutes. If you did not request this code, no action is needed.",
+    });
+    try {
+      await sendMail({
+        from: process.env.EMAIL_FROM || "ACGC <no-reply@acgc.local>",
+        to: email,
+        subject: "Your ACGC recovery password reset code",
+        ...emailContent,
+      });
+    } catch (mailError) {
+      await SystemSetting.updateOne(
+        { _id: reservedSettings._id, backup_recovery_password_reset_code_hash: codeHash },
+        { $set: { backup_recovery_password_reset_code_hash: null, backup_recovery_password_reset_expires_at: null, backup_recovery_password_reset_lock_until: null } },
+      );
+      console.error("Backup recovery password reset email failed:", mailError);
+      return res.status(502).json({ success: false, message: "Unable to send the verification code. Check the email service and try again." });
+    }
+
+    await SystemSetting.updateOne(
+      { _id: reservedSettings._id, backup_recovery_password_reset_code_hash: codeHash },
+      { $set: { backup_recovery_password_reset_lock_until: null } },
+    );
+    return res.json({ success: true, message: "A recovery password code was sent to your administrator email.", expires_at: expiresAt.toISOString() });
+  } catch (error) {
+    console.error("Request backup recovery password reset error:", error);
+    return res.status(500).json({ success: false, message: "Unable to request a recovery password reset code." });
+  }
+});
+
+router.post("/system-settings/backups/recovery-password/forgot/verify", authMiddleware, roleMiddleware(["admin", "super_admin"]), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const code = String(req.body?.code || "").trim();
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: "Enter the six-digit verification code." });
+    }
+
+    const { account } = await getProfileEmailChangeAccount(req);
+    const email = String(account?.email || "").trim().toLowerCase();
+    if (!account || !email) return res.status(403).json({ success: false, message: "Unable to verify this recovery password reset." });
+
+    const settings = await SystemSetting.findOne({ key: "global" })
+      .select("+backup_recovery_password_reset_code_hash +backup_recovery_password_reset_expires_at +backup_recovery_password_reset_attempts")
+      .lean();
+    const now = new Date();
+    if (!settings?.backup_recovery_password_reset_code_hash || !settings.backup_recovery_password_reset_expires_at || settings.backup_recovery_password_reset_expires_at <= now) {
+      if (settings?.backup_recovery_password_reset_expires_at && settings.backup_recovery_password_reset_expires_at <= now) {
+        await SystemSetting.updateOne(
+          { _id: settings._id, backup_recovery_password_reset_expires_at: { $lte: now } },
+          { $set: { backup_recovery_password_reset_code_hash: null, backup_recovery_password_reset_expires_at: null, backup_recovery_password_reset_attempts: 0 } },
+        );
+      }
+      return res.status(400).json({ success: false, message: "The code is invalid or expired. Request a new code to continue." });
+    }
+    if (settings.backup_recovery_password_reset_attempts >= BACKUP_RECOVERY_CODE_MAX_ATTEMPTS) {
+      return res.status(429).json({ success: false, message: "Too many incorrect codes. Request a new code to continue." });
+    }
+
+    const expectedCodeHash = hashVerificationToken(`${settings._id}:${account._id}:${email}:${code}`);
+    if (!verificationHashesMatch(expectedCodeHash, settings.backup_recovery_password_reset_code_hash)) {
+      const updated = await SystemSetting.findOneAndUpdate({
+        _id: settings._id,
+        backup_recovery_password_reset_code_hash: settings.backup_recovery_password_reset_code_hash,
+        backup_recovery_password_reset_expires_at: { $gt: now },
+        backup_recovery_password_reset_attempts: { $lt: BACKUP_RECOVERY_CODE_MAX_ATTEMPTS },
+      }, { $inc: { backup_recovery_password_reset_attempts: 1 } }, { new: true });
+      if (updated?.backup_recovery_password_reset_attempts >= BACKUP_RECOVERY_CODE_MAX_ATTEMPTS) {
+        await SystemSetting.updateOne(
+          { _id: updated._id, backup_recovery_password_reset_code_hash: settings.backup_recovery_password_reset_code_hash },
+          { $set: { backup_recovery_password_reset_code_hash: null, backup_recovery_password_reset_expires_at: null } },
+        );
+        return res.status(429).json({ success: false, message: "Too many incorrect codes. Request a new code to continue." });
+      }
+      return res.status(400).json({ success: false, message: "The verification code is incorrect." });
+    }
+
+    return res.json({ success: true, message: "Verification code confirmed." });
+  } catch (error) {
+    console.error("Verify backup recovery password reset code error:", error);
+    return res.status(500).json({ success: false, message: "Unable to verify the recovery password reset code." });
+  }
+});
+
+router.put("/system-settings/backups/recovery-password/forgot", authMiddleware, roleMiddleware(["admin", "super_admin"]), async (req, res) => {
+  res.set("Cache-Control", "no-store");
+  try {
+    const code = String(req.body?.code || "").trim();
+    if (!/^\d{6}$/.test(code)) {
+      return res.status(400).json({ success: false, message: "Enter the six-digit verification code." });
+    }
+
+    const { account } = await getProfileEmailChangeAccount(req);
+    const email = String(account?.email || "").trim().toLowerCase();
+    if (!account || !email) return res.status(403).json({ success: false, message: "Unable to verify this recovery password reset." });
+
+    validateBackupRecoveryPassword(req.body?.new_password);
+    const settings = await SystemSetting.findOne({ key: "global" })
+      .select("+backup_recovery_password_reset_code_hash +backup_recovery_password_reset_expires_at +backup_recovery_password_reset_attempts")
+      .lean();
+    const now = new Date();
+    if (!settings?.backup_recovery_password_reset_code_hash || !settings.backup_recovery_password_reset_expires_at || settings.backup_recovery_password_reset_expires_at <= now) {
+      if (settings?.backup_recovery_password_reset_expires_at && settings.backup_recovery_password_reset_expires_at <= now) {
+        await SystemSetting.updateOne(
+          { _id: settings._id, backup_recovery_password_reset_expires_at: { $lte: now } },
+          { $set: { backup_recovery_password_reset_code_hash: null, backup_recovery_password_reset_expires_at: null, backup_recovery_password_reset_attempts: 0 } },
+        );
+      }
+      return res.status(400).json({ success: false, message: "The code is invalid or expired. Request a new code to continue." });
+    }
+    if (settings.backup_recovery_password_reset_attempts >= BACKUP_RECOVERY_CODE_MAX_ATTEMPTS) {
+      return res.status(429).json({ success: false, message: "Too many incorrect codes. Request a new code to continue." });
+    }
+
+    const expectedCodeHash = hashVerificationToken(`${settings._id}:${account._id}:${email}:${code}`);
+    if (!verificationHashesMatch(expectedCodeHash, settings.backup_recovery_password_reset_code_hash)) {
+      const updated = await SystemSetting.findOneAndUpdate({
+        _id: settings._id,
+        backup_recovery_password_reset_code_hash: settings.backup_recovery_password_reset_code_hash,
+        backup_recovery_password_reset_expires_at: { $gt: now },
+        backup_recovery_password_reset_attempts: { $lt: BACKUP_RECOVERY_CODE_MAX_ATTEMPTS },
+      }, { $inc: { backup_recovery_password_reset_attempts: 1 } }, { new: true });
+      if (updated?.backup_recovery_password_reset_attempts >= BACKUP_RECOVERY_CODE_MAX_ATTEMPTS) {
+        await SystemSetting.updateOne(
+          { _id: updated._id, backup_recovery_password_reset_code_hash: settings.backup_recovery_password_reset_code_hash },
+          { $set: { backup_recovery_password_reset_code_hash: null, backup_recovery_password_reset_expires_at: null } },
+        );
+        return res.status(429).json({ success: false, message: "Too many incorrect codes. Request a new code to continue." });
+      }
+      return res.status(400).json({ success: false, message: "The verification code is incorrect." });
+    }
+
+    const verifier = await hashBackupRecoveryPassword(req.body?.new_password);
+    const updatedSettings = await SystemSetting.findOneAndUpdate({
+      _id: settings._id,
+      backup_recovery_password_reset_code_hash: settings.backup_recovery_password_reset_code_hash,
+      backup_recovery_password_reset_expires_at: { $gt: now },
+      backup_recovery_password_reset_attempts: { $lt: BACKUP_RECOVERY_CODE_MAX_ATTEMPTS },
+    }, {
+      $set: {
+        backup_recovery_password_salt: verifier.salt,
+        backup_recovery_password_hash: verifier.hash,
+        backup_recovery_password_display: req.body.new_password,
+        backup_recovery_password_set_at: now,
+        backup_recovery_password_reset_code_hash: null,
+        backup_recovery_password_reset_expires_at: null,
+        backup_recovery_password_reset_attempts: 0,
+      },
+      $unset: { backup_recovery_password_reset_lock_until: 1 },
+    }, { new: true });
+    if (!updatedSettings) return res.status(400).json({ success: false, message: "The code is invalid or expired. Request a new code to continue." });
+
+    return res.json({ success: true, backup_recovery_password_configured: true, message: "Backup recovery password reset successfully." });
+  } catch (error) {
+    return res.status(error.status || 500).json({
+      success: false,
+      message: error.status ? error.message : "Unable to reset the recovery password.",
     });
   }
 });
@@ -801,7 +1090,18 @@ router.patch("/system-settings", authMiddleware, roleMiddleware(["admin", "super
       update.global_permissions = { ...req.body.global_permissions };
     }
     if (typeof req.body?.backup_schedule === "string") {
-      update.backup_schedule = req.body.backup_schedule;
+      if (["daily", "weekly", "monthly"].includes(req.body.backup_schedule)) {
+        update.backup_schedule = req.body.backup_schedule;
+      } else {
+        return res.status(400).json({ success: false, message: "Backup schedule must be daily, weekly, or monthly." });
+      }
+    }
+    if (typeof req.body?.backup_schedule_time === "string") {
+      if (/^([01]\d|2[0-3]):([0-5]\d)$/.test(req.body.backup_schedule_time)) {
+        update.backup_schedule_time = req.body.backup_schedule_time;
+      } else {
+        return res.status(400).json({ success: false, message: "Backup time must use 24-hour HH:mm format." });
+      }
     }
     if (typeof req.body?.backup_status === "string") {
       update.backup_status = req.body.backup_status;
@@ -824,6 +1124,11 @@ router.patch("/system-settings", authMiddleware, roleMiddleware(["admin", "super
       maintenance_mode: settings.maintenance_mode === true,
       global_permissions: settings.global_permissions || null,
       backup_schedule: settings.backup_schedule || "weekly",
+      backup_schedule_time: settings.backup_schedule_time || "00:00",
+      next_backup_at: getNextScheduledBackupAt(
+        ["daily", "weekly", "monthly"].includes(settings.backup_schedule) ? settings.backup_schedule : "weekly",
+        settings.backup_schedule_time || "00:00",
+      ),
       backup_status: settings.backup_status || "Success",
       last_backup_at: settings.last_backup_at || null,
       backup_history: backupHistory,
@@ -872,6 +1177,23 @@ router.get("/system-settings/cron-backup", async (req, res) => {
   }
 });
 
+router.get("/system-settings/cron-site-inspection-reminders", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  const expectedAuthorization = secret ? Buffer.from(`Bearer ${secret}`) : Buffer.alloc(0);
+  const providedAuthorization = Buffer.from(req.get("authorization") || "");
+  if (!secret || expectedAuthorization.length !== providedAuthorization.length || !timingSafeEqual(expectedAuthorization, providedAuthorization)) {
+    return res.status(secret ? 401 : 503).json({ success: false, message: "Scheduled reminder authorization is not configured." });
+  }
+
+  try {
+    const result = await runSiteInspectionReminderCheck({ realtime: req.app.get("realtime") });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error("Scheduled site inspection reminder check failed:", error);
+    return res.status(500).json({ success: false, message: "Scheduled site inspection reminder check failed." });
+  }
+});
+
 router.post(
   "/system-settings/backups/import",
   authMiddleware,
@@ -916,8 +1238,25 @@ router.post("/system-settings/backups/import-cloudinary", authMiddleware, roleMi
 
 router.get("/system-settings/backups/:backupId/download", authMiddleware, roleMiddleware(["admin", "super_admin"]), async (req, res) => {
   try {
-    const { buffer, filename, redirectUrl } = await getSystemBackupDownload(req.params.backupId);
-    if (redirectUrl) return res.redirect(302, redirectUrl);
+    const { buffer, filename, remoteUrl } = await getSystemBackupDownload(req.params.backupId);
+    if (remoteUrl) {
+      const remoteResponse = await fetch(remoteUrl);
+      if (!remoteResponse.ok || !remoteResponse.body) {
+        return res.status(502).json({ success: false, message: "Backup file is not available for download." });
+      }
+      res.setHeader("Content-Type", "application/zip");
+      res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
+      const contentLength = remoteResponse.headers.get("content-length");
+      if (contentLength) res.setHeader("Content-Length", contentLength);
+      try {
+        await pipeline(Readable.fromWeb(remoteResponse.body), res);
+      } catch (streamError) {
+        console.error("Stream Cloudinary backup download error:", streamError);
+        if (!res.headersSent) res.status(502).json({ success: false, message: "Unable to stream backup download." });
+        else res.destroy(streamError);
+      }
+      return;
+    }
     res.setHeader("Content-Type", "application/zip");
     res.setHeader("Content-Disposition", `attachment; filename="${filename}"`);
     return res.send(buffer);
@@ -1589,7 +1928,7 @@ router.get("/customers", authMiddleware, roleMiddleware("admin"), async (req, re
         { phone: regex },
       ],
     })
-      .select("first_name last_name email phone street_address city province zip_code")
+      .select("first_name last_name email phone street_address city province zip_code customer_cancellation_count online_order_cooldown_until")
       .limit(10)
       .lean();
 
@@ -1644,6 +1983,30 @@ router.get("/users", authMiddleware, staffModulePermission("settings", "view"), 
   } catch (error) {
     console.error("Get users error:", error);
     res.status(500).json({ success: false, message: "Unable to load users." });
+  }
+});
+
+router.patch("/users/:id/unrestrict-online-ordering", authMiddleware, async (req, res) => {
+  if (!(["admin", "super_admin"].includes(req.user.role))) {
+    return res.status(403).json({ success: false, message: "Only administrators can remove a customer's online ordering restriction." });
+  }
+
+  try {
+    const user = await User.findOneAndUpdate(
+      { _id: req.params.id, role: "customer" },
+      { $set: { online_order_cooldown_until: null } },
+      { new: true, runValidators: true },
+    ).select("-password");
+    if (!user) return res.status(404).json({ success: false, message: "Customer account not found." });
+
+    return res.json({
+      success: true,
+      user,
+      message: "The customer's 7-day online ordering restriction has been removed.",
+    });
+  } catch (error) {
+    console.error("Remove customer online ordering restriction error:", error);
+    return res.status(500).json({ success: false, message: "Unable to remove the online ordering restriction." });
   }
 });
 
@@ -1813,6 +2176,8 @@ router.post("/login", async (req, res) => {
         zip_code: user.zip_code,
         access_permissions: user.access_permissions,
         staff_access: user.staff_access,
+        customer_cancellation_count: user.customer_cancellation_count || 0,
+        online_order_cooldown_until: user.online_order_cooldown_until || null,
         created_at: user.createdAt,
         updated_at: user.updatedAt,
       },
@@ -1872,6 +2237,8 @@ router.get("/me", authMiddleware, async (req, res) => {
         zip_code: user.zip_code,
         access_permissions: user.access_permissions,
         staff_access: user.staff_access,
+        customer_cancellation_count: user.customer_cancellation_count || 0,
+        online_order_cooldown_until: user.online_order_cooldown_until || null,
         created_at: user.createdAt,
         updated_at: user.updatedAt,
       },
@@ -1988,6 +2355,8 @@ router.put("/profile", authMiddleware, async (req, res) => {
         province: user.province,
         zip_code: user.zip_code,
         access_permissions: user.access_permissions,
+        customer_cancellation_count: user.customer_cancellation_count || 0,
+        online_order_cooldown_until: user.online_order_cooldown_until || null,
         created_at: user.createdAt,
         updated_at: user.updatedAt,
       },

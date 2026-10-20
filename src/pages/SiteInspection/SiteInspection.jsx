@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { Fragment, useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search,
@@ -6,12 +6,19 @@ import {
   Eye,
   Pencil,
   FileText,
+  Send,
+  ChevronLeft,
+  ChevronRight,
   ShieldCheck,
   Ban,
   RotateCcw,
   CalendarDays,
   ClipboardList,
+  Phone,
+  Minus,
   X,
+  Trash2,
+  AlertTriangle,
 } from "lucide-react";
 import toast, { Toaster } from 'react-hot-toast';
 import { toJpeg } from "html-to-image";
@@ -23,7 +30,9 @@ import { buildContractSnapshot, hasContractSnapshotChanged, hasExistingContract 
 import { getCustomerPaymentProof, getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
 import { getProducts } from "@/api/products";
 import { toSquareFeet } from "@/lib/estimator";
-import { getMeasuredProductLineTotal, getProductSizeLimitWarnings } from "@/lib/productPricing";
+import { getMeasuredProductLineTotal, getProductLineBreakdown, getProductSizeLimitWarnings } from "@/lib/productPricing";
+import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
+import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
 import { searchCustomers } from "@/api/users";
 import { uploadFiles } from "@/api/uploads";
 import Sidebar from "../../components/layout/Sidebar";
@@ -51,6 +60,7 @@ const getDefaultInspection = () => ({
   order_type: "online_order",
   siteAddress: "",
   inspection_date: "",
+  is_rush_order: false,
   estimated_installation_date: "",
   notes: "",
   site_notes: "",
@@ -95,6 +105,47 @@ const CONTRACT_STAGE_STATUSES = new Set([
 
 const normalizeWorkflowValue = (value) =>
   (value || "").toString().trim().toLowerCase();
+
+const hasWebsiteCustomerAccount = (inspection = {}) => {
+  const orderType = normalizeWorkflowValue(
+    inspection.customerType || inspection.customer_type || inspection.order_type,
+  ).replace(/[\s-]+/g, "_");
+  if (["walk_in", "walk_in_customer", "walkin"].includes(orderType)) return false;
+
+  const hasRegisteredCustomer = Boolean(
+    inspection.customerId
+    || inspection.customer_id
+    || inspection.customer?._id
+    || inspection.customer?.id
+    || (typeof inspection.customer === "string" && inspection.customer.trim()),
+  );
+  return hasRegisteredCustomer || inspection.has_account_on_website === true;
+};
+
+const isWalkInInspection = (inspection = {}) => !hasWebsiteCustomerAccount(inspection);
+const isOnlineInspection = (inspection = {}) => hasWebsiteCustomerAccount(inspection);
+const isOnlineOrderingCooldownActive = (customer = {}, now = Date.now()) => {
+  const cooldownUntil = new Date(customer.online_order_cooldown_until || "").getTime();
+  return Number.isFinite(cooldownUntil) && cooldownUntil > now;
+};
+const isRestrictedCustomerOrder = (order = {}, now = Date.now()) => {
+  const customer = order.customer && typeof order.customer === "object" ? order.customer : {};
+  const cancellationCount = Number(
+    customer.customer_cancellation_count
+    ?? order.customer_cancellation_count
+    ?? order.cancellation_count
+    ?? 0,
+  );
+  return cancellationCount >= 3 && isOnlineOrderingCooldownActive({
+    online_order_cooldown_until: customer.online_order_cooldown_until ?? order.online_order_cooldown_until,
+  }, now);
+};
+const formatCancellationCooldownDate = (value) => {
+  const date = new Date(value || "");
+  return Number.isNaN(date.getTime())
+    ? ""
+    : new Intl.DateTimeFormat("en-US", { month: "long", day: "numeric", year: "numeric" }).format(date);
+};
 
 export const formatInspectionDateForDisplay = (value) => {
   const match = String(value || "").match(/^(\d{4})-(\d{2})-(\d{2})/);
@@ -313,7 +364,7 @@ export const requiresInspectionItemDimensions = (item = {}) =>
   || (item.sale_mode === "frame" && Boolean(item.custom_frame_size));
 
 export const calculateMeasurementSubtotal = (item, product = null) => {
-  const quantity = Number(item.quantity ?? item.qty ?? 1) || 1;
+  const quantity = Number(item.qty ?? item.quantity ?? 1) || 1;
   const measurementUnit = item.measurement_unit || item.measurementUnit || item.dimensions?.unit || "in";
   const inferredMethod = item.pricing_method || (
     Number(item.base_price) > 0 ? "fixed" :
@@ -624,6 +675,8 @@ export const isSiteInspectionVisible = (order) => {
   const status = normalizeWorkflowValue(order.status);
   const contractStatus = normalizeWorkflowValue(order.contract_status);
 
+  // Keep older customer submissions visible after restoring direct Site Inspection intake.
+  if (status === "order_submitted") return !contractStatus || contractStatus === "pending";
   if (status !== SITE_INSPECTION_STATUS) return false;
   if (CONTRACT_STAGE_STATUSES.has(status)) return false;
   if (!SITE_INSPECTION_CONTRACT_STATUSES.has(contractStatus)) return false;
@@ -634,6 +687,7 @@ export const isSiteInspectionVisible = (order) => {
 function SiteInspection() {
   const isMobile = useIsMobile();
   const { user } = useAuth();
+  const hidePaymentAmounts = user?.role === "skilled_worker" && user?.staff_access?.hide_payment_amounts === true;
   const { darkMode } = useAdminTheme();
   const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
@@ -646,11 +700,21 @@ function SiteInspection() {
     return stored !== null ? JSON.parse(stored) : true;
   });
   const [showModal, setShowModal] = useState(false);
+  const [exitConfirmation, setExitConfirmation] = useState(null);
+  const newInspectionBaselineRef = useRef("");
+  const editInspectionBaselineRef = useRef("");
+  const [newInspectionStep, setNewInspectionStep] = useState(1);
+  const newInspectionBodyRef = useRef(null);
   const [inspections, setInspections] = useState([]);
+  const [rushOrderRecords, setRushOrderRecords] = useState([]);
+  const [restrictionClock, setRestrictionClock] = useState(() => Date.now());
+  const [showInspectionActions, setShowInspectionActions] = useState(true);
   const [inspectionsLoading, setInspectionsLoading] = useState(false);
+  const [inspectionLoadError, setInspectionLoadError] = useState("");
   const inspectionFetchStateRef = useRef({ inFlight: false, refreshQueued: false });
   const [generatingId, setGeneratingId] = useState(null);
   const [cancelledInspections, setCancelledInspections] = useState([]);
+  const [cancellationReasonInspection, setCancellationReasonInspection] = useState(null);
   const [cancellingId, setCancellingId] = useState(null);
   const [restoringId, setRestoringId] = useState(null);
   const [viewInspection, setViewInspection] = useState(null);
@@ -658,11 +722,26 @@ function SiteInspection() {
   const [requestedModalLocationKey, setRequestedModalLocationKey] = useState("");
   const [requestedRecordError, setRequestedRecordError] = useState(null);
   const [editInspection, setEditInspection] = useState(null);
+  const [editInspectionStep, setEditInspectionStep] = useState(1);
+  const [highCancellationConfirmation, setHighCancellationConfirmation] = useState(false);
+  const [editMeasurementsEnabled, setEditMeasurementsEnabled] = useState(false);
+  const [measurementDeleteConfirmation, setMeasurementDeleteConfirmation] = useState(null);
+  const editInspectionBodyRef = useRef(null);
   const [savingEdit, setSavingEdit] = useState(false);
   const [activeTab, setActiveTab] = useState("site");
+  useEffect(() => {
+    const timer = window.setInterval(() => setRestrictionClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (location.state?.activeTab === "cancelled") setActiveTab("cancelled");
+  }, [location.key, location.state?.activeTab]);
   const [currentPage, setCurrentPage] = useState(1);
   const [searchQuery, setSearchQuery] = useState("");
   const [statusFilter, setStatusFilter] = useState("all");
+  const [customerTypeFilter, setCustomerTypeFilter] = useState("all");
+  const [priorityFilter, setPriorityFilter] = useState("all");
   const [newInspection, setNewInspection] = useState(getDefaultInspection());
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
@@ -689,10 +768,89 @@ function SiteInspection() {
   });
   const manualApprovalFileInputRef = useRef(null);
 
+  const changeInspectionStep = (step, setStep, bodyRef) => {
+    setStep(step);
+    requestAnimationFrame(() => bodyRef.current?.scrollTo({ top: 0, behavior: "smooth" }));
+  };
+
+  const advanceInspectionForm = (payload, setStep, bodyRef) => {
+    const validationErrors = validateInspectionPayload(payload);
+    const firstStepFields = ["customerName", "phone", "siteAddress", "inspection_date", "estimated_installation_date", "customerId"];
+    const firstStepErrors = Object.fromEntries(
+      Object.entries(validationErrors).filter(([field]) => firstStepFields.includes(field)),
+    );
+    setErrors((current) => {
+      const nextErrors = { ...current };
+      firstStepFields.forEach((field) => delete nextErrors[field]);
+      return { ...nextErrors, ...firstStepErrors };
+    });
+    const firstError = Object.values(firstStepErrors)[0];
+    if (firstError) {
+      toast.error(Array.isArray(firstError) ? "Please complete the required customer and schedule details." : firstError);
+      return false;
+    }
+    changeInspectionStep(2, setStep, bodyRef);
+    return true;
+  };
+
+  const selectInspectionTab = (targetStep, currentStep, payload, setStep, bodyRef) => {
+    if (targetStep === 1) {
+      changeInspectionStep(1, setStep, bodyRef);
+      return true;
+    } else if (currentStep === 1) {
+      return advanceInspectionForm(payload, setStep, bodyRef);
+    } else {
+      changeInspectionStep(2, setStep, bodyRef);
+      return true;
+    }
+  };
+
   const today = new Date().toISOString().split("T")[0];
+  const getPhilippineDateKey = (value) => {
+    const rawValue = String(value || "");
+    if (/^\d{4}-\d{2}-\d{2}$/.test(rawValue)) return rawValue;
+    const date = new Date(value);
+    if (Number.isNaN(date.getTime())) return "";
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Manila",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+    }).formatToParts(date);
+    const fields = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+    return `${fields.year}-${fields.month}-${fields.day}`;
+  };
+  const getRushOrderCountForDate = (date, excludeOrderId = "") => {
+    const dateKey = getPhilippineDateKey(date);
+    if (!dateKey) return 0;
+    return rushOrderRecords
+      .filter((inspection) => (
+        getPhilippineDateKey(inspection.inspection_date) === dateKey
+        && String(inspection._id || inspection.id || "") !== String(excludeOrderId || "")
+        && String(inspection.status || "").toLowerCase() !== "cancelled"
+      ))
+      .reduce((total, inspection) => total + getRushSlotsForInspection(inspection), 0);
+  };
+  const hasSelectedRushCharge = (item = {}) => {
+    const product = products.find((entry) => normalizeProductId(entry?._id || entry?.id) === normalizeProductId(item?.product_id));
+    const charges = Array.isArray(item.extra_charges) && item.extra_charges.length
+      ? item.extra_charges
+      : product?.extra_charges || [];
+    return charges.some((charge) => (
+      charge?.is_active !== false
+      && charge?.is_selected === true
+      && /rush/i.test(String(charge?.name || charge?.label || ""))
+    ));
+  };
+  const getSelectedRushChargeCount = (items = []) => (items || []).filter(hasSelectedRushCharge).length;
+  const getRushSlotsForInspection = (inspection = {}) => Math.max(
+    getSelectedRushChargeCount(inspection.items || []),
+    inspection.is_rush_order === true ? 1 : 0,
+  );
   const pageSize = 10;
-  const formatCurrency = (value) =>
-    new Intl.NumberFormat("en-PH", {
+  const formatCurrency = (value) => hidePaymentAmounts
+    ? "••••••"
+    : new Intl.NumberFormat("en-PH", {
       style: "currency",
       currency: "PHP",
       minimumFractionDigits: 2,
@@ -739,7 +897,7 @@ function SiteInspection() {
       : "border border-emerald-200 bg-emerald-50 text-emerald-700",
   } : {
     label: "Need to be Called",
-    icon: "📞",
+    icon: <Phone size={16} aria-hidden="true" />,
     className: statusBadgeClass,
   };
   const inputGridClass = darkMode ? "bg-[#122d42]" : "bg-slate-50";
@@ -781,11 +939,11 @@ function SiteInspection() {
     today.setHours(0, 0, 0, 0);
     return Number.isNaN(inputDate.getTime()) ? false : inputDate < today;
   };
-  const actionButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2";
+  const actionButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-transparent transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [activeTab, searchQuery, statusFilter, cancelledInspections.length, inspections.length]);
+  }, [activeTab, searchQuery, statusFilter, customerTypeFilter, priorityFilter, cancelledInspections.length, inspections.length]);
 
   const fetchSiteInspections = async (showLoading = true) => {
     const fetchState = inspectionFetchStateRef.current;
@@ -796,16 +954,33 @@ function SiteInspection() {
     fetchState.inFlight = true;
     if (showLoading) setInspectionsLoading(true);
     try {
-      const [siteResp, cancelledResp] = await Promise.all([
-        getAdminOrders({ status: "site_inspection", module: "site_inspection" }),
-        getAdminOrders({ status: "cancelled", module: "site_inspection" }),
-      ]);
-      setInspections((siteResp.orders || []).filter(isSiteInspectionVisible));
-      setCancelledInspections(cancelledResp.orders || []);
+      const fetchAllPages = async (status) => {
+        const orders = [];
+        let page = 1;
+        let totalPages = 1;
+        do {
+          const response = await getAdminOrders({
+            ...(status ? { status } : {}),
+            module: "site_inspection",
+            limit: 100,
+            ...(page > 1 ? { page } : {}),
+          });
+          orders.push(...(response.orders || []));
+          totalPages = response.pagination?.totalPages || 1;
+          page += 1;
+        } while (page <= totalPages);
+        return orders;
+      };
+      const allModuleOrders = await fetchAllPages();
+      setRushOrderRecords(allModuleOrders);
+      setInspections(allModuleOrders.filter(isSiteInspectionVisible));
+      setCancelledInspections(allModuleOrders.filter((order) => String(order.status || "").toLowerCase() === "cancelled"));
+      setInspectionLoadError("");
     } catch (error) {
       console.error("Failed to load site inspection records:", error);
-      setInspections([]);
-      setCancelledInspections([]);
+      if (showLoading) {
+        setInspectionLoadError(error?.data?.message || error?.message || "Unable to load Site Inspection records. Please try again.");
+      }
     } finally {
       if (showLoading) setInspectionsLoading(false);
       fetchState.inFlight = false;
@@ -818,18 +993,48 @@ function SiteInspection() {
 
 
   const resetNewInspectionForm = () => {
-    setNewInspection(getDefaultInspection());
+    const initialInspection = getDefaultInspection();
+    setNewInspection(initialInspection);
     setErrors({});
     setCustomerSearch("");
     setCustomerSuggestions([]);
     setCustomerSearchError("");
     setSelectedCustomer(null);
+    return initialInspection;
   };
 
   const closeNewInspectionModal = () => {
     setShowModal(false);
     resetNewInspectionForm();
   };
+
+  const requestCloseNewInspection = () => {
+    const current = createUnsavedSnapshot({ inspection: newInspection, customerSearch, selectedCustomer });
+    if (current !== newInspectionBaselineRef.current) setExitConfirmation("new-inspection");
+    else closeNewInspectionModal();
+  };
+  const requestCloseEditInspection = () => {
+    if (createUnsavedSnapshot(editInspection) !== editInspectionBaselineRef.current) setExitConfirmation("edit-inspection");
+    else setEditInspection(null);
+  };
+  const discardInspectionChanges = () => {
+    const pending = exitConfirmation;
+    setExitConfirmation(null);
+    if (pending === "new-inspection") closeNewInspectionModal();
+    if (pending === "edit-inspection") setEditInspection(null);
+  };
+
+  useEffect(() => {
+    if (!showModal && !editInspection) return undefined;
+    const handleEscape = (event) => {
+      if (event.key !== "Escape" || exitConfirmation) return;
+      event.preventDefault();
+      if (showModal) requestCloseNewInspection();
+      else requestCloseEditInspection();
+    };
+    window.addEventListener("keydown", handleEscape);
+    return () => window.removeEventListener("keydown", handleEscape);
+  }, [showModal, editInspection, newInspection, customerSearch, selectedCustomer, exitConfirmation]);
 
   const formatCustomerAddress = (customer) => {
     if (!customer) return "";
@@ -992,6 +1197,9 @@ function SiteInspection() {
         ? Number(item.unit_price)
         : productUnitPrice;
     const estimationMode = item.is_estimate ? (item.estimation_mode || "auto") : "auto";
+    const savedExtraCharges = Array.isArray(item.extra_charges) ? item.extra_charges : [];
+    const configuredExtraCharges = Array.isArray(selectedProduct?.extra_charges) ? selectedProduct.extra_charges : [];
+    const orderExtraCharges = savedExtraCharges.length ? savedExtraCharges : configuredExtraCharges;
 
     return {
       ...item,
@@ -1037,7 +1245,8 @@ function SiteInspection() {
       customization_fee: selectedProduct ? Number(selectedProduct.customization_fee) || 0 : Number(item.customization_fee) || 0,
       customization: selectedProduct ? Boolean(selectedProduct.customization) : Boolean(item.customization),
       estimated_price_override: selectedProduct ? Number(selectedProduct.estimated_price_override) || 0 : Number(item.estimated_price_override) || 0,
-      extra_charges: selectedProduct?.extra_charges || item.extra_charges || [],
+      // Keep the customer's saved optional-charge selections when loading the order for admin editing.
+      extra_charges: orderExtraCharges,
       size_limits: selectedProduct?.size_limits || item.size_limits || {},
       variant: selectedProduct?.variant || item.variant || "",
     };
@@ -1047,14 +1256,26 @@ function SiteInspection() {
     return calculateMeasurementArea(
       item.width,
       item.height,
-      item.quantity ?? item.qty ?? 1,
+      item.qty ?? item.quantity ?? 1,
       item.measurement_unit || item.measurementUnit || item.dimensions?.unit || "in",
     );
   };
 
   const getInspectionItemTotal = (item) => {
     const manualTotal = Number(item.manual_estimated_total ?? 0);
-    if (item.estimation_mode === "manual" && Number.isFinite(manualTotal) && manualTotal > 0) return manualTotal;
+    if (item.estimation_mode === "manual" && Number.isFinite(manualTotal) && manualTotal > 0) {
+      const quantity = Number(item.qty ?? item.quantity ?? 1) || 1;
+      const selectedCharges = (Array.isArray(item.extra_charges) ? item.extra_charges : [])
+        .filter((charge) => charge?.is_active !== false && (charge?.is_optional !== true || charge?.is_selected === true));
+      const chargeTotal = selectedCharges.reduce((total, charge) => {
+        const amount = Number(charge.amount) || 0;
+        if (charge.type === "percentage") return total + manualTotal * amount / 100;
+        if (charge.type === "per_sqft") return total + calculateItemArea(item) * amount;
+        if (charge.type === "per_blade") return total + (Number(item.blade_count) || 0) * amount * quantity;
+        return total + amount * quantity;
+      }, 0);
+      return Math.round((manualTotal + chargeTotal) * 100) / 100;
+    }
 
     const subtotal = calculateRowSubtotal(item);
     if (subtotal > 0) return subtotal;
@@ -1062,7 +1283,7 @@ function SiteInspection() {
     const savedEstimate = Number(item.estimated_price ?? item.total_price ?? item.amount ?? item.line_total ?? 0);
     if (Number.isFinite(savedEstimate) && savedEstimate > 0) return savedEstimate;
 
-    const qty = Number(item.quantity ?? item.qty ?? 1) || 1;
+    const qty = Number(item.qty ?? item.quantity ?? 1) || 1;
     const unitPrice = Number(item.unit_price ?? item.price ?? 0) || 0;
     return qty * unitPrice;
   };
@@ -1071,12 +1292,6 @@ function SiteInspection() {
     const normalizedProductId = normalizeProductId(item.product_id);
     const product = products.find((p) => String(p._id || p.id) === normalizedProductId) || null;
     return calculateMeasurementSubtotal(item, product);
-  };
-
-  const getMeasurementLimitWarnings = (item) => {
-    const productId = normalizeProductId(item.product_id);
-    const product = products.find((candidate) => String(candidate._id || candidate.id) === productId);
-    return getProductSizeLimitWarnings(product || item, item);
   };
 
   const getInspectionProductForItem = (item) => {
@@ -1127,7 +1342,7 @@ function SiteInspection() {
       is_selected: typeof itemCharges[chargeIndex]?.is_selected === "boolean"
         ? itemCharges[chargeIndex].is_selected
         : charge?.is_optional === true
-          ? charge?.is_default_selected !== false
+          ? false
           : true,
     })).filter((charge) => charge?.is_active !== false);
 
@@ -1148,6 +1363,129 @@ function SiteInspection() {
       quantity,
       extraCharges,
     };
+  };
+
+  const renderOptionalChargeOptions = (item, onFieldChange) => {
+    if (isInspectionBladeItem(item)) return null;
+    const product = getInspectionProductForItem(item);
+    const charges = Array.isArray(item.extra_charges) && item.extra_charges.length
+      ? item.extra_charges
+      : Array.isArray(product?.extra_charges) ? product.extra_charges : [];
+    const optionalCharges = charges.filter((charge) => charge?.is_optional === true && charge?.is_active !== false);
+    if (!optionalCharges.length) return null;
+    const isEditing = onFieldChange === handleEditItemFieldChange;
+    const inspection = isEditing ? editInspection : newInspection;
+    const rushCount = getRushOrderCountForDate(inspection?.inspection_date, isEditing ? inspection?.id : "");
+    const currentItemIndex = (inspection?.items || []).indexOf(item);
+    const selectedRushBefore = getSelectedRushChargeCount((inspection?.items || []).slice(0, Math.max(currentItemIndex, 0)));
+    const selectedRushCount = getSelectedRushChargeCount(inspection?.items || []);
+
+    return (
+      <div className={`mt-2 space-y-2 rounded-lg border p-2.5 ${darkMode ? "border-slate-700 bg-slate-900/70" : "border-slate-200 bg-slate-50"}`}>
+        <p className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional charges</p>
+        {charges.map((charge, chargeIndex) => {
+          if (charge?.is_optional !== true || charge?.is_active === false) return null;
+          const selected = charge.is_selected === true;
+          const isRushCharge = /rush/i.test(String(charge.name || charge.label || ""));
+          const rushSlotNumber = rushCount + selectedRushBefore + 1;
+          const projectedRushCount = rushCount + selectedRushCount + (selected ? 0 : 1);
+          const exceedsRushLimit = selected ? rushSlotNumber > 2 : projectedRushCount > 2;
+          const handleChargeSelectionChange = (checked) => {
+            if (isRushCharge && checked && !selected) {
+              if (!inspection?.inspection_date) {
+                toast.error("Set an inspection date before selecting the Rush charge.");
+                return;
+              }
+              if (rushCount + selectedRushCount >= 2) {
+                toast.error("Maximum 2 Rush Orders per inspection date. Remove a Rush charge or choose another date.");
+                return;
+              }
+            }
+            const updatedCharges = charges.map((entry, index) => (
+              index === chargeIndex ? { ...entry, is_selected: checked } : entry
+            ));
+            onFieldChange(item.id, "extra_charges", updatedCharges);
+            if (isRushCharge) {
+              const hasRushAfterChange = (inspection?.items || []).some((candidate) => (
+                candidate.id === item.id
+                  ? updatedCharges.some((entry) => entry?.is_active !== false && entry?.is_selected === true && /rush/i.test(String(entry?.name || entry?.label || "")))
+                  : hasSelectedRushCharge(candidate)
+              ));
+              if (isEditing) handleEditChange("is_rush_order", hasRushAfterChange);
+              else handleInspectionFieldChange("is_rush_order", hasRushAfterChange);
+            }
+          };
+          const chargeControl = (
+            <div className={`flex flex-wrap items-center justify-start gap-x-3 gap-y-2 text-xs ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
+              <label className="flex cursor-pointer items-center gap-2">
+              <span className="flex min-w-0 items-center gap-2">
+                {isRushCharge ? (
+                  <button
+                    type="button"
+                    role="switch"
+                    aria-checked={selected}
+                    aria-label={`Rush extra charge for ${item.name || "product"}`}
+                    onClick={() => handleChargeSelectionChange(!selected)}
+                    className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500/40 ${selected ? "bg-blue-600" : darkMode ? "bg-slate-600" : "bg-slate-300"}`}
+                  >
+                    <span className={`inline-block size-4 rounded-full bg-white shadow-sm transition-transform ${selected ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+                  </button>
+                ) : (
+                  <input type="checkbox" checked={selected} onChange={(event) => handleChargeSelectionChange(event.target.checked)} className="accent-blue-600" />
+                )}
+                <span className="truncate">{isRushCharge ? "Rush fee (optional)" : charge.name || charge.label}</span>
+              </span>
+              </label>
+              {isRushCharge ? (
+                <label className="flex items-center gap-1.5 font-semibold">
+                  <span className="sr-only">Rush fee amount</span>
+                  <span>₱</span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="0.01"
+                    inputMode="decimal"
+                    aria-label={`Rush fee amount for ${item.name || "product"}`}
+                    value={charge.amount ?? 0}
+                    onChange={(event) => {
+                      const updatedCharges = charges.map((entry, index) => (
+                        index === chargeIndex ? { ...entry, amount: event.target.value } : entry
+                      ));
+                      onFieldChange(item.id, "extra_charges", updatedCharges);
+                    }}
+                    className={`w-24 rounded-md border px-2 py-1 text-right font-semibold outline-none focus:border-blue-500 ${darkMode ? "border-slate-600 bg-slate-800 text-white" : "border-slate-300 bg-white text-slate-800"}`}
+                  />
+                  <span>optional</span>
+                </label>
+              ) : (
+                <span className="shrink-0 font-semibold">{formatCurrency(Number(charge.amount) || 0)}{charge.type === "per_blade" ? " / blade" : charge.type === "per_sqft" ? " / sq ft" : charge.type === "percentage" ? "%" : ""}</span>
+              )}
+            </div>
+          );
+          return (
+            <Fragment key={`${charge.name || charge.label}-${chargeIndex}`}>
+              {isRushCharge ? (
+                <div className="grid grid-cols-1 items-center gap-x-2 gap-y-2 sm:grid-cols-[max-content_minmax(0,1fr)]">
+                  {chargeControl}
+                  <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-l-2 pl-2.5 ${darkMode ? "border-amber-500/50" : "border-amber-300"}`}>
+                    <p className={`text-[10px] leading-4 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Admin-only priority · Maximum 2 Rush Orders per inspection date</p>
+                    {!inspection?.inspection_date
+                      ? <p className={`text-[10px] leading-4 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Select an inspection date to check availability.</p>
+                      : <p role={exceedsRushLimit ? "alert" : undefined} className={`text-[10px] font-semibold leading-4 ${exceedsRushLimit ? "text-red-600" : darkMode ? "text-amber-200" : "text-amber-800"}`}>
+                          {exceedsRushLimit
+                            ? "Maximum 2 Rush Orders per inspection date. This Rush charge cannot be added."
+                            : selected
+                              ? `${rushSlotNumber} of 2 Rush Order slots will be used for this date.`
+                              : `${rushCount + selectedRushCount} of 2 Rush Order slots are used for this date.`}
+                        </p>}
+                  </div>
+                </div>
+              ) : chargeControl}
+            </Fragment>
+          );
+        })}
+      </div>
+    );
   };
 
   const getBladeExtraChargeTotal = (charge, details) => {
@@ -1185,7 +1523,7 @@ function SiteInspection() {
           <span className={labelClass}>Glass type</span>
           <select aria-label={`Glass type for measurement ${rowIndex + 1}`} value={item.blade_glass_type || product?.default_blade_glass_type || glassTypes[0]?.name || ""} onChange={(event) => onFieldChange(item.id, "blade_glass_type", event.target.value)} className={fieldClass}>
             <option value="">Select glass</option>
-            {glassTypes.map((glass) => <option key={glass.name} value={glass.name}>{glass.name} · ₱{Number(glass.price_per_blade || 0).toLocaleString()}/blade</option>)}
+            {glassTypes.map((glass) => <option key={glass.name} value={glass.name}>{glass.name} · {hidePaymentAmounts ? "••••••" : `₱${Number(glass.price_per_blade || 0).toLocaleString()}`}/blade</option>)}
           </select>
         </label>
 
@@ -1215,7 +1553,7 @@ function SiteInspection() {
               onFieldChange(item.id, "blade_count", Number(frame?.blade_count) || minimumBlades);
               onFieldChange(item.id, "frame_price", Number(frame?.price) || 0);
             }} className={fieldClass}>
-              {frameTypes.map((frame) => <option key={frame.name} value={frame.name}>{frame.name} · {frame.blade_count} blades · ₱{Number(frame.price || 0).toLocaleString()}</option>)}
+              {frameTypes.map((frame) => <option key={frame.name} value={frame.name}>{frame.name} · {frame.blade_count} blades · {hidePaymentAmounts ? "••••••" : `₱${Number(frame.price || 0).toLocaleString()}`}</option>)}
             </select>
           </label>
         )}
@@ -1260,8 +1598,8 @@ function SiteInspection() {
       extraCharges,
     } = details;
     const inputClasses = darkMode
-      ? "min-w-0 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-red-500"
-      : "min-w-0 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-red-500";
+      ? "blade-measurement-control min-w-0 w-full rounded-lg border border-[#263040] bg-[#161c26] px-3 py-2.5 text-sm text-[#eef1f6] outline-none transition focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20"
+      : "blade-measurement-control min-w-0 w-full rounded-lg border border-[#dde3ec] bg-white px-3 py-2.5 text-sm text-[#1a2230] outline-none transition focus:border-[#2563eb] focus:ring-2 focus:ring-[#2563eb]/15";
     const labelClasses = `mb-1.5 block text-[10px] font-bold ${darkMode ? "text-slate-400" : "text-slate-600"}`;
     const mutedClass = darkMode ? "text-slate-400" : "text-slate-500";
     const rowTotal = calculateRowSubtotal(item);
@@ -1273,6 +1611,8 @@ function SiteInspection() {
     const quantityId = `${mode}-blade-qty-${index}`;
     const bladeCountId = `${mode}-blade-count-${index}`;
     const framePriceId = `${mode}-blade-frame-price-${index}`;
+    const isMobileMode = mode.endsWith("mobile");
+    const deleteButtonClasses = `inline-flex size-9 shrink-0 items-center justify-center rounded-lg border transition ${darkMode ? "border-[#5c2a24] bg-[#3a1c18] text-[#ff8080] hover:border-[#ff8080] hover:bg-[#4a211c]" : "border-[#f3c2bc] bg-[#fdecea] text-[#d64545] hover:border-[#d64545] hover:bg-[#fbded9]"}`;
 
     const updateExtraCharge = (chargeIndex, patch) => {
       const nextCharges = extraCharges.map((charge, currentIndex) => (
@@ -1282,24 +1622,16 @@ function SiteInspection() {
     };
 
     return (
-      <article key={item.id || `${mode}-blade-${index}`} className={`mt-4 overflow-hidden rounded-2xl border shadow-sm ${darkMode ? "border-slate-700 bg-[#0b1b2d]" : "border-slate-200 bg-white"}`}>
-        <div className={`flex items-center justify-between gap-3 border-b px-4 py-3 ${darkMode ? "border-slate-700 bg-slate-800/70" : "border-slate-100 bg-slate-50/80"}`}>
-          <div className="min-w-0">
-            <p className={`text-[10px] font-bold uppercase tracking-[0.16em] ${mutedClass}`}>Measurement {index + 1}</p>
-            <p className={`mt-0.5 truncate text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{item.name || "Select a product"}</p>
-          </div>
-          <div className="flex shrink-0 items-center gap-3">
-            <div className="text-right">
-              <p className={`text-[10px] font-semibold uppercase tracking-wider ${mutedClass}`}>Estimated total</p>
-              <p className={`text-sm font-black ${darkMode ? "text-white" : "text-slate-950"}`}>{formatCurrency(rowTotal)}</p>
-            </div>
-            <button type="button" onClick={() => onRemove(item.id)} className={`inline-flex size-9 items-center justify-center rounded-xl border transition ${darkMode ? "border-slate-600 text-slate-300 hover:border-red-500/60 hover:bg-red-500/10 hover:text-red-300" : "border-slate-200 bg-white text-slate-500 hover:border-red-200 hover:bg-red-50 hover:text-red-600"}`} aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
-              <X size={16} aria-hidden="true" />
+      <article key={item.id || `${mode}-blade-${index}`} className={`mt-4 overflow-hidden rounded-xl border shadow-[0_1px_2px_rgba(16,24,40,0.04)] ${hasSelectedRushCharge(item) ? darkMode ? "border-red-400 bg-red-500/20" : "border-red-500 bg-red-100" : darkMode ? "border-[#263040] bg-[#161c26]" : "border-[#dde3ec] bg-white"}`}>
+        {isMobileMode && (
+          <div className={`flex items-center justify-between gap-2 border-b px-4 py-2.5 ${darkMode ? "border-[#263040]" : "border-[#dde3ec]"}`}>
+            <p className={`text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Measurement {index + 1}</p>
+            <button type="button" onClick={() => requestMeasurementDelete(mode.startsWith("edit") ? "edit" : "new", item, index)} className={deleteButtonClasses} aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
+              <Trash2 size={16} aria-hidden="true" />
             </button>
           </div>
-        </div>
-
-        <div className="grid gap-3 p-4 sm:grid-cols-[minmax(0,1.6fr)_76px_minmax(110px,0.8fr)] sm:items-end">
+        )}
+        <div className="grid grid-cols-1 items-end gap-4 p-4 min-[620px]:grid-cols-[minmax(0,1.6fr)_76px_minmax(110px,0.8fr)_minmax(90px,auto)_36px]">
           <label className="min-w-0">
             <span className={labelClasses}>Product / Description</span>
             <select id={productSelectId} value={item.product_id || ""} onChange={(event) => onProductChange(item.id, event.target.value)} className={inputClasses}>
@@ -1308,21 +1640,31 @@ function SiteInspection() {
                 <option key={String(product._id || product.id)} value={String(product._id || product.id)}>{product.name}</option>
               ))}
             </select>
-            {getMeasurementLimitWarnings(item).map((warning) => <p key={warning} role="status" className={`mt-1 text-xs ${darkMode ? "text-amber-300" : "text-amber-800"}`}>{warning}</p>)}
           </label>
 
           <label className="min-w-0">
             <span className={labelClasses}>Qty</span>
-            <input id={quantityId} type="number" min="1" step="1" inputMode="numeric" value={quantity} onChange={(event) => onFieldChange(item.id, "qty", event.target.value)} className={`${inputClasses} text-right`} />
+            <input id={quantityId} type="number" min="1" step="1" inputMode="numeric" value={item.qty ?? item.quantity ?? 1} onChange={(event) => onFieldChange(item.id, "qty", event.target.value)} className={`${inputClasses} text-right`} />
           </label>
 
-          <div className={`flex min-h-[42px] items-center justify-between gap-2 rounded-lg border px-3 text-xs font-semibold ${darkMode ? "border-slate-700 bg-[#122d42] text-slate-100" : "border-slate-200 bg-slate-50 text-slate-800"}`}>
+          <div className={`blade-readonly-control flex h-[42px] items-center justify-between gap-2 rounded-lg border px-3 text-xs font-semibold ${darkMode ? "border-[#263040] bg-[#1b2230] text-[#eef1f6]" : "border-[#dde3ec] bg-[#f6f8fb] text-[#1a2230]"}`}>
             <span className={mutedClass}>Price / blade</span>
             <span className="whitespace-nowrap font-bold">{formatCurrency(bladeRate)}</span>
           </div>
+
+          <div className={`blade-readonly-control flex h-[42px] flex-col justify-center rounded-lg border px-3 min-[620px]:text-right ${darkMode ? "border-[#263040] bg-[#1b2230] text-[#eef1f6]" : "border-[#dde3ec] bg-[#f6f8fb] text-[#1a2230]"}`}>
+            <span className={`text-[10px] font-bold uppercase tracking-wider ${mutedClass}`}>Total</span>
+            <span className={`text-sm font-black ${darkMode ? "text-[#93a0b4]" : "text-[#6f7a8c]"}`}>{formatCurrency(rowTotal)}</span>
+          </div>
+
+          {!isMobileMode && (
+            <button type="button" onClick={() => requestMeasurementDelete(mode.startsWith("edit") ? "edit" : "new", item, index)} className={`${deleteButtonClasses} justify-self-end`} aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
+              <Trash2 size={16} aria-hidden="true" />
+            </button>
+          )}
         </div>
 
-        <div className={`grid gap-3 px-4 pb-4 sm:grid-cols-2 ${saleMode === "frame" && selectedFrame ? "lg:grid-cols-3" : "lg:grid-cols-2"}`}>
+        <div className={`grid grid-cols-1 gap-4 px-4 pb-4 ${saleMode === "frame" ? "min-[620px]:grid-cols-3" : "min-[620px]:grid-cols-2"}`}>
           <label className="min-w-0">
             <span className={labelClasses}>Glass type</span>
             <select id={glassSelectId} aria-label={`Glass type for measurement ${index + 1}`} value={item.blade_glass_type || glassTypes[0]?.name || ""} onChange={(event) => onFieldChange(item.id, "blade_glass_type", event.target.value)} className={inputClasses}>
@@ -1347,90 +1689,101 @@ function SiteInspection() {
 
           <label className="min-w-0">
             <span className={labelClasses}>Number of blades</span>
-            <input id={bladeCountId} type="number" min={minimumBlades} max={maximumBlades || undefined} step="1" inputMode="numeric" value={bladeCount} onChange={(event) => onFieldChange(item.id, "blade_count", event.target.value)} className={`${inputClasses} text-right`} />
+            <div className={`blade-count-stepper grid h-[38px] grid-cols-[38px_minmax(0,1fr)_38px] items-center overflow-hidden rounded-lg border ${darkMode ? "border-[#263040] bg-[#161c26]" : "border-[#dde3ec] bg-white"}`}>
+              <button type="button" onClick={() => onFieldChange(item.id, "blade_count", Math.max(minimumBlades, Number(bladeCount) - 1))} disabled={Number(bladeCount) <= minimumBlades} className={`inline-flex h-full items-center justify-center transition disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "text-[#93a0b4] hover:bg-[#1b2230]" : "text-[#6f7a8c] hover:bg-[#f6f8fb]"}`} aria-label="Decrease number of blades">
+                <Minus size={14} aria-hidden="true" />
+              </button>
+              <input id={bladeCountId} type="number" min={minimumBlades} max={maximumBlades || undefined} step="1" inputMode="numeric" value={bladeCount} onChange={(event) => onFieldChange(item.id, "blade_count", event.target.value)} className={`h-full min-w-0 appearance-none border-0 bg-transparent px-1 text-center text-sm outline-none focus:ring-0 ${darkMode ? "text-[#eef1f6]" : "text-[#1a2230]"}`} />
+              <button type="button" onClick={() => onFieldChange(item.id, "blade_count", maximumBlades > 0 ? Math.min(maximumBlades, Number(bladeCount) + 1) : Number(bladeCount) + 1)} disabled={maximumBlades > 0 && Number(bladeCount) >= maximumBlades} className={`inline-flex h-full items-center justify-center transition disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "text-[#93a0b4] hover:bg-[#1b2230]" : "text-[#6f7a8c] hover:bg-[#f6f8fb]"}`} aria-label="Increase number of blades">
+                <Plus size={14} aria-hidden="true" />
+              </button>
+            </div>
             <span className={`mt-1 block text-[11px] ${mutedClass}`}>
               {maximumBlades > 0 ? `Minimum: ${minimumBlades}, maximum: ${maximumBlades}` : `Minimum: ${minimumBlades}`}
             </span>
           </label>
 
         {saleMode === "frame" && (
-          <div className={`rounded-xl border p-3 sm:col-span-2 lg:col-span-1 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50/70"}`}>
+          <div className={`rounded-xl border p-3 ${darkMode ? "border-[#263040] bg-[#1b2230]" : "border-[#dde3ec] bg-[#f6f8fb]"}`}>
             <label className="block">
               <span className={labelClasses}>Frame price (PHP)</span>
-              <input id={framePriceId} type="number" min="0" step="0.01" inputMode="decimal" value={framePrice} onChange={(event) => onFieldChange(item.id, "frame_price", event.target.value)} className={`${inputClasses} text-right`} />
+              <input id={framePriceId} type={hidePaymentAmounts ? "password" : "number"} min="0" step="0.01" inputMode="decimal" value={framePrice} onChange={(event) => onFieldChange(item.id, "frame_price", event.target.value)} className={`${inputClasses} text-right`} />
             </label>
             {selectedFrame?.price !== undefined && <span className={`mt-1 block text-[11px] ${mutedClass}`}>Standard: {formatCurrency(Number(selectedFrame.price) || 0)}</span>}
           </div>
         )}
-        </div>
 
         {extraCharges.length > 0 && (
-          <div className={`mx-4 mb-4 rounded-xl border p-3 sm:p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50/70"}`}>
-            <p className={`text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-800"}`}>
+          <div className={`blade-extra-charges min-w-0 overflow-hidden rounded-xl border min-[620px]:col-span-2 ${darkMode ? "border-[#263040] bg-[#161c26]" : "border-[#dde3ec] bg-white"}`}>
+            <p className={`blade-extra-charges-header border-b px-4 py-3 text-xs font-bold ${darkMode ? "border-[#263040] bg-[#1b2230] text-slate-200" : "border-[#dde3ec] bg-[#f6f8fb] text-slate-800"}`}>
               Extra charges <span className={`font-normal ${mutedClass}`}>(this order only · set amount to 0 to remove)</span>
             </p>
-            <div className="mt-3 space-y-2">
+            <div className="space-y-0 px-3">
               {extraCharges.map((charge, chargeIndex) => {
                 const chargeTotal = getBladeExtraChargeTotal(charge, details);
                 return (
-                  <div key={`${charge.name || charge.label}-${chargeIndex}`} className={`grid gap-2 rounded-lg border p-2.5 sm:grid-cols-[minmax(0,1fr)_76px_110px_110px] sm:items-center ${darkMode ? "border-slate-700 bg-slate-800/60" : "border-slate-200 bg-white"}`}>
-                    <label className={`flex min-w-0 items-center gap-2.5 text-sm ${darkMode ? "text-slate-200" : "text-slate-800"}`}>
-                      <input
-                        type="checkbox"
-                        checked={charge.is_selected !== false}
-                        onChange={(event) => updateExtraCharge(chargeIndex, { is_selected: event.target.checked })}
-                        className="accent-red-700"
-                      />
+                  <div key={`${charge.name || charge.label}-${chargeIndex}`} className={`grid grid-cols-1 items-center gap-4 border-b py-3 last:border-b-0 min-[620px]:grid-cols-[minmax(0,1fr)_90px_minmax(100px,120px)_100px] ${darkMode ? "border-[#263040]" : "border-[#dde3ec]"}`}>
+                    <div className={`flex min-w-0 items-center gap-2.5 text-sm ${darkMode ? "text-slate-200" : "text-slate-800"}`}>
+                      <button type="button" role="switch" aria-checked={charge.is_selected !== false} aria-label={charge.label || charge.name} onClick={() => updateExtraCharge(chargeIndex, { is_selected: charge.is_selected === false })} className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 ${charge.is_selected !== false ? (darkMode ? "bg-[#6ea8fe] focus-visible:ring-[#6ea8fe]/30" : "bg-[#2563eb] focus-visible:ring-[#2563eb]/25") : (darkMode ? "bg-[#344156] focus-visible:ring-[#6ea8fe]/30" : "bg-[#c6ced9] focus-visible:ring-[#2563eb]/25")}`}>
+                        <span className={`inline-block size-4 rounded-full bg-white shadow-sm transition-transform ${charge.is_selected !== false ? "translate-x-[18px]" : "translate-x-0.5"}`} />
+                      </button>
                       <span className="min-w-0 truncate">{charge.label || charge.name}</span>
                       {charge.is_optional === true && <span className={`rounded-full px-2 py-0.5 text-[10px] ${darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-100 text-slate-500"}`}>optional</span>}
-                    </label>
-                    <span className={`text-xs ${mutedClass}`}>
+                    </div>
+                    <span className={`text-xs min-[620px]:text-right ${mutedClass}`}>
                       {charge.type === "percentage" ? "% rate" : charge.type === "per_blade" ? "per blade" : "PHP fixed"}
                     </span>
-                    <input type="number" min="0" step="0.01" inputMode="decimal" value={charge.amount ?? 0} onChange={(event) => updateExtraCharge(chargeIndex, { amount: event.target.value })} className={`${inputClasses} py-2 text-right`} aria-label={`${charge.label || charge.name} amount`} />
-                    <div className={`text-right text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{formatCurrency(chargeTotal)}</div>
+                    <input type={hidePaymentAmounts ? "password" : "number"} min="0" step="0.01" inputMode="decimal" value={charge.amount ?? 0} onChange={(event) => updateExtraCharge(chargeIndex, { amount: event.target.value })} className={`${inputClasses} h-[38px] py-2 text-right`} aria-label={`${charge.label || charge.name} amount`} />
+                    <div className={`blade-extra-charge-total text-right text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{formatCurrency(chargeTotal)}</div>
                   </div>
                 );
               })}
             </div>
           </div>
         )}
+        </div>
 
         {hasPerProductWarranty && (
           <div className={`mx-4 mb-4 rounded-xl border p-3 sm:p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50/70"}`}>
-            <label htmlFor={`${mode}-blade-warranty-${index}`} className={labelClasses}>Warranty for {item.name || `product ${index + 1}`}</label>
-            <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(160px,0.7fr)]">
-              <select
-                id={`${mode}-blade-warranty-${index}`}
-                value={getItemWarrantySelectValue(item)}
-                onChange={(event) => {
-                  const value = event.target.value;
-                  if (value === "Custom") {
-                    onFieldChange(item.id, "warranty_period", "Custom");
-                    if (!Number(item.custom_warranty_days)) onFieldChange(item.id, "custom_warranty_days", 90);
-                  } else {
-                    onFieldChange(item.id, "warranty_period", value === "No Warranty" ? value : Number(value));
-                  }
-                }}
-                className={inputClasses}
-              >
-                <option value="No Warranty">No Warranty</option>
-                <option value="30">30 Days</option>
-                <option value="60">60 Days</option>
-                <option value="90">90 Days</option>
-                <option value="Custom">Custom</option>
-              </select>
-              {getItemWarrantySelectValue(item) === "Custom" && (
-                <input
-                  type="number"
-                  min="1"
-                  step="1"
-                  aria-label={`Custom warranty days for ${item.name || `product ${index + 1}`}`}
-                  value={getItemWarrantyCustomDays(item)}
-                  onChange={(event) => onFieldChange(item.id, "custom_warranty_days", event.target.value)}
+            <p className={`mb-3 text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Warranty for {item.name || `product ${index + 1}`}</p>
+            <div className={`grid items-end gap-3 ${getItemWarrantySelectValue(item) === "Custom" ? "sm:grid-cols-[minmax(0,1.2fr)_minmax(180px,0.8fr)]" : "sm:grid-cols-1"}`}>
+              <label className="min-w-0">
+                <span className={labelClasses}>Warranty period</span>
+                <select
+                  id={`${mode}-blade-warranty-${index}`}
+                  value={getItemWarrantySelectValue(item)}
+                  onChange={(event) => {
+                    const value = event.target.value;
+                    if (value === "Custom") {
+                      onFieldChange(item.id, "warranty_period", "Custom");
+                      if (!Number(item.custom_warranty_days)) onFieldChange(item.id, "custom_warranty_days", 90);
+                    } else {
+                      onFieldChange(item.id, "warranty_period", value === "No Warranty" ? value : Number(value));
+                    }
+                  }}
                   className={inputClasses}
-                  placeholder="Custom warranty days"
-                />
+                >
+                  <option value="No Warranty">No Warranty</option>
+                  <option value="30">30 Days</option>
+                  <option value="60">60 Days</option>
+                  <option value="90">90 Days</option>
+                  <option value="Custom">Custom</option>
+                </select>
+              </label>
+              {getItemWarrantySelectValue(item) === "Custom" && (
+                <label className="min-w-0">
+                  <span className={labelClasses}>Custom warranty days</span>
+                  <input
+                    type="number"
+                    min="1"
+                    step="1"
+                    aria-label={`Custom warranty days for ${item.name || `product ${index + 1}`}`}
+                    value={getItemWarrantyCustomDays(item)}
+                    onChange={(event) => onFieldChange(item.id, "custom_warranty_days", event.target.value)}
+                    className={inputClasses}
+                    placeholder="e.g. 90"
+                  />
+                </label>
               )}
             </div>
           </div>
@@ -1447,6 +1800,7 @@ function SiteInspection() {
   };
 
   const formatRateLabel = (item) => {
+    if (hidePaymentAmounts) return "••••••";
     const normalizedProductId = normalizeProductId(item.product_id);
     const product = products.find((p) => String(p._id || p.id) === normalizedProductId) || null;
     if (!product) return `₱${(Number(item.unit_price) || 0).toLocaleString()}`;
@@ -1561,6 +1915,7 @@ function SiteInspection() {
       customer_phone: payload.phone,
       estimation_mode: "auto",
       inspection_date: toApiDate(payload.inspection_date),
+      is_rush_order: payload.is_rush_order === true,
       estimated_installation_date: toApiDate(payload.estimated_installation_date),
       ...buildWarrantyPayload(payload.warranty_period, payload.custom_warranty_days),
       warranty_assignment_mode: (payload.items || []).length > 1 && payload.warranty_assignment_mode === "per_product"
@@ -1593,6 +1948,13 @@ function SiteInspection() {
   };
 
   const handleInspectionFieldChange = (field, value) => {
+    if (field === "is_rush_order" && value === true) {
+      const rushCount = getRushOrderCountForDate(newInspection.inspection_date);
+      if (rushCount >= 2) {
+        toast.error(`This date already has ${rushCount} Rush Orders. The daily maximum is 2; choose another date.`);
+        return;
+      }
+    }
     setNewInspection((prev) => {
       if (field === "order_type") {
         if (value === "walk_in_customer") {
@@ -1808,10 +2170,29 @@ function SiteInspection() {
     setEditInspection((prev) => ({ ...prev, items: (prev.items || []).filter((it) => it.id !== id) }));
   };
 
+  const requestMeasurementDelete = (mode, item, index) => {
+    setMeasurementDeleteConfirmation({
+      mode,
+      id: item.id,
+      label: item.name || `Measurement ${index + 1}`,
+    });
+  };
+
+  const confirmMeasurementDelete = () => {
+    if (!measurementDeleteConfirmation) return;
+    if (measurementDeleteConfirmation.mode === "edit") {
+      removeEditItemRow(measurementDeleteConfirmation.id);
+    } else {
+      removeItemRow(measurementDeleteConfirmation.id);
+    }
+    setMeasurementDeleteConfirmation(null);
+  };
+
   const computeTotals = () => {
     const totalArea = (newInspection.items || []).reduce((sum, item) => sum + (Number(item.area) || 0), 0);
     const totalEstimate = Math.round(
       (newInspection.items || []).reduce((sum, item) => {
+        if (!normalizeProductId(item.product_id)) return sum;
         if (item.estimation_mode === "manual") return sum + (Number(item.manual_estimated_total) || calculateRowSubtotal(item));
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
@@ -1826,6 +2207,7 @@ function SiteInspection() {
     const totalArea = (editInspection.items || []).reduce((sum, item) => sum + (Number(item.area) || 0), 0);
     const totalEstimate = Math.round(
       (editInspection.items || []).reduce((sum, item) => {
+        if (!normalizeProductId(item.product_id)) return sum;
         if (item.estimation_mode === "manual") return sum + (Number(item.manual_estimated_total) || calculateRowSubtotal(item));
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
@@ -1869,7 +2251,24 @@ function SiteInspection() {
         setRequestedRecordError(null);
         setRequestedModalRecordId(requestedRecordId);
         setRequestedModalLocationKey(location.key);
-        setViewInspection(latestOrder);
+        if (location.state?.openContract) {
+          setViewInspection(null);
+          const nextSearchParams = new URLSearchParams(searchParams);
+          nextSearchParams.delete("view");
+          const nextLocationState = { ...location.state };
+          delete nextLocationState.openContract;
+          navigate(
+            {
+              pathname: location.pathname,
+              search: nextSearchParams.toString() ? `?${nextSearchParams.toString()}` : "",
+              hash: location.hash,
+            },
+            { replace: true, state: nextLocationState },
+          );
+          openContractButtonHandler(latestOrder);
+        } else {
+          setViewInspection(latestOrder);
+        }
       })
       .catch((error) => {
         if (!active) return;
@@ -1922,14 +2321,31 @@ function SiteInspection() {
   useEffect(() => {
     if (showModal) {
       resetNewInspectionForm();
+      setNewInspectionStep(1);
     }
     // only run when showModal changes
   }, [showModal]);
 
   const submitNewInspection = async () => {
+    const requestedRushSlots = getRushSlotsForInspection(newInspection);
+    if (requestedRushSlots > 0) {
+      if (!newInspection.inspection_date) {
+        toast.error("Set an inspection date before marking this as a Rush Order.");
+        changeInspectionStep(1, setNewInspectionStep, newInspectionBodyRef);
+        return;
+      }
+      const rushCount = getRushOrderCountForDate(newInspection.inspection_date);
+      if (rushCount + requestedRushSlots > 2) {
+        toast.error(`This order would use ${rushCount + requestedRushSlots} of 2 Rush Order slots for the selected date. Remove a Rush charge or choose another date.`);
+        return;
+      }
+    }
     const validationErrors = validateInspectionPayload(newInspection);
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors);
+      if (["customerName", "phone", "siteAddress", "inspection_date", "estimated_installation_date", "customerId"].some((field) => validationErrors[field])) {
+        changeInspectionStep(1, setNewInspectionStep, newInspectionBodyRef);
+      }
       const firstKey = Object.keys(validationErrors)[0];
       const firstError = validationErrors[firstKey];
       if (Array.isArray(firstError)) {
@@ -1952,6 +2368,7 @@ function SiteInspection() {
       await fetchSiteInspections();
     } catch (err) {
       console.error("Create inspection failed", err);
+      if (err?.data?.code === "RUSH_ORDER_DAILY_LIMIT") await fetchSiteInspections(false);
       const errorDetail = err?.data?.error || err?.data?.message || err?.message;
       toast.error(errorDetail ? `Unable to create order: ${errorDetail}` : "Unable to create order.");
     } finally {
@@ -2029,19 +2446,7 @@ function SiteInspection() {
   };
 
   const getCustomerTypeLabel = (inspection = {}) => {
-    const explicitType = (inspection.customerType || inspection.customer_type || "").toString().trim().toLowerCase();
-    if (explicitType === "online" || explicitType === "online_customer") return "Online Customer";
-    if (explicitType === "walk-in" || explicitType === "walk_in" || explicitType === "walkin" || explicitType === "walk-in_customer" || explicitType === "walk_in_customer") return "Walk-in Customer";
-
-    const hasRegisteredCustomer = Boolean(
-      inspection.customerId ||
-      inspection.customer_id ||
-      inspection.customer?._id ||
-      inspection.customer?.id ||
-      inspection.customer
-    );
-
-    return hasRegisteredCustomer ? "Online Customer" : "Walk-in Customer";
+    return isOnlineInspection(inspection) ? "Online Customer" : "Walk-in Customer";
   };
 
   const generateContractData = (order) => {
@@ -2427,8 +2832,11 @@ function SiteInspection() {
   };
 
   const handleEdit = (orderId) => {
+    setEditMeasurementsEnabled(false);
     const inspection = inspections.find((i) => (i._id || i.id) === orderId);
     if (inspection) {
+      setEditInspectionStep(1);
+      setErrors({});
       const registeredCustomerId = getRegisteredCustomerId(inspection);
       const isOnlineCustomer = isOnlineCustomerInspection(inspection);
       // Try to extract customer name from multiple sources
@@ -2451,8 +2859,10 @@ function SiteInspection() {
       const warrantyPeriodValue = inspection.warranty_period ?? 90;
       const normalizedWarrantyPeriod = normalizeWarrantyPeriodValue(warrantyPeriodValue);
       const paymentProof = getCustomerPaymentProof(inspection);
+      const editItems = (inspection.items || []).map((item) => getEditItemFromOrderItem(item));
+      const customerSelectedRush = editItems.some((item) => hasSelectedRushCharge(item));
 
-      setEditInspection({
+      const nextEditInspection = {
         id: orderId,
         customerName,
         customerEmail,
@@ -2462,6 +2872,7 @@ function SiteInspection() {
         payment_terms: inspection.payment_terms || "",
         agreed_payment_date: normalizeDateInputValue(inspection.agreed_payment_date),
         inspection_date: normalizeDateInputValue(inspection.inspection_date),
+        is_rush_order: inspection.is_rush_order === true || customerSelectedRush,
         estimated_installation_date: normalizeDateInputValue(getEstimatedInstallationDate(inspection)),
         warranty_period: normalizedWarrantyPeriod,
         warranty_assignment_mode: inspection.warranty_assignment_mode === "per_product" ? "per_product" : "same",
@@ -2487,16 +2898,26 @@ function SiteInspection() {
         inspection_notes: inspection.inspection_notes || "",
         issues_found: inspection.issues_found || "",
         inspection_status: inspection.inspection_status || "pending",
-        items: (inspection.items || []).map((item) => getEditItemFromOrderItem(item)),
+        items: editItems,
         customerId: registeredCustomerId || null,
+        customer_cancellation_count: Number(
+          inspection.customer?.customer_cancellation_count
+          ?? inspection.customer_cancellation_count
+          ?? inspection.cancellation_count,
+        ) || 0,
+        online_order_cooldown_until: inspection.customer?.online_order_cooldown_until || null,
         payment_proof_amount: paymentProof.amount,
         payment_proof_file_name: inspection.payment_proof_file_name || inspection.payment_proof_file_url || "",
         payment_method: paymentProof.paymentMethod,
         transaction_number: paymentProof.transactionNumber,
-      });
+      };
+      editInspectionBaselineRef.current = createUnsavedSnapshot(nextEditInspection);
+      setEditInspection(nextEditInspection);
     } else {
       // fallback: open an empty editor
-      setEditInspection({ id: orderId, inspection_date: "", inspection_notes: "", issues_found: "", inspection_status: "pending" });
+      const nextEditInspection = { id: orderId, inspection_date: "", is_rush_order: false, inspection_notes: "", issues_found: "", inspection_status: "pending" };
+      editInspectionBaselineRef.current = createUnsavedSnapshot(nextEditInspection);
+      setEditInspection(nextEditInspection);
     }
   };
 
@@ -2658,6 +3079,7 @@ function SiteInspection() {
       if (res && res.order) {
         setInspections((prev) => prev.filter((i) => (i._id || i.id) !== orderId));
         setCancelledInspections((prev) => [res.order, ...prev]);
+        setRushOrderRecords((prev) => prev.map((i) => ((i._id || i.id) === orderId ? res.order : i)));
         // show undo toast with react-hot-toast
         toast((t) => (
           <div className="flex items-center justify-between gap-4">
@@ -2677,6 +3099,7 @@ function SiteInspection() {
         ), { duration: 6000 });
       } else {
         setInspections((prev) => prev.filter((i) => (i._id || i.id) !== orderId));
+        setRushOrderRecords((prev) => prev.filter((i) => (i._id || i.id) !== orderId));
       }
     } catch (err) {
       console.error("Failed to cancel inspection", err);
@@ -2734,6 +3157,10 @@ function SiteInspection() {
       recordActivity(user, `Restored site inspection ${orderId}.`, "Site Inspection");
       if (res && res.order) {
         setCancelledInspections((prev) => prev.filter((i) => (i._id || i.id) !== orderId));
+        setRushOrderRecords((prev) => {
+          const exists = prev.some((i) => (i._id || i.id) === orderId);
+          return exists ? prev.map((i) => ((i._id || i.id) === orderId ? res.order : i)) : [res.order, ...prev];
+        });
         if (isSiteInspectionVisible(res.order)) {
           setInspections((prev) => [res.order, ...prev]);
         }
@@ -2748,6 +3175,13 @@ function SiteInspection() {
   };
 
   const handleEditChange = (name, value) => {
+    if (name === "is_rush_order" && value === true) {
+      const rushCount = getRushOrderCountForDate(editInspection?.inspection_date, editInspection?.id);
+      if (rushCount >= 2) {
+        toast.error(`This date already has ${rushCount} other Rush Orders. The daily maximum is 2; choose another date.`);
+        return;
+      }
+    }
     setEditInspection((prev) => {
       if (prev.isOnlineCustomer && ["customerName", "phone", "customerEmail", "has_account_on_website", "order_type"].includes(name)) {
         return prev;
@@ -2765,11 +3199,73 @@ function SiteInspection() {
     });
   };
 
+  const requestSaveEdit = async () => {
+    if (!editInspection?.id) return;
+    const sourceOrder = inspections.find((order) => (order._id || order.id) === editInspection.id);
+    let cancellationCount = Number(
+      editInspection.customer_cancellation_count
+      ?? editInspection.customer?.customer_cancellation_count
+      ?? editInspection.cancellation_count
+      ?? sourceOrder?.customer?.customer_cancellation_count
+      ?? sourceOrder?.customer_cancellation_count
+      ?? sourceOrder?.cancellation_count,
+    );
+
+    // The list response may omit the populated customer. Check the order detail
+    // before saving so the warning also works when the count is only available there.
+    try {
+      const response = await getAdminOrder(editInspection.id, "site_inspection");
+      const detailedOrder = response?.order;
+      cancellationCount = Number(
+        detailedOrder?.customer?.customer_cancellation_count
+        ?? detailedOrder?.customer_cancellation_count
+        ?? detailedOrder?.cancellation_count
+        ?? cancellationCount,
+      );
+      if (detailedOrder) {
+        setEditInspection((current) => current?.id === editInspection.id ? {
+          ...current,
+          customer: detailedOrder.customer,
+          customer_cancellation_count: cancellationCount,
+          online_order_cooldown_until: detailedOrder.customer?.online_order_cooldown_until
+            ?? detailedOrder.online_order_cooldown_until
+            ?? current.online_order_cooldown_until,
+        } : current);
+      }
+    } catch (error) {
+      console.warn("Unable to refresh customer cancellation count before saving inspection:", error);
+    }
+
+    if (cancellationCount >= 3) {
+      setHighCancellationConfirmation(true);
+      return;
+    }
+
+    await saveEdit();
+  };
+
   const saveEdit = async () => {
     if (!editInspection || !editInspection.id) return;
+
+    const requestedRushSlots = getRushSlotsForInspection(editInspection);
+    if (requestedRushSlots > 0) {
+      if (!editInspection.inspection_date) {
+        toast.error("Set an inspection date before marking this as a Rush Order.");
+        changeInspectionStep(1, setEditInspectionStep, editInspectionBodyRef);
+        return;
+      }
+      const rushCount = getRushOrderCountForDate(editInspection.inspection_date, editInspection.id);
+      if (rushCount + requestedRushSlots > 2) {
+        toast.error(`This order would use ${rushCount + requestedRushSlots} of 2 Rush Order slots for the selected date. Remove a Rush charge or choose another date.`);
+        return;
+      }
+    }
     const validationErrors = validateInspectionPayload(editInspection);
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors);
+      if (["customerName", "phone", "siteAddress", "inspection_date", "estimated_installation_date", "customerId"].some((field) => validationErrors[field])) {
+        changeInspectionStep(1, setEditInspectionStep, editInspectionBodyRef);
+      }
       const firstKey = Object.keys(validationErrors)[0];
       const firstError = validationErrors[firstKey];
       if (Array.isArray(firstError)) {
@@ -2795,6 +3291,7 @@ function SiteInspection() {
         }),
         manual_override: editInspection.manual_override || "",
         inspection_date: toApiDate(editInspection.inspection_date),
+        is_rush_order: editInspection.is_rush_order === true,
         inspection_notes: editInspection.inspection_notes || undefined,
         issues_found: editInspection.issues_found || undefined,
         inspection_status: editInspection.inspection_date ? "scheduled" : editInspection.inspection_status || undefined,
@@ -2898,8 +3395,10 @@ function SiteInspection() {
       }
       await fetchSiteInspections();
       setEditInspection(null);
+      setHighCancellationConfirmation(false);
     } catch (err) {
       console.error("Failed to save inspection edit", err, err?.data);
+      if (err?.data?.code === "RUSH_ORDER_DAILY_LIMIT") await fetchSiteInspections(false);
       // Extract detailed error message from backend response
       const details = err?.data?.details;
       const detailMessage = Array.isArray(details)
@@ -2920,25 +3419,51 @@ function SiteInspection() {
 
   const sourceList = activeTab === "cancelled" ? cancelledInspections : inspections.filter(isSiteInspectionVisible);
   const searchedList = filterInspections(sourceList);
-  const filteredList = activeTab === "site" && statusFilter !== "all"
+  const customerTypeFilteredList = activeTab === "site" && customerTypeFilter !== "all"
     ? searchedList.filter((inspection) => (
+        customerTypeFilter === "online" ? isOnlineInspection(inspection) : isWalkInInspection(inspection)
+      ))
+    : searchedList;
+  const filteredList = activeTab === "site" && statusFilter !== "all"
+    ? customerTypeFilteredList.filter((inspection) => (
         statusFilter === "scheduled"
           ? hasValidInspectionDate(inspection)
           : !hasValidInspectionDate(inspection)
       ))
-    : searchedList;
-  const totalPages = Math.max(1, Math.ceil(filteredList.length / pageSize));
+    : customerTypeFilteredList;
+  const priorityFilteredList = activeTab === "site" && priorityFilter !== "all"
+    ? filteredList.filter((inspection) => {
+        const isRushOrder = getRushSlotsForInspection(inspection) > 0;
+        const isRestrictedCustomer = isRestrictedCustomerOrder(inspection, restrictionClock);
+        if (priorityFilter === "rush") return isRushOrder;
+        if (priorityFilter === "restricted") return isRestrictedCustomer;
+        return !isRushOrder && !isRestrictedCustomer;
+      })
+    : filteredList;
+  const prioritizedList = activeTab === "site"
+    ? [...priorityFilteredList].sort((left, right) => {
+        const leftIsRush = getRushSlotsForInspection(left) > 0;
+        const rightIsRush = getRushSlotsForInspection(right) > 0;
+        if (leftIsRush !== rightIsRush) return leftIsRush ? -1 : 1;
+        if (!leftIsRush) return 0;
+
+        const leftCreatedAt = Date.parse(left.createdAt || left.created_at || left.order_date || "") || Number.POSITIVE_INFINITY;
+        const rightCreatedAt = Date.parse(right.createdAt || right.created_at || right.order_date || "") || Number.POSITIVE_INFINITY;
+        return leftCreatedAt - rightCreatedAt;
+      })
+    : filteredList;
+  const totalPages = Math.max(1, Math.ceil(prioritizedList.length / pageSize));
   const currentPageIndex = Math.min(Math.max(currentPage, 1), totalPages);
-  const paginatedList = filteredList.slice((currentPageIndex - 1) * pageSize, currentPageIndex * pageSize);
-  const visibleInspections = isMobile ? filteredList : paginatedList;
-  const visibleRecordStart = filteredList.length === 0 ? 0 : (currentPageIndex - 1) * pageSize + 1;
-  const visibleRecordEnd = Math.min(currentPageIndex * pageSize, filteredList.length);
+  const paginatedList = prioritizedList.slice((currentPageIndex - 1) * pageSize, currentPageIndex * pageSize);
+  const visibleInspections = isMobile ? prioritizedList : paginatedList;
+  const visibleRecordStart = prioritizedList.length === 0 ? 0 : (currentPageIndex - 1) * pageSize + 1;
+  const visibleRecordEnd = Math.min(currentPageIndex * pageSize, prioritizedList.length);
 
   useEffect(() => {
     if (!highlightedNotificationRecordId) return;
-    const targetIndex = filteredList.findIndex((inspection) => String(inspection._id || inspection.id) === highlightedNotificationRecordId);
+    const targetIndex = prioritizedList.findIndex((inspection) => String(inspection._id || inspection.id) === highlightedNotificationRecordId);
     if (targetIndex >= 0) setCurrentPage(Math.floor(targetIndex / pageSize) + 1);
-  }, [highlightedNotificationRecordId, inspections, filteredList.length]);
+  }, [highlightedNotificationRecordId, inspections, prioritizedList.length]);
 
   const getInspectionProductSummary = (inspection) => {
     const items = Array.isArray(inspection?.items) ? inspection.items : [];
@@ -2959,7 +3484,7 @@ function SiteInspection() {
 
   const getInspectionStatusDisplay = (inspection) => {
     if (activeTab === "cancelled") return "Cancelled";
-    return hasValidInspectionDate(inspection) ? "Scheduled" : "📞 Need to be Called";
+    return hasValidInspectionDate(inspection) ? "Scheduled" : "Need to be Called";
   };
 
   const getInspectionStatusTone = (status) => {
@@ -2982,11 +3507,14 @@ function SiteInspection() {
     const inspectionId = inspection._id || inspection.id;
     const isCancelledTab = activeTab === "cancelled";
     const contractExists = hasExistingContract(inspection);
+    const contractWasSent = [inspection.contract_status, inspection.contractStatus, inspection.status]
+      .some((status) => ["sent", "contract_sent"].includes(normalizeWorkflowValue(status)))
+      || Boolean(inspection.contractSentAt || inspection.contract_sent_at);
     const hasEstimatedInstallDate = hasValidEstimatedInstallationDate(inspection);
     const generationDisabled = !contractExists && !hasEstimatedInstallDate;
     const contractButtonTitle = generationDisabled
       ? "Set the Est. Install Date first before generating the contract."
-      : contractExists ? "View contract" : "Generate or view contract";
+      : contractWasSent ? "Contract sent to customer" : contractExists ? "View contract" : "Generate or view contract";
     const isWalkIn = inspection.order_type === "walk_in_customer"
       || ["walk-in", "Walk-in Customer", "walk_in_customer"].includes(inspection.customerType);
 
@@ -2994,7 +3522,7 @@ function SiteInspection() {
       <>
         <button
           type="button"
-          className={`${actionButtonClass} ${darkMode ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`}
+          className={`${actionButtonClass} ${darkMode ? "bg-sky-500/25 text-sky-200 hover:bg-sky-500/40" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`}
           onClick={() => handleView(inspection)}
           title="View inspection"
           aria-label="View inspection"
@@ -3005,7 +3533,7 @@ function SiteInspection() {
           <>
             <button
               type="button"
-              className={`${actionButtonClass} ${darkMode ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`}
+              className={`${actionButtonClass} ${darkMode ? "bg-violet-500/25 text-violet-200 hover:bg-violet-500/40" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`}
               onClick={() => handleEdit(inspectionId)}
               title="Edit inspection"
               aria-label="Edit inspection"
@@ -3023,11 +3551,11 @@ function SiteInspection() {
                   type="button"
                   title={contractButtonTitle}
                   aria-label={contractButtonTitle}
-                  className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"}`}
+                  className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-40 ${contractWasSent ? (darkMode ? "bg-sky-500/25 text-sky-200 hover:bg-sky-500/40" : "bg-sky-100 text-sky-700 hover:bg-sky-200") : (darkMode ? "bg-emerald-500/25 text-emerald-200 hover:bg-emerald-500/40" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200")}`}
                   onClick={() => openContractButtonHandler(inspection)}
                   disabled={generatingId === inspectionId || generationDisabled}
                 >
-                  {generatingId === inspectionId ? <span className="text-[10px] font-bold">…</span> : <FileText size={18} strokeWidth={2.2} />}
+                  {generatingId === inspectionId ? <span className="text-[10px] font-bold">…</span> : contractWasSent ? <span className="relative inline-flex h-[20px] w-[20px] items-center justify-center" aria-hidden="true"><FileText size={18} strokeWidth={2.2} /><Send size={12} strokeWidth={2.4} className="absolute -right-1.5 -top-1.5 rounded-full bg-sky-100 p-[1px] text-sky-800 dark:bg-sky-950 dark:text-sky-200" /></span> : <FileText size={18} strokeWidth={2.2} />}
                 </button>
               </span>
             )}
@@ -3036,7 +3564,7 @@ function SiteInspection() {
                 type="button"
                 title="Manual approval"
                 aria-label="Manual approval"
-                className={`${actionButtonClass} ${darkMode ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`}
+                className={`${actionButtonClass} ${darkMode ? "bg-cyan-500/25 text-cyan-200 hover:bg-cyan-500/40" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`}
                 onClick={() => openManualApprovalModal(inspection)}
               >
                 <ShieldCheck size={18} strokeWidth={2.2} />
@@ -3044,7 +3572,7 @@ function SiteInspection() {
             )}
             <button
               type="button"
-              className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "bg-red-500/15 text-red-300 hover:bg-red-500/25" : "bg-red-100 text-red-600 hover:bg-red-200"}`}
+              className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "bg-rose-500/25 text-rose-200 hover:bg-rose-500/40" : "bg-red-100 text-red-600 hover:bg-red-200"}`}
               onClick={() => requestCancel(inspectionId)}
               title="Cancel inspection"
               aria-label="Cancel inspection"
@@ -3055,16 +3583,27 @@ function SiteInspection() {
           </>
         )}
         {isCancelledTab && (
-          <button
-            type="button"
-            title="Restore inspection"
-            aria-label="Restore inspection"
-            className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"}`}
-            onClick={() => requestRestore(inspectionId)}
-            disabled={restoringId === inspectionId}
-          >
-            {restoringId === inspectionId ? <span className="text-[10px] font-bold">…</span> : <RotateCcw size={18} strokeWidth={2.2} />}
-          </button>
+          <>
+            <button
+              type="button"
+              title="View cancellation reason"
+              aria-label="View cancellation reason"
+              className={`${actionButtonClass} ${darkMode ? "bg-amber-500/25 text-amber-200 hover:bg-amber-500/40" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`}
+              onClick={() => setCancellationReasonInspection(inspection)}
+            >
+              <ClipboardList size={18} strokeWidth={2.2} />
+            </button>
+            <button
+              type="button"
+              title="Restore inspection"
+              aria-label="Restore inspection"
+              className={`${actionButtonClass} disabled:cursor-not-allowed disabled:opacity-60 ${darkMode ? "bg-emerald-500/25 text-emerald-200 hover:bg-emerald-500/40" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"}`}
+              onClick={() => requestRestore(inspectionId)}
+              disabled={restoringId === inspectionId}
+            >
+              {restoringId === inspectionId ? <span className="text-[10px] font-bold">…</span> : <RotateCcw size={18} strokeWidth={2.2} />}
+            </button>
+          </>
         )}
       </>
     );
@@ -3074,14 +3613,15 @@ function SiteInspection() {
     <div className="flex h-screen overflow-hidden bg-gray-100">
       <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen((open) => !open)} />
 
-      <div className="flex-1 min-h-0 flex flex-col">
+      <div className="flex-1 min-h-0 min-w-0 flex flex-col">
         <Navbar />
 
-        <main className="flex-1 min-h-0 overflow-y-auto p-6">
+        <main className="flex-1 min-h-0 min-w-0 overflow-x-hidden overflow-y-auto p-6">
 
           <AdminPageHeader
             title="Site Inspection"
             description="Manage all site inspections and estimations."
+            statsClassName="grid-cols-1 lg:grid-cols-3 gap-2 sm:gap-3"
             stats={[
               { label: "Inspections", value: inspections.length, color: "text-blue-200" },
               { label: "Scheduled", value: inspections.filter(hasValidInspectionDate).length, color: "text-emerald-300" },
@@ -3100,6 +3640,41 @@ function SiteInspection() {
             </p>
           )}
 
+
+          {cancellationReasonInspection && (
+            <div className="fixed inset-0 z-[80] flex items-center justify-center bg-black/50 p-4 backdrop-blur-sm" role="presentation" onMouseDown={(event) => { if (event.target === event.currentTarget) setCancellationReasonInspection(null); }}>
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="cancellation-reason-title"
+                className={`w-full max-w-md rounded-2xl border p-6 shadow-2xl ${darkMode ? "border-slate-700 bg-slate-800 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}
+              >
+                <div className="flex items-start gap-3">
+                  <span className={`inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-700"}`}>
+                    <ClipboardList size={20} aria-hidden="true" />
+                  </span>
+                  <div className="min-w-0">
+                    <h2 id="cancellation-reason-title" className="text-lg font-bold">Cancellation reason</h2>
+                    <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                      Order {cancellationReasonInspection.tracking || cancellationReasonInspection.order_number || "—"}
+                    </p>
+                  </div>
+                </div>
+                <p className={`mt-5 whitespace-pre-wrap break-words rounded-xl border p-4 text-sm leading-relaxed ${darkMode ? "border-slate-700 bg-slate-900/70 text-slate-200" : "border-slate-200 bg-slate-50 text-slate-700"}`}>
+                  {cancellationReasonInspection.cancellation_reason || cancellationReasonInspection.cancellationReason || cancellationReasonInspection.cancel_reason || cancellationReasonInspection.cancelled_reason || cancellationReasonInspection.reason || "No cancellation reason was provided."}
+                </p>
+                <div className="mt-5 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => setCancellationReasonInspection(null)}
+                    className={`rounded-xl px-4 py-2 text-sm font-semibold transition ${darkMode ? "bg-slate-700 text-slate-100 hover:bg-slate-600" : "bg-slate-100 text-slate-700 hover:bg-slate-200"}`}
+                  >
+                    Close
+                  </button>
+                </div>
+              </section>
+            </div>
+          )}
 
 
           {/* CANCEL CONFIRMATION MODAL */}
@@ -3241,8 +3816,8 @@ function SiteInspection() {
 
           {/* SEARCH */}
           <div className="mt-6 rounded-2xl border border-slate-200 bg-white p-4 shadow-sm">
-            <div className="flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
-              <div className="relative flex-1">
+            <div className="flex flex-col gap-3 lg:flex-row lg:flex-wrap lg:items-center lg:justify-between">
+              <div className="relative min-w-0 flex-1 lg:min-w-[10rem] lg:flex-[1_1_20rem] xl:flex-[1_1_28rem]">
                 <Search
                   size={18}
                   className="absolute left-4 top-1/2 -translate-y-1/2 text-slate-400"
@@ -3251,19 +3826,19 @@ function SiteInspection() {
                   type="text"
                   value={searchQuery}
                   onChange={(e) => handleSearchChange(e.target.value)}
-                          placeholder="+639171234567 or 09171234567"
+                  placeholder="Search customer, phone, tracking ID, product, status, or address"
                   className="w-full rounded-xl border border-slate-200 bg-slate-50 py-2.5 pl-12 pr-4 text-sm text-slate-700 outline-none transition focus:border-red-400 focus:bg-white"
                 />
               </div>
 
-              <div className="flex flex-col gap-2 sm:flex-row">
+              <div className="flex min-w-0 shrink-0 flex-wrap items-center gap-2 sm:justify-end">
                 {activeTab === "site" && (
                   <FilterDropdown
                     label="All Status"
                     value={statusFilter}
                     onChange={setStatusFilter}
                     darkMode={darkMode}
-                    className="w-full sm:w-52"
+                    className="w-full sm:w-44"
                     options={[
                       ["all", "All Status"],
                       ["scheduled", "Scheduled"],
@@ -3271,9 +3846,38 @@ function SiteInspection() {
                     ]}
                   />
                 )}
+                {activeTab === "site" && (
+                  <FilterDropdown
+                    label="All Customers"
+                    value={customerTypeFilter}
+                    onChange={setCustomerTypeFilter}
+                    darkMode={darkMode}
+                    className="w-full sm:w-52"
+                    options={[
+                      ["all", "All Customers"],
+                      ["online", "Online Customers"],
+                      ["walk-in", "Walk-in Customers"],
+                    ]}
+                  />
+                )}
+                {activeTab === "site" && (
+                  <FilterDropdown
+                    label="All Priorities"
+                    value={priorityFilter}
+                    onChange={setPriorityFilter}
+                    darkMode={darkMode}
+                    className="w-full sm:w-52"
+                    options={[
+                      ["all", "All Priorities"],
+                      ["standard", "Standard Order"],
+                      ["rush", "Rush Order"],
+                      ["restricted", "Restricted Account"],
+                    ]}
+                  />
+                )}
                 <button
-                  onClick={() => { resetNewInspectionForm(); setShowModal(true); }}
-                  className="inline-flex items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700"
+                  onClick={() => { const initialInspection = resetNewInspectionForm(); setNewInspectionStep(1); newInspectionBaselineRef.current = createUnsavedSnapshot({ inspection: initialInspection, customerSearch: "", selectedCustomer: null }); setShowModal(true); }}
+                  className="inline-flex whitespace-nowrap items-center justify-center rounded-xl bg-red-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700"
                 >
                   <Plus size={18} className="mr-2" />
                   New Site Inspection
@@ -3285,14 +3889,8 @@ function SiteInspection() {
           {/* TABLE */}
 
           <div className={`mt-6 overflow-hidden rounded-3xl border shadow-sm ${darkMode ? "border-slate-700 bg-[#071f2f] shadow-[0_18px_48px_rgba(15,23,42,0.42)]" : "border-slate-200 bg-white"}`}>
-            <div className={`border-b px-6 py-5 ${darkMode ? "border-slate-700 bg-[#0b2338]" : "border-slate-200 bg-slate-50"}`}>
-              <h2 className={`text-xl font-bold tracking-[-0.02em] ${darkMode ? "text-white" : "text-slate-900"}`}>
-                Site Inspection Records
-              </h2>
-            </div>
-
-            <div className={`border-b p-4 ${darkMode ? "border-slate-700 bg-[#0d2033]" : "border-slate-200 bg-white"}`}>
-              <div role="tablist" aria-label="Filter site inspection records" className="flex flex-wrap gap-1.5">
+            <div className={`border-b px-6 py-4 ${darkMode ? "border-slate-700 bg-[#0b2338]" : "border-slate-200 bg-slate-50"}`}>
+              <div role="tablist" aria-label="Filter site inspection records" className="flex flex-wrap items-center gap-2">
                 {[
                   { key: "site", label: "Site Inspections", count: inspections.length },
                   { key: "cancelled", label: "Cancelled", count: cancelledInspections.length },
@@ -3303,7 +3901,7 @@ function SiteInspection() {
                     role="tab"
                     aria-selected={activeTab === tab.key}
                     onClick={() => setActiveTab(tab.key)}
-                    className={`inline-flex min-h-10 items-center gap-2 rounded-xl border px-3.5 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 ${activeTab === tab.key ? (darkMode ? "border-red-700 bg-red-950/60 text-red-100 shadow-sm shadow-black/10" : "border-red-200 bg-red-50 text-red-950 shadow-sm") : (darkMode ? "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900")}`}
+                    className={`inline-flex min-h-10 items-center gap-2 rounded-xl border px-4 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 ${activeTab === tab.key ? (darkMode ? "border-red-700 bg-red-950/60 text-red-100 shadow-sm shadow-black/10" : "border-red-200 bg-red-50 text-red-950 shadow-sm") : (darkMode ? "border-slate-700 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900")}`}
                   >
                     {tab.label}
                     <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] tabular-nums ${activeTab === tab.key ? (darkMode ? "bg-red-800 text-red-50" : "bg-red-200 text-red-900") : (darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-700")}`}>
@@ -3311,47 +3909,68 @@ function SiteInspection() {
                     </span>
                   </button>
                 ))}
+                <div aria-label="Order priority legend" className={`ml-auto flex w-full flex-nowrap items-center justify-between gap-1 rounded-xl border px-2 py-2 text-[9px] font-semibold whitespace-nowrap sm:w-auto sm:justify-start sm:gap-3 sm:px-3 sm:text-xs ${darkMode ? "border-slate-700 bg-slate-900/50 text-slate-300" : "border-slate-200 bg-white text-slate-600"}`}>
+                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-slate-400" : "bg-slate-500"}`} aria-hidden="true" />Standard Order</span>
+                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className="size-2 shrink-0 rounded-full bg-red-600 sm:size-3" aria-hidden="true" />Rush Order</span>
+                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5" title="Customer is under an online ordering cancellation cooldown"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-amber-400" : "bg-amber-600"}`} aria-hidden="true" />Restricted Account</span>
+                </div>
               </div>
             </div>
 
             <div className="hidden md:block">
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1280px] table-fixed">
+                <table className="w-full min-w-[1395px] table-fixed border-separate border-spacing-0">
                   <colgroup>
-                    <col className="w-[145px]" />
-                    <col className="w-[120px]" />
-                    <col className="w-[110px]" />
-                    <col className="w-[145px]" />
-                    <col className="w-[100px]" />
-                    <col className="w-[105px]" />
-                    <col className="w-[110px]" />
+                    <col className="w-[190px]" />
+                    <col className="w-[130px]" />
+                    <col className="w-[185px]" />
                     <col className="w-[125px]" />
-                    <col className="w-[115px]" />
-                    <col className="w-[205px]" />
+                    <col className="w-[130px]" />
+                    <col className="w-[130px]" />
+                    <col className="w-[145px]" />
+                    <col className="w-[130px]" />
+                    <col
+                      style={{
+                        width: showInspectionActions ? "230px" : "56px",
+                        transition: "width 500ms cubic-bezier(0.22, 1, 0.36, 1)",
+                      }}
+                    />
                   </colgroup>
                   <thead className={darkMode ? "bg-[#0d2033] shadow-inner" : "bg-gradient-to-r from-slate-100 via-slate-50 to-white shadow-inner"}>
                     <tr>
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Client</th>
-                      <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Tracking ID</th>
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Customer Type</th>
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Site Address</th>
-                      <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Created</th>
+                      <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Order Date</th>
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Inspection Date</th>
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Est. Install Date</th>
-                      <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Status</th>
-                      <th className={`px-2 py-3 text-right text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Est. Total</th>
-                      <th className={`px-4 py-3 text-center text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Actions</th>
+                      <th className={`px-1 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Status</th>
+                      <th className={`px-1 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Est. Total</th>
+                      <th className={`${showInspectionActions ? "px-4" : "px-1"} py-3 text-center text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>
+                        <div className="flex items-center justify-center gap-1.5">
+                          <span className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "max-w-16 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0"}`}>Actions</span>
+                          <button
+                            type="button"
+                            onClick={() => setShowInspectionActions((visible) => !visible)}
+                            className={`inline-flex h-8 w-8 cursor-pointer items-center justify-center rounded-full border shadow-[0_2px_8px_rgba(15,23,42,0.18)] ring-1 ring-black/5 transition-[transform,background-color,border-color,box-shadow,color] duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 motion-reduce:transition-none ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 ring-white/10 hover:border-red-800 hover:bg-slate-700 hover:text-red-300" : "border-slate-200 bg-white text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"}`}
+                            title={showInspectionActions ? "Hide all actions" : "Show all actions"}
+                            aria-label={showInspectionActions ? "Hide all action buttons" : "Show all action buttons"}
+                            aria-expanded={showInspectionActions}
+                          >
+                            <ChevronLeft className={`transition-transform duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "rotate-0" : "rotate-180"}`} size={18} aria-hidden="true" />
+                          </button>
+                        </div>
+                      </th>
                     </tr>
                   </thead>
                   <tbody>
                     {inspectionsLoading ? (
-                      <tr><td colSpan={11} className={`p-8 text-center ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Loading inspections...</td></tr>
-                    ) : !filteredList.length ? (
-                      <tr><td colSpan={11} className={`p-8 text-center ${darkMode ? "text-slate-400" : "text-slate-500"}`}>No records in this tab.</td></tr>
+                      <tr><td colSpan={9} className={`p-8 text-center ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Loading inspections...</td></tr>
+                    ) : !prioritizedList.length ? (
+                      <tr><td colSpan={9} className={`p-8 text-center ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{inspectionLoadError || "No records in this tab."}</td></tr>
                     ) : (
                       visibleInspections.map((inspection, index) => {
                         const clientName = inspection.customer ? `${inspection.customer.first_name || ""} ${inspection.customer.last_name || ""}`.trim() || inspection.customer.email || inspection.customer_name || "Customer" : inspection.customer_name || inspection.customer_email || "Customer";
-                        const trackingId = inspection.tracking || inspection.order_number || inspection.orderId || `SI-${String((inspection._id || inspection.id || "")).slice(-8).toUpperCase()}`;
                         const phone = inspection.customer?.phone || inspection.customer_phone || "—";
                         const customerTypeLabel = getCustomerTypeLabel(inspection);
                         const siteAddress = inspection.shipping_address || inspection.siteAddress || inspection.customer?.street_address || "—";
@@ -3366,6 +3985,13 @@ function SiteInspection() {
                         const statusDisplay = getInspectionStatusDisplay(inspection);
                         const progressColor = getInspectionStatusTone(statusDisplay);
                         const rowActions = getInspectionActionButtons(inspection);
+                        const isRestrictedCustomer = isRestrictedCustomerOrder(inspection, restrictionClock);
+                        const isRushOrder = getRushSlotsForInspection(inspection) > 0;
+                        const clientPriorityCellClass = isRushOrder
+                          ? darkMode ? "rounded-l-10xl border-l-[8px] border-l-red-500" : "rounded-l-2xl border-l-[8px] border-l-red-700"
+                          : isRestrictedCustomer
+                            ? darkMode ? "rounded-l-10xl border-l-[8px] border-l-amber-500" : "rounded-l-2xl border-l-[8px] border-l-amber-700"
+                            : darkMode ? "rounded-l-10xl border-l-[8px] border-l-slate-400" : "rounded-l-2xl border-l-[8px] border-l-slate-600";
                         return (
                           <tr
                             key={inspection._id || inspection.id || index}
@@ -3373,16 +3999,24 @@ function SiteInspection() {
                             data-notification-target="inspection"
                             className={`border-t ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""} ${darkMode ? "border-slate-700 bg-slate-900/20 hover:bg-slate-800/50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
                           >
-                            <td className="px-2 py-3"><div className="min-w-0"><div className="truncate text-[12px] font-bold text-slate-800 dark:text-slate-100">{clientName}</div><div className="mt-1 text-[10px] text-slate-500">{phone}</div></div></td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700">{trackingId}</td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700">{customerTypeLabel}</td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700"><span className="line-clamp-2 break-words">{siteAddress}</span></td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700">{createdDate}<div className="text-[10px] text-slate-500">{createdTime}</div></td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700">{inspectionDate}</td>
-                            <td className="px-2 py-3 text-[12px] text-slate-700">{installDate}</td>
-                            <td className="px-2 py-3"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${progressColor}`}>{statusDisplay}</span></td>
-                            <td className="px-2 py-3 text-right text-[12px] font-bold text-slate-900">₱{Number(total || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</td>
-                            <td className="px-4 py-3 text-center"><div className="flex justify-center gap-2">{rowActions}</div></td>
+                            <td className={`px-2 py-3 ${clientPriorityCellClass}`}>
+                              <div className="w-fit max-w-full rounded-lg px-2 py-1 leading-snug">
+                                <div className="truncate text-[12px] font-bold text-slate-800 dark:text-slate-100">{clientName}</div>
+                                <div className="mt-2 text-[12px] font-semibold text-slate-700 dark:text-slate-300">{phone}</div>
+                              </div>
+                            </td>
+                            <td className="px-2 py-3 text-[13px] font-semibold text-slate-800 dark:text-slate-200">{customerTypeLabel}</td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200"><span className="line-clamp-2 break-words">{siteAddress}</span></td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{createdDate}<div className="mt-1 text-[12px] font-medium text-slate-700 dark:text-slate-300">{createdTime}</div></td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{inspectionDate}</td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{installDate}</td>
+                            <td className="px-1 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ${progressColor}`}>{statusDisplay === "Need to be Called" && <Phone size={12} aria-hidden="true" />}{statusDisplay}</span></td>
+                            <td className="px-1 py-3 rounded-r-xl text-left text-[12px] font-bold text-slate-900 dark:text-slate-100">{formatCurrency(total)}</td>
+                            <td className="py-3 pl-1 pr-3 text-left">
+                              <div className={`ml-auto flex w-full justify-end gap-2.5 overflow-hidden transition-[max-width,opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "max-w-[220px] translate-x-0 opacity-100" : "max-w-0 translate-x-2 opacity-0 pointer-events-none"}`}>
+                                {rowActions}
+                              </div>
+                            </td>
                           </tr>
                         );
                       })
@@ -3395,45 +4029,50 @@ function SiteInspection() {
             <div className="space-y-3 p-3 md:hidden">
               {inspectionsLoading ? (
                 <div className="rounded-2xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">Loading inspections...</div>
-              ) : !filteredList.length ? (
-                <div className="rounded-2xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">No records in this tab.</div>
+              ) : !prioritizedList.length ? (
+                <div className="rounded-2xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">{inspectionLoadError || "No records in this tab."}</div>
               ) : visibleInspections.map((inspection, index) => {
                 const clientName = inspection.customer ? `${inspection.customer.first_name || ""} ${inspection.customer.last_name || ""}`.trim() || inspection.customer.email || inspection.customer_name || "Customer" : inspection.customer_name || inspection.customer_email || "Customer";
-                const trackingId = inspection.tracking || inspection.order_number || inspection.orderId || `SI-${String((inspection._id || inspection.id || "")).slice(-8).toUpperCase()}`;
                 const inspectionDate = formatDateToMMMDDYYYY(inspection.inspection_date) || "—";
                 const installDateValue = getEstimatedInstallationDate(inspection);
                 const installDate = formatDateToMMMDDYYYY(installDateValue) || "—";
                 const statusDisplay = getInspectionStatusDisplay(inspection);
                 const total = getFinalProjectCost(inspection) || (Array.isArray(inspection.items) ? inspection.items.reduce((sum, item) => sum + getInspectionItemTotal(item), 0) : 0);
+                const isRestrictedCustomer = isRestrictedCustomerOrder(inspection, restrictionClock);
+                const isRushOrder = getRushSlotsForInspection(inspection) > 0;
+                const mobilePriorityBorderClass = isRushOrder
+                  ? darkMode ? "border-l-red-500" : "border-l-red-700"
+                  : isRestrictedCustomer
+                    ? darkMode ? "border-l-amber-500" : "border-l-amber-700"
+                    : darkMode ? "border-l-slate-400" : "border-l-slate-600";
                 return (
                   <div
                     key={inspection._id || inspection.id || index}
                     data-notification-record-id={String(inspection._id || inspection.id || "")}
                     data-notification-target="inspection"
-                    className={`rounded-2xl border p-3 transition-colors ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : "border-gray-200 bg-gray-50"}`}
+                    className={`relative rounded-2xl border border-l-[8px] p-3 transition-colors ${darkMode ? "border-y-slate-700 border-r-slate-700 bg-slate-900/20" : "border-y-gray-200 border-r-gray-200 bg-gray-50"} ${mobilePriorityBorderClass} ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""}`}
                   >
                     <div className="flex items-start justify-between gap-3">
                       <div className="min-w-0">
-                        <p className="truncate text-sm font-bold text-gray-900">{clientName}</p>
-                        <p className="mt-1 text-xs text-gray-500">{trackingId}</p>
+                        <p className={`truncate text-sm font-bold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{clientName}</p>
                       </div>
-                      <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${getInspectionStatusTone(statusDisplay)}`}>{statusDisplay}</span>
+                      <div className="flex flex-col items-end gap-1"><span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-semibold ${getInspectionStatusTone(statusDisplay)}`}>{statusDisplay === "Need to be Called" && <Phone size={12} aria-hidden="true" />}{statusDisplay}</span></div>
                     </div>
-                    <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-gray-600">
+                    <div className={`mt-3 grid grid-cols-2 gap-2 text-xs ${darkMode ? "text-slate-300" : "text-gray-600"}`}>
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400">Inspection</p>
-                        <p className="mt-1 font-medium text-gray-700">{inspectionDate}</p>
+                        <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Inspection</p>
+                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{inspectionDate}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400">Install</p>
-                        <p className="mt-1 font-medium text-gray-700">{installDate}</p>
+                        <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Install</p>
+                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{installDate}</p>
                       </div>
                       <div className="col-span-2">
-                        <p className="text-[10px] uppercase tracking-wide text-gray-400">Estimated Total</p>
-                        <p className="mt-1 font-semibold text-gray-900">₱{Number(total || 0).toLocaleString(undefined,{minimumFractionDigits:2,maximumFractionDigits:2})}</p>
+                        <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Estimated Total</p>
+                        <p className={`mt-1 font-semibold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{formatCurrency(total)}</p>
                       </div>
                     </div>
-                    <div className="mt-3 flex justify-end gap-2">
+                    <div className={`mt-3 flex justify-end gap-2.5 rounded-xl p-1.5 ${darkMode ? "bg-[#0b2338]" : "bg-white"}`}>
                       {getInspectionActionButtons(inspection)}
                     </div>
                   </div>
@@ -3443,7 +4082,7 @@ function SiteInspection() {
 
             <div className={`hidden flex-col gap-3 justify-center items-center border-t p-4 md:flex md:flex-row ${darkMode ? "border-slate-700 bg-[#0b2338]" : "border-slate-200 bg-gray-50"}`}>
               <div className={`text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
-                Showing {visibleRecordStart} - {visibleRecordEnd} of {filteredList.length} records
+                Showing {visibleRecordStart} - {visibleRecordEnd} of {prioritizedList.length} records
               </div>
               <div className="flex flex-wrap items-center justify-center gap-2">
                 <button
@@ -3485,7 +4124,7 @@ function SiteInspection() {
 
           {showModal && (
             <div className="mobile-fullscreen-overlay fixed inset-0 z-50 flex h-[100dvh] min-h-0 items-stretch justify-center overflow-hidden overscroll-contain bg-slate-950/60 p-0 backdrop-blur-sm sm:h-auto sm:min-h-screen sm:items-center sm:overflow-y-auto sm:p-5">
-              <div className={`mobile-fullscreen-dialog flex h-full max-h-full min-h-0 w-full max-w-none flex-col overflow-hidden rounded-none sm:h-auto sm:max-h-[88dvh] sm:max-w-4xl sm:rounded-3xl ${modalShellClass}`}>
+              <div className={`mobile-fullscreen-dialog flex h-full max-h-full min-h-0 w-full max-w-none flex-col overflow-hidden rounded-none sm:h-auto sm:max-h-[88dvh] sm:max-w-[min(96vw,1440px)] sm:rounded-3xl ${modalShellClass}`}>
                 <div className={`flex shrink-0 items-start justify-between gap-4 px-4 py-4 sm:px-7 sm:py-5 ${modalHeaderClass}`}>
                   <div className="flex min-w-0 items-start gap-3">
                     <span className={`mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-50 text-red-600"}`}>
@@ -3499,7 +4138,7 @@ function SiteInspection() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setShowModal(false)}
+                    onClick={requestCloseNewInspection}
                     className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900"}`}
                     aria-label="Close new site inspection modal"
                   >
@@ -3507,8 +4146,26 @@ function SiteInspection() {
                   </button>
                 </div>
 
-                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:space-y-5 sm:px-6 sm:py-5">
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                <div role="tablist" className={`grid grid-cols-2 gap-2 border-b px-4 py-3 sm:gap-3 sm:px-6 ${darkMode ? "border-slate-700 bg-[#0d1b2a]" : "border-slate-100 bg-slate-50/80"}`} aria-label="New site inspection sections">
+                  {[
+                    { number: 1, title: "Client & Schedule", detail: "Customer details and inspection date" },
+                    { number: 2, title: "Project & Payment Terms", detail: "Scope, measurements, and pricing" },
+                  ].map((step) => (
+                    <button key={step.number} id={`new-inspection-tab-${step.number}`} type="button" role="tab" aria-selected={newInspectionStep === step.number} aria-controls="new-inspection-panel" tabIndex={newInspectionStep === step.number ? 0 : -1} onClick={() => selectInspectionTab(step.number, newInspectionStep, newInspection, setNewInspectionStep, newInspectionBodyRef)} onKeyDown={(event) => {
+                      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+                      event.preventDefault();
+                      const targetStep = event.key === "ArrowRight" ? Math.min(2, step.number + 1) : Math.max(1, step.number - 1);
+                      const changed = selectInspectionTab(targetStep, newInspectionStep, newInspection, setNewInspectionStep, newInspectionBodyRef);
+                      if (changed) requestAnimationFrame(() => document.getElementById(`new-inspection-tab-${targetStep}`)?.focus());
+                    }} className={`flex min-w-0 items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${newInspectionStep === step.number ? (darkMode ? "border-red-400/50 bg-red-500/10" : "border-red-200 bg-white shadow-sm") : darkMode ? "border-slate-700 bg-slate-900/50 hover:bg-slate-800" : "border-transparent bg-transparent hover:bg-white/70"}`}>
+                      <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${newInspectionStep === step.number ? "bg-red-600 text-white" : newInspectionStep > step.number ? "bg-emerald-600 text-white" : darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`} aria-hidden="true">{newInspectionStep > step.number ? "✓" : step.number}</span>
+                      <span className="min-w-0"><span className={`block truncate text-xs font-bold sm:text-sm ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{step.title}</span><span className={`hidden truncate text-[11px] sm:block ${mutedTextClass}`}>{step.detail}</span></span>
+                    </button>
+                  ))}
+                </div>
+
+                <div ref={newInspectionBodyRef} role="tabpanel" id="new-inspection-panel" aria-labelledby={`new-inspection-tab-${newInspectionStep}`} className={`min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 pb-24 scroll-pb-24 sm:space-y-5 sm:px-6 sm:pb-5 sm:scroll-pb-5 ${newInspectionStep === 2 ? "pt-0 sm:pt-0" : "pt-4 sm:pt-5"}`}>
+                  {newInspectionStep === 1 && <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={modalSectionTitleClass}>Client Information</h3>
 
                     <div className="grid gap-5 md:grid-cols-3">
@@ -3535,7 +4192,17 @@ function SiteInspection() {
                                   onClick={() => handleCustomerSelect(customer)}
                                   className={`w-full text-left px-4 py-3 ${darkMode ? "hover:bg-slate-700" : "hover:bg-slate-100"}`}
                                 >
-                                  <div className={`font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{label}</div>
+                                  <div className="flex flex-wrap items-center gap-2">
+                                    <div className={`font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{label}</div>
+                                    {isRestrictedCustomerOrder(customer, restrictionClock) && (
+                                      <span
+                                        title="This customer is under an online ordering cancellation cooldown"
+                                        className={`rounded-full px-2 py-0.5 text-[10px] font-bold ${darkMode ? "bg-red-500/25 text-red-200" : "bg-red-100 text-red-700"}`}
+                                      >
+                                        3+ cancellations
+                                      </span>
+                                    )}
+                                  </div>
                                   <div className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{customer.email || customer.phone || formatCustomerAddress(customer)}</div>
                                 </button>
                               );
@@ -3572,6 +4239,12 @@ function SiteInspection() {
                         {errors.siteAddress && <p className="mt-2 text-xs text-red-400">{errors.siteAddress}</p>}
                       </div>
                     </div>
+
+                    {Number(selectedCustomer?.customer_cancellation_count) >= 3 && isOnlineOrderingCooldownActive(selectedCustomer, restrictionClock) && (
+                      <div role="alert" className="mt-4 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm font-semibold text-red-800">
+                        This customer has canceled orders 3 times already. Do you want to continue?
+                      </div>
+                    )}
 
                     <div className="mt-5 grid gap-5 md:grid-cols-3">
                       <div>
@@ -3695,9 +4368,9 @@ function SiteInspection() {
 
                       <p className={`mt-3 text-xs ${mutedTextClass}`}>Coverage starts on the installation date. Used for testing warranty expiry.</p>
                     </div>}
-                  </section>
+                  </section>}
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                  {newInspectionStep === 1 && <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={modalSectionTitleClass}>Customer Account</h3>
 
                     <div className="grid gap-5 md:grid-cols-[1.1fr_1.7fr]">
@@ -3749,10 +4422,10 @@ function SiteInspection() {
                       </div>
                     </div>
 
-                  </section>
+                  </section>}
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
-                    <h3 className={modalSectionTitleClass}>Site Details</h3>
+                  {newInspectionStep === 2 && <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                    <h3 className={modalSectionTitleClass}>Additional Info</h3>
                     <textarea
                       rows={4}
                       placeholder="Describe the project scope, access notes, special requirements..."
@@ -3763,67 +4436,74 @@ function SiteInspection() {
                         setNewInspection((prev) => ({ ...prev, site_notes: value, notes: value }));
                       }}
                     />
-                  </section>
+                  </section>}
 
-                  <section className={`rounded-2xl p-3 sm:p-5 ${modalSectionClass}`}>
+                  {newInspectionStep === 2 && <section className={`rounded-2xl p-3 sm:p-5 ${modalSectionClass}`}>
                     <h3 className={modalSectionTitleClass}>Measurements</h3>
-                    <p className={`text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Add or edit measurement rows. Totals update in real time.</p>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className={`text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Add or edit measurement rows. Totals update in real time.</p>
+                    </div>
 
-                    <div className={`mt-4 hidden overflow-x-auto rounded-xl border md:block ${darkMode ? "border-slate-700 bg-[#122d42]" : "border-slate-200 bg-white"}`}>
-                      {!(newInspection.items || []).some((item) => getBladeMeasurementDetails(item)) && (
-                        <div className={`grid min-w-[760px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr] gap-2 px-3 py-3 text-[10px] font-bold uppercase tracking-[0.1em] ${darkMode ? "bg-[#0d2033] text-slate-300" : "bg-slate-100 text-slate-600"}`}>
+                    <div className={`mt-4 hidden overflow-x-clip rounded-[10px] border shadow-[0_1px_2px_rgba(16,24,40,0.04)] xl:block ${darkMode ? "border-[#263040] bg-[#161c26]" : "border-[#dde3ec] bg-white"}`}>
+                        <div className={`sticky top-0 z-20 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] gap-2 px-3 py-3 text-[11.5px] font-bold uppercase tracking-[0.1em] ${darkMode ? "bg-[#1b2230] text-[#93a0b4]" : "bg-[#f6f8fb] text-[#6f7a8c]"}`}>
                           <div>Product / Description</div>
-                          <div>Width / Length</div>
-                          <div>Height (area pricing)</div>
+                          <div>Width</div>
+                          <div>Height</div>
                           <div>Unit</div>
-                          <div>Qty</div>
+                          <div>Quantity</div>
                           <div>Rate / Unit</div>
                           <div>Total</div>
+                          <div className="sr-only">Actions</div>
                         </div>
-                      )}
 
                       {(newInspection.items || []).map((item, index) => {
-                        const rowSubtotal = calculateRowSubtotal(item);
-                        const bladeRow = renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new");
+                        const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
+                        const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new") : null;
                         if (bladeRow) return bladeRow;
                         return (
-                          <div key={item.id} className={`m-2 grid min-w-[760px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr] gap-2 rounded-xl border p-3 shadow-sm transition-colors ${darkMode ? "border-slate-700 bg-[#0d2033] hover:border-slate-600" : "border-slate-200 bg-slate-50/70 hover:border-slate-300"}`}>
+                          <div key={item.id} className={`m-0 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] items-start gap-2 border-b p-3 transition-colors ${hasSelectedRushCharge(item) ? darkMode ? "border-red-400/80 bg-red-500/20 hover:bg-red-500/30" : "border-red-500 bg-red-100 hover:bg-red-200" : darkMode ? "border-[#263040] bg-[#161c26] hover:bg-[#1b2230]" : "border-[#dde3ec] bg-white hover:bg-[#f6f8fb]"} ${index === (newInspection.items || []).length - 1 ? "last:border-b-0" : ""}`}>
                             <div className="flex flex-col items-start gap-2">
                               <select
-                                value={item.product_id || ""}
+                                value={normalizeProductId(item.product_id)}
                                 onChange={(e) => handleItemProductChange(item.id, e.target.value)}
-                                className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                                className={`product-measurement-select min-h-11 w-full rounded-lg border ${!item.product_id ? "border-dashed" : ""} px-2 py-2 text-sm outline-none transition focus:border-[#2563eb] ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] placeholder:text-[#93a0b4] focus:ring-2 focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] placeholder:text-[#6f7a8c] focus:ring-2 focus:ring-[#2563eb]/15"}`}
                               >
                                 <option value="">-- Select Active Product --</option>
+                                {hasSelectedProduct && !hasActiveProduct && <option value={normalizeProductId(item.product_id)}>{item.name || "Unavailable Product"}</option>}
                                 {products.map((product) => (
                                   <option key={String(product._id || product.id)} value={String(product._id || product.id)}>{product.name}</option>
                                 ))}
                               </select>
-                              {getMeasurementLimitWarnings(item).map((warning) => <p key={warning} role="status" className={`text-xs ${darkMode ? "text-amber-300" : "text-amber-800"}`}>{warning}</p>)}
                               {renderBladeMeasurementOptions(item, handleItemFieldChange, index)}
                             </div>
                             <input
                               type="number"
                               min="0"
-                              value={getDimensionInputValue(item.width)}
+                              value={hasSelectedProduct ? getDimensionInputValue(item.width) : ""}
+                              disabled={!hasSelectedProduct}
                               onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleItemFieldChange)}
                               onChange={(e) => handleItemFieldChange(item.id, "width", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={`min-h-11 w-full rounded-lg border px-2 py-2 text-sm outline-none focus:ring-2 ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] focus:border-[#6ea8fe] focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] focus:border-[#2563eb] focus:ring-[#2563eb]/15"}`}
                             />
                             <input
                               type="number"
                               min="0"
-                              value={getDimensionInputValue(item.height)}
+                              value={hasSelectedProduct ? getDimensionInputValue(item.height) : ""}
+                              disabled={!hasSelectedProduct}
                               onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleItemFieldChange)}
                               onChange={(e) => handleItemFieldChange(item.id, "height", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={`min-h-11 w-full rounded-lg border px-2 py-2 text-sm outline-none focus:ring-2 ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] focus:border-[#6ea8fe] focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] focus:border-[#2563eb] focus:ring-[#2563eb]/15"}`}
                             />
                             <select
                               aria-label={`Measurement unit for product ${index + 1}`}
-                              value={item.measurement_unit || item.measurementUnit || "in"}
+                              value={hasSelectedProduct ? item.measurement_unit || item.measurementUnit || "in" : ""}
+                              disabled={!hasSelectedProduct}
                               onChange={(event) => handleItemFieldChange(item.id, "measurement_unit", event.target.value)}
-                              className={fieldClass}
+                              className={`min-h-11 w-full rounded-lg border px-2 py-2 text-sm outline-none focus:ring-2 ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] focus:border-[#6ea8fe] focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] focus:border-[#2563eb] focus:ring-[#2563eb]/15"}`}
                             >
+                              {!hasSelectedProduct && <option value="">—</option>}
                               <option value="in">in</option>
                               <option value="ft">ft</option>
                               <option value="cm">cm</option>
@@ -3832,17 +4512,24 @@ function SiteInspection() {
                             <input
                               type="number"
                               min="1"
-                              value={item.qty || 1}
+                              value={hasSelectedProduct ? item.qty ?? 1 : ""}
+                              disabled={!hasSelectedProduct}
                               onChange={(e) => handleItemFieldChange(item.id, "qty", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={`w-full rounded-lg border px-2 py-2 text-sm outline-none focus:ring-2 ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] focus:border-[#6ea8fe] focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] focus:border-[#2563eb] focus:ring-[#2563eb]/15"}`}
                             />
-                            <div className={`flex items-center justify-center rounded-lg border px-2 py-2 text-sm font-bold ${darkMode ? "border-slate-600 bg-[#0d2033] text-slate-100" : "border-slate-200 bg-slate-100 text-slate-800"}`}>
-                              {formatRateLabel(item)}
+                            <div className={`measurement-rate-badge flex min-h-11 items-center justify-center rounded-md border px-2 py-2 text-sm font-semibold ${darkMode ? "border-[#263040] bg-[#1b2740] text-[#6ea8fe]" : "border-[#dde3ec] bg-[#eaf1fe] text-[#2563eb]"}`}>
+                              {hasSelectedProduct ? formatRateLabel(item) : "—"}
                             </div>
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={`text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{formatCurrency(rowSubtotal)}</span>
-                              <button type="button" onClick={() => removeItemRow(item.id)} className="text-lg font-bold text-red-400 hover:text-red-300">×</button>
+                            <div className="contents">
+                              <span className={`measurement-row-total flex min-h-11 min-w-0 items-center whitespace-nowrap text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{hasSelectedProduct ? formatCurrency(rowSubtotal) : "—"}</span>
+                              <button type="button" onClick={() => requestMeasurementDelete("new", item, index)} className={`measurement-remove-button mt-0.5 inline-flex size-9 items-center justify-center self-start rounded-lg border transition ${darkMode ? "border-[#5c2a24] bg-[#3a1c18] text-[#ff8080] hover:border-[#ff8080] hover:bg-[#4a211c]" : "border-[#f3c2bc] bg-[#fdecea] text-[#d64545] hover:border-[#d64545] hover:bg-[#fbded9]"}`} aria-label={`Remove measurement ${index + 1}`} title={`Remove measurement ${index + 1}`}>
+                                <Trash2 size={15} aria-hidden="true" />
+                              </button>
                             </div>
+                            {(renderOptionalChargeOptions(item, handleItemFieldChange) || hasSelectedRushCharge(item)) && <div className={`col-span-full flex flex-wrap items-center gap-3 border-t pt-3 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                              <div className="min-w-0 flex-1">{renderOptionalChargeOptions(item, handleItemFieldChange)}</div>
+                              {hasSelectedRushCharge(item) && <span className={`inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${darkMode ? "border-red-300 bg-red-600 text-white" : "border-red-700 bg-red-600 text-white"}`}><span className="size-2 rounded-full bg-white" aria-hidden="true" />Rush</span>}
+                            </div>}
                             {newInspection.items.length > 1 && newInspection.warranty_assignment_mode === "per_product" && (
                               <div className={`col-span-full grid gap-3 border-t pt-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)] ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                                 <label className="min-w-0">
@@ -3890,10 +4577,12 @@ function SiteInspection() {
                       })}
                     </div>
 
-                    <div className="mt-4 space-y-3 md:hidden">
+                    <div className="mt-4 space-y-3 xl:hidden">
                       {(newInspection.items || []).map((item, index) => {
-                        const rowSubtotal = calculateRowSubtotal(item);
-                        const bladeRow = renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new-mobile");
+                        const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
+                        const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new-mobile") : null;
                         if (bladeRow) return bladeRow;
                         const inputClasses = darkMode
                           ? "min-w-0 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-red-500"
@@ -3901,28 +4590,29 @@ function SiteInspection() {
                         const labelClasses = `mb-1.5 block text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`;
 
                         return (
-                          <div key={item.id} className={`min-w-0 rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-[#0d2033]" : "border-slate-200 bg-slate-50"}`}>
+                          <div key={item.id} className={`min-w-0 rounded-xl border p-3.5 shadow-sm transition-colors sm:p-4 ${darkMode ? "border-slate-700 bg-[#0d2033] hover:border-slate-600" : "border-slate-200 bg-white hover:border-slate-300"}`}>
                             <div className="flex items-center justify-between gap-2">
                               <p className={`text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Measurement {index + 1}</p>
-                              <button type="button" onClick={() => removeItemRow(item.id)} className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-red-500 transition hover:bg-red-500/10" aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
-                                <X size={16} aria-hidden="true" />
+                              <button type="button" onClick={() => requestMeasurementDelete("new", item, index)} className={`inline-flex size-9 shrink-0 items-center justify-center rounded-lg border transition ${darkMode ? "border-[#5c2a24] bg-[#3a1c18] text-[#ff8080] hover:border-[#ff8080] hover:bg-[#4a211c]" : "border-[#f3c2bc] bg-[#fdecea] text-[#d64545] hover:border-[#d64545] hover:bg-[#fbded9]"}`} aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
+                                <Trash2 size={16} aria-hidden="true" />
                               </button>
                             </div>
                             <div className="mt-2">
                               <label className={labelClasses} htmlFor={`new-measurement-product-${index}`}>Product / Description</label>
                               <select
                                 id={`new-measurement-product-${index}`}
-                                value={item.product_id || ""}
+                                value={normalizeProductId(item.product_id)}
                                 onChange={(event) => handleItemProductChange(item.id, event.target.value)}
                                 className={inputClasses}
                               >
                                 <option value="">-- Select Active Product --</option>
+                                {hasSelectedProduct && !hasActiveProduct && <option value={normalizeProductId(item.product_id)}>{item.name || "Unavailable Product"}</option>}
                                 {products.map((product) => (
                                   <option key={String(product._id || product.id)} value={String(product._id || product.id)}>{product.name}</option>
                                 ))}
                               </select>
-                              {getMeasurementLimitWarnings(item).map((warning) => <p key={warning} role="status" className={`mt-1 text-xs ${darkMode ? "text-amber-300" : "text-amber-800"}`}>{warning}</p>)}
                               {renderBladeMeasurementOptions(item, handleItemFieldChange, index)}
+                              {renderOptionalChargeOptions(item, handleItemFieldChange)}
                                 {newInspection.items.length > 1 && newInspection.warranty_assignment_mode === "per_product" && (
                                   <div className="mt-3">
                                     <label className={labelClasses} htmlFor={`new-measurement-warranty-${index}`}>Warranty</label>
@@ -3961,18 +4651,19 @@ function SiteInspection() {
                                   </div>
                                 )}
                             </div>
-                            <div className="mt-3 grid grid-cols-2 gap-3">
+                            <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
                               <label className="min-w-0">
                                 <span className={labelClasses}>{isInspectionMeterItem(item) ? "Length" : "Width"}</span>
-                                <input type="number" min="0" inputMode="decimal" aria-label={`${isInspectionMeterItem(item) ? "Length" : "Width"} for measurement ${index + 1}`} value={getDimensionInputValue(item.width)} onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleItemFieldChange)} onChange={(event) => handleItemFieldChange(item.id, "width", event.target.value)} className={inputClasses} />
+                                <input type="number" min="0" inputMode="decimal" aria-label={`${isInspectionMeterItem(item) ? "Length" : "Width"} for measurement ${index + 1}`} value={hasSelectedProduct ? getDimensionInputValue(item.width) : ""} disabled={!hasSelectedProduct} onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleItemFieldChange)} onChange={(event) => handleItemFieldChange(item.id, "width", event.target.value)} className={inputClasses} />
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>{isInspectionMeterItem(item) ? "Height (optional)" : "Height"}</span>
-                                <input type="number" min="0" inputMode="decimal" aria-label={`Height for measurement ${index + 1}`} value={getDimensionInputValue(item.height)} onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleItemFieldChange)} onChange={(event) => handleItemFieldChange(item.id, "height", event.target.value)} className={inputClasses} />
+                                <input type="number" min="0" inputMode="decimal" aria-label={`Height for measurement ${index + 1}`} value={hasSelectedProduct ? getDimensionInputValue(item.height) : ""} disabled={!hasSelectedProduct} onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleItemFieldChange)} onChange={(event) => handleItemFieldChange(item.id, "height", event.target.value)} className={inputClasses} />
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>Measurement Unit</span>
-                                <select aria-label={`Measurement unit for measurement ${index + 1}`} value={item.measurement_unit || item.measurementUnit || "in"} onChange={(event) => handleItemFieldChange(item.id, "measurement_unit", event.target.value)} className={inputClasses}>
+                                <select aria-label={`Measurement unit for measurement ${index + 1}`} value={hasSelectedProduct ? item.measurement_unit || item.measurementUnit || "in" : ""} disabled={!hasSelectedProduct} onChange={(event) => handleItemFieldChange(item.id, "measurement_unit", event.target.value)} className={inputClasses}>
+                                  {!hasSelectedProduct && <option value="">—</option>}
                                   <option value="in">in</option>
                                   <option value="ft">ft</option>
                                   <option value="cm">cm</option>
@@ -3981,17 +4672,17 @@ function SiteInspection() {
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>Quantity</span>
-                                <input type="number" min="1" inputMode="numeric" aria-label={`Quantity for measurement ${index + 1}`} value={item.qty || 1} onChange={(event) => handleItemFieldChange(item.id, "qty", event.target.value)} className={inputClasses} />
+                                <input type="number" min="1" inputMode="numeric" aria-label={`Quantity for measurement ${index + 1}`} value={hasSelectedProduct ? item.qty ?? 1 : ""} disabled={!hasSelectedProduct} onChange={(event) => handleItemFieldChange(item.id, "qty", event.target.value)} className={inputClasses} />
                               </label>
                             </div>
                             <div className={`mt-3 grid grid-cols-2 gap-3 border-t pt-3 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                               <div className="min-w-0">
                                 <span className={labelClasses}>Rate / Unit</span>
-                                <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{formatRateLabel(item)}</p>
+                                <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{hasSelectedProduct ? formatRateLabel(item) : "—"}</p>
                               </div>
                               <div className="min-w-0 text-right">
                                 <span className={labelClasses}>Row Total</span>
-                                <p className={`truncate text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{formatCurrency(rowSubtotal)}</p>
+                                <p className={`truncate text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{hasSelectedProduct ? formatCurrency(rowSubtotal) : "—"}</p>
                               </div>
                             </div>
                           </div>
@@ -3999,17 +4690,18 @@ function SiteInspection() {
                       })}
                     </div>
 
-                    <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <button type="button" onClick={addItemRow} className={`rounded-[12px] border px-4 py-2 text-sm font-bold transition ${darkMode ? "border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
-                        + Add Row
-                      </button>
+                    <button type="button" onClick={addItemRow} className={`mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
+                      <Plus size={15} aria-hidden="true" /> Add measurement
+                    </button>
+
+                    <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                       <div className={`text-right text-lg font-black ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        Total: <span className="text-red-400">{formatCurrency(computeTotals().totalEstimate)}</span>
+                        Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeTotals().totalEstimate)}</span>
                       </div>
                     </div>
-                  </section>
+                  </section>}
 
-                  <section className={`rounded-2xl p-3 sm:p-5 ${modalSectionClass}`}>
+                  {newInspectionStep === 2 && <section className={`rounded-2xl p-3 sm:p-5 ${modalSectionClass}`}>
                     <h3 className={modalSectionTitleClass}>Payment Information</h3>
                     <div className={`mb-5 rounded-xl border px-4 py-3 text-sm font-medium ${darkMode ? "border-amber-500/30 bg-amber-500/10 text-amber-100" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
                       <span className="mr-2 text-base">💡</span>
@@ -4027,7 +4719,7 @@ function SiteInspection() {
                       <div>
                         <label className={`mb-2 block text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
                         <input
-                          type="number"
+                          type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           placeholder="Enter adjusted total..."
                           className={fieldClass}
@@ -4048,7 +4740,7 @@ function SiteInspection() {
                         <label htmlFor="required-downpayment-amount" className="shrink-0">Downpayment to be Paid</label>
                         <input
                           id="required-downpayment-amount"
-                          type="number"
+                          type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           max={Number(newInspection.manual_override) || computeTotals().totalEstimate}
                           step="0.01"
@@ -4071,9 +4763,6 @@ function SiteInspection() {
                         >
                           <option value="50%_down_payment">50% downpayment, 50% upon completion</option>
                           <option value="full_payment">Full Payment</option>
-                          <option value="installment_3_months">Installment (3 months)</option>
-                          <option value="installment_6_months">Installment (6 months)</option>
-                          <option value="custom_arrangement">Custom Arrangement</option>
                         </select>
                         {shouldShowAgreedPaymentDate(newInspection.payment_terms) && (
                           <div className="mt-3">
@@ -4129,25 +4818,26 @@ function SiteInspection() {
                         </div>
                       </div>
                     </div>
-                  </section>
+                  </section>}
                 </div>
 
                 <div className={`sticky bottom-0 z-10 flex shrink-0 flex-col-reverse gap-2 px-4 py-3 sm:flex-row sm:justify-end sm:gap-3 sm:px-7 sm:py-4 ${footerClass}`}>
                   <button
                     type="button"
-                    onClick={() => setShowModal(false)}
+                    onClick={requestCloseNewInspection}
                     className={`${secondaryButtonClass} w-full sm:w-auto`}
+                    disabled={submitting}
                   >
                     Cancel
                   </button>
-                  <button
-                    type="button"
-                    onClick={submitNewInspection}
-                    className={`${primaryButtonClass} w-full sm:w-auto`}
-                    disabled={submitting}
-                  >
-                    {submitting ? "Creating..." : "Create Inspection"}
-                  </button>
+                  {newInspectionStep === 2 && <button type="button" onClick={() => changeInspectionStep(1, setNewInspectionStep, newInspectionBodyRef)} className={`${secondaryButtonClass} w-full sm:w-auto`} disabled={submitting}>Back</button>}
+                  {newInspectionStep === 1 ? (
+                    <button type="button" onClick={() => advanceInspectionForm(newInspection, setNewInspectionStep, newInspectionBodyRef)} className={`${primaryButtonClass} w-full sm:w-auto`} disabled={submitting}>Continue to project details</button>
+                  ) : (
+                    <button type="button" onClick={submitNewInspection} className={`${primaryButtonClass} w-full sm:w-auto`} disabled={submitting}>
+                      {submitting ? "Creating..." : "Create Inspection"}
+                    </button>
+                  )}
                 </div>
               </div>
             </div>
@@ -4201,7 +4891,7 @@ function SiteInspection() {
             const agreedPaymentDateValue = viewInspection.agreed_payment_date ? formatDateToMMDDYYYY(viewInspection.agreed_payment_date) : null;
             const statusBadge = !viewInspection.inspection_date
               ? {
-                  label: "📞Need to be Called",
+                  label: "Need to be Called",
                   className: darkMode
                     ? "border border-violet-500/30 bg-violet-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-violet-200"
                     : "border border-violet-200 bg-violet-50 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-violet-700",
@@ -4227,8 +4917,21 @@ function SiteInspection() {
                 };
             const measurementRows = inspectionItems.map((item, index) => {
               const itemName = item.name || item.product_id?.name || `Item ${index + 1}`;
-              const qty = Number(item.quantity ?? item.qty ?? 1) || 1;
+              const qty = Number(item.qty ?? item.quantity ?? 1) || 1;
               const bladeDetails = isInspectionBladeItem(item) ? getBladeMeasurementDetails(item) : null;
+              const priceBreakdown = getProductLineBreakdown(item, item);
+              const chargeOptions = (Array.isArray(item.extra_charges) ? item.extra_charges : [])
+                .filter((charge) => charge?.is_active !== false)
+                .map((charge) => {
+                  const selected = charge?.is_optional === true ? charge.is_selected === true : true;
+                  const calculatedCharge = priceBreakdown.extraCharges.find((entry) => entry.name === (charge.name || charge.label));
+                  return {
+                    name: charge.name || charge.label || "Extra charge",
+                    optional: charge?.is_optional === true,
+                    selected,
+                    amount: selected ? Number(calculatedCharge?.total ?? charge.amount) || 0 : Number(charge.amount) || 0,
+                  };
+                });
               const bladeExtraCharges = bladeDetails
                 ? bladeDetails.extraCharges
                   .map((charge) => ({
@@ -4254,6 +4957,8 @@ function SiteInspection() {
                 key: `${itemName}-${index}`,
                 itemName,
                 isBlade: Boolean(bladeDetails),
+                baseTotal: priceBreakdown.baseTotal,
+                chargeOptions,
                 bladeDetails: bladeDetails ? {
                   glassName: bladeDetails.selectedGlass?.name || item.blade_glass_type || "Glass",
                   bladeCount: bladeDetails.bladeCount,
@@ -4374,7 +5079,7 @@ function SiteInspection() {
 
                         <div className="flex items-end justify-start md:justify-end">
                           <span className={`inline-flex items-center justify-center rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-[0.12em] ${statusBadge.className}`}>
-                            {statusBadge.label}
+                            {!viewInspection.inspection_date && <Phone size={14} className="mr-1.5" aria-hidden="true" />}{statusBadge.label}
                           </span>
                         </div>
                       </div>
@@ -4393,7 +5098,7 @@ function SiteInspection() {
                               <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Width / Blades</th>
                               <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Height / Glass</th>
                               <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Size / Sale mode</th>
-                              <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Qty</th>
+                              <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Quantity</th>
                               <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Rate / Unit</th>
                               {inspectionItems.length > 1 && <th className="px-4 py-3 text-[11px] font-black uppercase tracking-[0.14em]">Warranty</th>}
                               <th className="px-4 py-3 text-right text-[11px] font-black uppercase tracking-[0.14em]">Est. Total</th>
@@ -4404,13 +5109,13 @@ function SiteInspection() {
                               <tr key={measurement.key} className={darkMode ? "border-t border-slate-700 text-slate-200" : "border-t border-slate-200 text-slate-700"}>
                                 <td className="px-4 py-3 font-medium">
                                   <div>{measurement.itemName}</div>
-                                  {measurement.bladeDetails && (
+                                  {(measurement.baseTotal > 0 || measurement.chargeOptions.length > 0) && (
                                     <div className={`mt-1 space-y-0.5 text-xs font-normal ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                                      {measurement.bladeDetails.saleMode === "frame" && measurement.bladeDetails.framePrice > 0 && (
-                                        <div>Frame ({measurement.bladeDetails.frameName}): {formatCurrency(measurement.bladeDetails.framePrice)}</div>
-                                      )}
-                                      {measurement.bladeDetails.extraCharges.map((charge) => (
-                                        <div key={charge.name}>+ {charge.name}: {formatCurrency(charge.total)}</div>
+                                      <div>Base price: {formatCurrency(measurement.baseTotal)}</div>
+                                      {measurement.chargeOptions.map((charge, chargeIndex) => (
+                                        <div key={`${charge.name}-${chargeIndex}`}>
+                                          {charge.optional ? charge.selected ? "Selected" : "Not selected" : "Required"} · {charge.name}: {charge.selected ? formatCurrency(charge.amount) : `Excluded (${formatCurrency(charge.amount)})`}
+                                        </div>
                                       ))}
                                     </div>
                                   )}
@@ -4570,8 +5275,9 @@ function SiteInspection() {
           {/* EDIT INSPECTION MODAL */}
           {editInspection && (
             <div className="mobile-fullscreen-overlay fixed inset-0 z-50 flex h-[100dvh] min-h-0 items-stretch justify-center overflow-hidden overscroll-contain bg-slate-950/60 p-0 backdrop-blur-sm sm:h-auto sm:min-h-screen sm:items-center sm:overflow-y-auto sm:p-5">
-              <div className={`mobile-fullscreen-dialog flex h-full max-h-full min-h-0 w-full max-w-none flex-col overflow-hidden rounded-none sm:h-auto sm:max-h-[88dvh] sm:max-w-4xl sm:rounded-3xl ${modalShellClass}`}>
-                <div className={`flex shrink-0 items-start justify-between gap-4 px-4 py-4 sm:px-7 sm:py-5 ${modalHeaderClass}`}>
+              <div className={`mobile-fullscreen-dialog flex h-full max-h-full min-h-0 w-full max-w-none flex-col overflow-hidden rounded-none sm:h-auto sm:max-h-[88dvh] sm:max-w-[min(96vw,1440px)] sm:rounded-3xl ${modalShellClass}`}>
+                <div className={`flex shrink-0 flex-col gap-3 px-4 py-4 sm:px-7 sm:py-5 ${modalHeaderClass}`}>
+                  <div className="flex items-start justify-between gap-4">
                   <div className="flex min-w-0 items-start gap-3">
                     <span className={`mt-0.5 inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-50 text-red-600"}`}>
                       <Pencil size={19} aria-hidden="true" />
@@ -4588,16 +5294,49 @@ function SiteInspection() {
                   </div>
                   <button
                     type="button"
-                    onClick={() => setEditInspection(null)}
+                    onClick={requestCloseEditInspection}
                     className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900"}`}
                     aria-label="Close edit site inspection modal"
                   >
                     <X size={18} aria-hidden="true" />
                   </button>
+                  </div>
+                  {Number(editInspection.customer_cancellation_count) >= 3 && (
+                    <div role="alert" className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
+                      <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" aria-hidden="true" />
+                      <div className="space-y-1">
+                        <p>
+                          This customer has cancelled <strong>{editInspection.customer_cancellation_count}</strong> orders
+                          {isOnlineOrderingCooldownActive(editInspection, restrictionClock) && formatCancellationCooldownDate(editInspection.online_order_cooldown_until)
+                            ? <> and is currently on a <strong>cancellation cooldown until {formatCancellationCooldownDate(editInspection.online_order_cooldown_until)}</strong>.</>
+                            : "."}
+                        </p>
+                        <p>You&apos;ll be asked to confirm before this order can be created.</p>
+                      </div>
+                    </div>
+                  )}
                 </div>
 
-                <div className="min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 py-4 sm:space-y-5 sm:px-6 sm:py-5">
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                <div role="tablist" className={`grid grid-cols-2 gap-2 border-b px-4 py-3 sm:gap-3 sm:px-6 ${darkMode ? "border-slate-700 bg-[#0d1b2a]" : "border-slate-100 bg-slate-50/80"}`} aria-label="Edit site inspection sections">
+                  {[
+                    { number: 1, title: "Client & Schedule", detail: "Customer details and inspection date" },
+                    { number: 2, title: "Project & Payment", detail: "Scope, measurements, and pricing" },
+                  ].map((step) => (
+                    <button key={step.number} id={`edit-inspection-tab-${step.number}`} type="button" role="tab" aria-selected={editInspectionStep === step.number} aria-controls="edit-inspection-panel" tabIndex={editInspectionStep === step.number ? 0 : -1} onClick={() => selectInspectionTab(step.number, editInspectionStep, editInspection, setEditInspectionStep, editInspectionBodyRef)} onKeyDown={(event) => {
+                      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+                      event.preventDefault();
+                      const targetStep = event.key === "ArrowRight" ? Math.min(2, step.number + 1) : Math.max(1, step.number - 1);
+                      const changed = selectInspectionTab(targetStep, editInspectionStep, editInspection, setEditInspectionStep, editInspectionBodyRef);
+                      if (changed) requestAnimationFrame(() => document.getElementById(`edit-inspection-tab-${targetStep}`)?.focus());
+                    }} className={`flex min-w-0 items-center gap-3 rounded-xl border px-3 py-2.5 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${editInspectionStep === step.number ? (darkMode ? "border-red-400/50 bg-red-500/10" : "border-red-200 bg-white shadow-sm") : darkMode ? "border-slate-700 bg-slate-900/50 hover:bg-slate-800" : "border-transparent bg-transparent hover:bg-white/70"}`}>
+                      <span className={`flex size-8 shrink-0 items-center justify-center rounded-full text-sm font-bold ${editInspectionStep === step.number ? "bg-red-600 text-white" : editInspectionStep > step.number ? "bg-emerald-600 text-white" : darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-600"}`} aria-hidden="true">{editInspectionStep > step.number ? "✓" : step.number}</span>
+                      <span className="min-w-0"><span className={`block truncate text-xs font-bold sm:text-sm ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{step.title}</span><span className={`hidden truncate text-[11px] sm:block ${mutedTextClass}`}>{step.detail}</span></span>
+                    </button>
+                  ))}
+                </div>
+
+                <div ref={editInspectionBodyRef} role="tabpanel" id="edit-inspection-panel" aria-labelledby={`edit-inspection-tab-${editInspectionStep}`} className={`min-h-0 flex-1 space-y-4 overflow-y-auto overscroll-contain px-4 pb-24 scroll-pb-24 sm:space-y-5 sm:px-6 sm:pb-5 sm:scroll-pb-5 ${editInspectionStep === 2 ? "pt-0 sm:pt-0" : "pt-4 sm:pt-5"}`}>
+                  <section className={`${editInspectionStep === 1 ? "" : "hidden"} rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={`mb-5 text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>
                       Client Information
                     </h3>
@@ -4673,7 +5412,7 @@ function SiteInspection() {
                       <div>
                         <label className={`mb-2 block text-[14px] font-bold ${labelClass}`}>Status</label>
                         <div className={`flex h-[48px] items-center justify-center rounded-xl px-3 text-sm font-bold ${editInspection.inspection_date ? (darkMode ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-200" : "border border-emerald-200 bg-emerald-50 text-emerald-700") : statusBadgeClass}`}>
-                          <span className="mr-2 text-base">{editInspection.inspection_date ? "✓" : "📞"}</span>
+                          {editInspection.inspection_date ? <span className="mr-2 text-base">✓</span> : <Phone size={16} className="mr-2" aria-hidden="true" />}
                           {editInspection.inspection_date ? "Scheduled" : "Need to be Called"}
                         </div>
                       </div>
@@ -4765,7 +5504,7 @@ function SiteInspection() {
 
                   </section>
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                  <section className={`${editInspectionStep === 1 ? "" : "hidden"} rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={`mb-5 text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>Customer Account</h3>
 
                     <div className="grid gap-5 md:grid-cols-[1.1fr_1.7fr]">
@@ -4808,9 +5547,9 @@ function SiteInspection() {
                     </div>
                   </section>
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                  <section className={`${editInspectionStep === 2 ? "" : "hidden"} rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={`mb-4 text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>
-                      Site Details
+                      Additional Info
                     </h3>
                     <textarea
                       rows={4}
@@ -4821,69 +5560,98 @@ function SiteInspection() {
                     />
                   </section>
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
-                    <h3 className={`mb-4 text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>
-                      Measurements
-                    </h3>
+                  <section className={`${editInspectionStep === 2 ? "" : "hidden"} rounded-2xl p-5 ${modalSectionClass}`}>
+                    <div className="mb-4 flex items-center justify-between gap-3">
+                      <h3 className={`text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>
+                        Measurements
+                      </h3>
+                      <button
+                        type="button"
+                        onClick={() => setEditMeasurementsEnabled((enabled) => !enabled)}
+                        aria-pressed={editMeasurementsEnabled}
+                        className={`inline-flex min-h-9 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 xl:hidden ${darkMode ? "border-[#263040] bg-[#1b2740] text-[#6ea8fe] hover:bg-[#22324f] focus-visible:ring-[#6ea8fe]/30" : "border-[#dde3ec] bg-[#eaf1fe] text-[#2563eb] hover:bg-[#dce8fc] focus-visible:ring-[#2563eb]/20"}`}
+                      >
+                        <Pencil size={14} aria-hidden="true" />
+                        {editMeasurementsEnabled ? "Done" : "Edit"}
+                      </button>
+                    </div>
+                    <div className="flex flex-wrap items-center justify-between gap-3">
+                      <p className={`text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Edit product measurements and review the live project total.</p>
+                      <button
+                        type="button"
+                        onClick={() => setEditMeasurementsEnabled((enabled) => !enabled)}
+                        aria-pressed={editMeasurementsEnabled}
+                        className={`hidden min-h-9 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 xl:inline-flex ${darkMode ? "border-[#263040] bg-[#1b2740] text-[#6ea8fe] hover:bg-[#22324f] focus-visible:ring-[#6ea8fe]/30" : "border-[#dde3ec] bg-[#eaf1fe] text-[#2563eb] hover:bg-[#dce8fc] focus-visible:ring-[#2563eb]/20"}`}
+                      >
+                        <Pencil size={14} aria-hidden="true" />
+                        {editMeasurementsEnabled ? "Done" : "Edit"}
+                      </button>
+                    </div>
 
-                    <div className={`mt-4 hidden overflow-hidden rounded-xl border md:block ${darkMode ? "border-slate-700 bg-[#122d42]" : "border-slate-200 bg-white"}`}>
-                      {!(editInspection.items || []).some((item) => getBladeMeasurementDetails(item)) && (
-                        <div className={`grid grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr] gap-2 px-3 py-3 text-[11px] font-black uppercase tracking-[0.12em] ${darkMode ? "bg-[#0d2033] text-slate-300" : "bg-slate-100 text-slate-600"}`}>
+                    <div className={`mt-4 hidden overflow-x-clip rounded-[10px] border shadow-[0_1px_2px_rgba(16,24,40,0.04)] xl:block ${darkMode ? "border-[#263040] bg-[#161c26]" : "border-[#dde3ec] bg-white"}`}>
+                        <div className={`sticky top-0 z-20 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] gap-2 px-3 py-3 text-[11.5px] font-bold uppercase tracking-[0.12em] ${darkMode ? "bg-[#1b2230] text-[#93a0b4]" : "bg-[#f6f8fb] text-[#6f7a8c]"}`}>
                           <div>Product / Description</div>
-                          <div>Width / Length</div>
-                          <div>Height (area pricing)</div>
+                          <div>Width</div>
+                          <div>Height</div>
                           <div>Unit</div>
-                          <div>Qty</div>
+                          <div>Quantity</div>
                           <div>Rate / Unit</div>
                           <div>Total</div>
+                          <div className="sr-only">Actions</div>
                         </div>
-                      )}
 
+                      <fieldset disabled={!editMeasurementsEnabled} className={`m-0 min-w-0 w-full border-0 p-0 ${editMeasurementsEnabled ? "" : "edit-measurements-disabled"}`}>
                       {(editInspection.items || []).map((item, index) => {
-                        const rowSubtotal = calculateRowSubtotal(item);
-                        const bladeRow = renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit");
+                        const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
+                        const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit") : null;
                         if (bladeRow) return bladeRow;
                         return (
-                          <div key={item.id || `${item.product_id || "row"}-${index}`} className={`m-2 grid grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr] gap-2 rounded-xl border p-3 shadow-sm transition-colors ${darkMode ? "border-slate-700 bg-[#0d2033] hover:border-slate-600" : "border-slate-200 bg-slate-50/70 hover:border-slate-300"}`}>
+                          <div key={item.id || `${item.product_id || "row"}-${index}`} className={`m-0 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] items-start gap-2 border-b p-3 transition-colors ${hasSelectedRushCharge(item) ? darkMode ? "border-red-400/80 bg-red-500/20 hover:bg-red-500/30" : "border-red-500 bg-red-100 hover:bg-red-200" : darkMode ? "border-[#263040] bg-[#161c26] hover:bg-[#1b2230]" : "border-[#dde3ec] bg-white hover:bg-[#f6f8fb]"} ${index === (editInspection.items || []).length - 1 ? "last:border-b-0" : ""}`}>
                             <div className="flex flex-col items-start gap-2">
                               <select
-                                value={item.product_id || ""}
+                                value={normalizeProductId(item.product_id)}
                                 onChange={(e) => handleEditItemProductChange(item.id, e.target.value)}
-                                className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                                className={`product-measurement-select min-h-11 w-full rounded-lg border ${!item.product_id ? "border-dashed" : ""} px-2 py-2 text-sm outline-none transition focus:border-[#2563eb] ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6] focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20" : "border-[#dde3ec] bg-white text-[#1a2230] focus:ring-2 focus:ring-[#2563eb]/15"}`}
                               >
                                 <option value="">-- Select Active Product --</option>
+                                {hasSelectedProduct && !hasActiveProduct && <option value={normalizeProductId(item.product_id)}>{item.name || "Unavailable Product"}</option>}
                                 {products.map((product) => (
                                   <option key={String(product._id || product.id)} value={String(product._id || product.id)}>{product.name}</option>
                                 ))}
                               </select>
-                              {getMeasurementLimitWarnings(item).map((warning) => <p key={warning} role="status" className={`text-xs ${darkMode ? "text-amber-300" : "text-amber-800"}`}>{warning}</p>)}
                               {renderBladeMeasurementOptions(item, handleEditItemFieldChange, index)}
                             </div>
 
                             <input
                               type="number"
                               min="0"
-                              value={getDimensionInputValue(item.width)}
+                              value={hasSelectedProduct ? getDimensionInputValue(item.width) : ""}
+                              disabled={!hasSelectedProduct}
                               onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleEditItemFieldChange)}
                               onChange={(e) => handleEditItemFieldChange(item.id, "width", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={darkMode ? "min-h-11 w-full rounded-lg border border-[#263040] bg-[#161c26] px-2 py-2 text-sm text-[#eef1f6] outline-none focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20" : "min-h-11 w-full rounded-lg border border-[#dde3ec] bg-white px-2 py-2 text-sm text-[#1a2230] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#2563eb]/15"}
                             />
 
                             <input
                               type="number"
                               min="0"
-                              value={getDimensionInputValue(item.height)}
+                              value={hasSelectedProduct ? getDimensionInputValue(item.height) : ""}
+                              disabled={!hasSelectedProduct}
                               onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleEditItemFieldChange)}
                               onChange={(e) => handleEditItemFieldChange(item.id, "height", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={darkMode ? "min-h-11 w-full rounded-lg border border-[#263040] bg-[#161c26] px-2 py-2 text-sm text-[#eef1f6] outline-none focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20" : "min-h-11 w-full rounded-lg border border-[#dde3ec] bg-white px-2 py-2 text-sm text-[#1a2230] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#2563eb]/15"}
                             />
 
                             <select
                               aria-label={`Measurement unit for ${item.name || "item"}`}
-                              value={item.measurement_unit || item.measurementUnit || "in"}
+                              value={hasSelectedProduct ? item.measurement_unit || item.measurementUnit || "in" : ""}
+                              disabled={!hasSelectedProduct}
                               onChange={(event) => handleEditItemFieldChange(item.id, "measurement_unit", event.target.value)}
-                              className={fieldClass}
+                              className={darkMode ? "min-h-11 w-full rounded-lg border border-[#263040] bg-[#161c26] px-2 py-2 text-sm text-[#eef1f6] outline-none focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20" : "min-h-11 w-full rounded-lg border border-[#dde3ec] bg-white px-2 py-2 text-sm text-[#1a2230] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#2563eb]/15"}
                             >
+                              {!hasSelectedProduct && <option value="">—</option>}
                               <option value="in">in</option>
                               <option value="ft">ft</option>
                               <option value="cm">cm</option>
@@ -4893,23 +5661,28 @@ function SiteInspection() {
                             <input
                               type="number"
                               min="1"
-                              value={item.qty || item.quantity || 1}
+                              value={hasSelectedProduct ? item.qty ?? item.quantity ?? 1 : ""}
+                              disabled={!hasSelectedProduct}
                               onChange={(e) => handleEditItemFieldChange(item.id, "qty", e.target.value)}
-                              className={darkMode ? "w-full rounded-lg border border-slate-600 bg-[#122d42] px-2 py-2 text-sm text-slate-100 outline-none focus:border-red-500" : "w-full rounded-lg border border-slate-200 bg-white px-2 py-2 text-sm text-slate-900 outline-none focus:border-red-500"}
+                              className={darkMode ? "w-full rounded-lg border border-[#263040] bg-[#161c26] px-2 py-2 text-sm text-[#eef1f6] outline-none focus:border-[#6ea8fe] focus:ring-2 focus:ring-[#6ea8fe]/20" : "w-full rounded-lg border border-[#dde3ec] bg-white px-2 py-2 text-sm text-[#1a2230] outline-none focus:border-[#2563eb] focus:ring-2 focus:ring-[#2563eb]/15"}
                             />
 
-                            <div className={`flex items-center justify-center rounded-lg border px-2 py-2 text-sm font-bold ${darkMode ? "border-slate-600 bg-[#0d2033] text-slate-100" : "border-slate-200 bg-slate-100 text-slate-800"}`}>
-                              {formatRateLabel(item)}
+                            <div className={`measurement-rate-badge flex min-h-11 items-center justify-center rounded-md border px-2 py-2 text-sm font-semibold ${darkMode ? "border-[#263040] bg-[#1b2740] text-[#6ea8fe]" : "border-[#dde3ec] bg-[#eaf1fe] text-[#2563eb]"}`}>
+                              {hasSelectedProduct ? formatRateLabel(item) : "—"}
                             </div>
 
-                            <div className="flex items-center justify-between gap-2">
-                              <span className={`text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>
-                                {formatCurrency(rowSubtotal)}
+                            <div className="contents">
+                              <span className={`measurement-row-total flex min-h-11 min-w-0 items-center whitespace-nowrap text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>
+                                {hasSelectedProduct ? formatCurrency(rowSubtotal) : "—"}
                               </span>
-                              <button type="button" onClick={() => removeEditItemRow(item.id)} className="text-lg font-bold text-red-400 hover:text-red-300">
-                                ×
+                              <button type="button" onClick={() => requestMeasurementDelete("edit", item, index)} className={`measurement-remove-button mt-0.5 inline-flex size-9 items-center justify-center self-start rounded-lg border transition ${darkMode ? "border-[#5c2a24] bg-[#3a1c18] text-[#ff8080] hover:border-[#ff8080] hover:bg-[#4a211c]" : "border-[#f3c2bc] bg-[#fdecea] text-[#d64545] hover:border-[#d64545] hover:bg-[#fbded9]"}`} aria-label={`Remove measurement ${index + 1}`} title={`Remove measurement ${index + 1}`}>
+                                <Trash2 size={15} aria-hidden="true" />
                               </button>
                             </div>
+                            {(renderOptionalChargeOptions(item, handleEditItemFieldChange) || hasSelectedRushCharge(item)) && <div className={`col-span-full flex flex-wrap items-center gap-3 border-t pt-3 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                              <div className="min-w-0 flex-1">{renderOptionalChargeOptions(item, handleEditItemFieldChange)}</div>
+                              {hasSelectedRushCharge(item) && <span className={`inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${darkMode ? "border-red-300 bg-red-600 text-white" : "border-red-700 bg-red-600 text-white"}`}><span className="size-2 rounded-full bg-white" aria-hidden="true" />Rush</span>}
+                            </div>}
                             {editInspection.items.length > 1 && editInspection.warranty_assignment_mode === "per_product" && (
                               <div className={`col-span-full grid gap-3 border-t pt-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)] ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                                 <label className="min-w-0">
@@ -4955,12 +5728,16 @@ function SiteInspection() {
                           </div>
                         );
                       })}
+                      </fieldset>
                     </div>
 
-                    <div className="mt-4 space-y-3 md:hidden">
+                    <fieldset disabled={!editMeasurementsEnabled} className={`m-0 min-w-0 w-full border-0 p-0 ${editMeasurementsEnabled ? "" : "edit-measurements-disabled"}`}>
+                    <div className="mt-4 space-y-3 xl:hidden">
                       {(editInspection.items || []).map((item, index) => {
-                        const rowSubtotal = calculateRowSubtotal(item);
-                        const bladeRow = renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit-mobile");
+                        const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
+                        const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit-mobile") : null;
                         if (bladeRow) return bladeRow;
                         const inputClasses = darkMode
                           ? "min-w-0 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-red-500"
@@ -4968,28 +5745,29 @@ function SiteInspection() {
                         const labelClasses = `mb-1.5 block text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`;
 
                         return (
-                          <div key={item.id || `${item.product_id || "row"}-${index}`} className={`min-w-0 rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-[#0d2033]" : "border-slate-200 bg-slate-50"}`}>
+                          <div key={item.id || `${item.product_id || "row"}-${index}`} className={`min-w-0 rounded-xl border p-3.5 shadow-sm transition-colors sm:p-4 ${darkMode ? "border-slate-700 bg-[#0d2033] hover:border-slate-600" : "border-slate-200 bg-white hover:border-slate-300"}`}>
                             <div className="flex items-center justify-between gap-2">
                               <p className={`text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Measurement {index + 1}</p>
-                              <button type="button" onClick={() => removeEditItemRow(item.id)} className="inline-flex size-9 shrink-0 items-center justify-center rounded-lg text-red-500 transition hover:bg-red-500/10" aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
-                                <X size={16} aria-hidden="true" />
+                              <button type="button" onClick={() => requestMeasurementDelete("edit", item, index)} className={`inline-flex size-9 shrink-0 items-center justify-center rounded-lg border transition ${darkMode ? "border-[#5c2a24] bg-[#3a1c18] text-[#ff8080] hover:border-[#ff8080] hover:bg-[#4a211c]" : "border-[#f3c2bc] bg-[#fdecea] text-[#d64545] hover:border-[#d64545] hover:bg-[#fbded9]"}`} aria-label={`Remove measurement ${index + 1}`} title="Remove measurement">
+                                <Trash2 size={16} aria-hidden="true" />
                               </button>
                             </div>
                             <div className="mt-2">
                               <label className={labelClasses} htmlFor={`edit-measurement-product-${index}`}>Product / Description</label>
                               <select
                                 id={`edit-measurement-product-${index}`}
-                                value={item.product_id || ""}
+                                value={normalizeProductId(item.product_id)}
                                 onChange={(event) => handleEditItemProductChange(item.id, event.target.value)}
                                 className={inputClasses}
                               >
                                 <option value="">-- Select Active Product --</option>
+                                {hasSelectedProduct && !hasActiveProduct && <option value={normalizeProductId(item.product_id)}>{item.name || "Unavailable Product"}</option>}
                                 {products.map((product) => (
                                   <option key={String(product._id || product.id)} value={String(product._id || product.id)}>{product.name}</option>
                                 ))}
                               </select>
-                              {getMeasurementLimitWarnings(item).map((warning) => <p key={warning} role="status" className={`mt-1 text-xs ${darkMode ? "text-amber-300" : "text-amber-800"}`}>{warning}</p>)}
                               {renderBladeMeasurementOptions(item, handleEditItemFieldChange, index)}
+                              {renderOptionalChargeOptions(item, handleEditItemFieldChange)}
                               {editInspection.items.length > 1 && editInspection.warranty_assignment_mode === "per_product" && (
                                 <div className="mt-3">
                                   <label className={labelClasses} htmlFor={`edit-measurement-warranty-${index}`}>Warranty</label>
@@ -5019,18 +5797,19 @@ function SiteInspection() {
                                 </div>
                               )}
                             </div>
-                            <div className="mt-3 grid grid-cols-2 gap-3">
+                            <div className="mt-3 grid grid-cols-2 gap-3 lg:grid-cols-4">
                               <label className="min-w-0">
                                 <span className={labelClasses}>{isInspectionMeterItem(item) ? "Length" : isInspectionPieceItem(item) ? "Not used" : "Width"}</span>
-                                <input type="number" min="0" inputMode="decimal" aria-label={`Width for measurement ${index + 1}`} value={getDimensionInputValue(item.width)} onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleEditItemFieldChange)} onChange={(event) => handleEditItemFieldChange(item.id, "width", event.target.value)} className={inputClasses} />
+                                <input type="number" min="0" inputMode="decimal" aria-label={`Width for measurement ${index + 1}`} value={hasSelectedProduct ? getDimensionInputValue(item.width) : ""} disabled={!hasSelectedProduct} onFocus={() => clearDefaultDimensionZero(item.id, "width", item.width, handleEditItemFieldChange)} onChange={(event) => handleEditItemFieldChange(item.id, "width", event.target.value)} className={inputClasses} />
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>{isInspectionMeterItem(item) ? "Height (optional)" : isInspectionPieceItem(item) ? "Not used" : "Height"}</span>
-                                <input type="number" min="0" inputMode="decimal" aria-label={`Height for measurement ${index + 1}`} value={getDimensionInputValue(item.height)} onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleEditItemFieldChange)} onChange={(event) => handleEditItemFieldChange(item.id, "height", event.target.value)} className={inputClasses} />
+                                <input type="number" min="0" inputMode="decimal" aria-label={`Height for measurement ${index + 1}`} value={hasSelectedProduct ? getDimensionInputValue(item.height) : ""} disabled={!hasSelectedProduct} onFocus={() => clearDefaultDimensionZero(item.id, "height", item.height, handleEditItemFieldChange)} onChange={(event) => handleEditItemFieldChange(item.id, "height", event.target.value)} className={inputClasses} />
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>Measurement Unit</span>
-                                <select aria-label={`Measurement unit for ${item.name || `measurement ${index + 1}`}`} value={item.measurement_unit || item.measurementUnit || "in"} onChange={(event) => handleEditItemFieldChange(item.id, "measurement_unit", event.target.value)} className={inputClasses}>
+                                <select aria-label={`Measurement unit for ${item.name || `measurement ${index + 1}`}`} value={hasSelectedProduct ? item.measurement_unit || item.measurementUnit || "in" : ""} disabled={!hasSelectedProduct} onChange={(event) => handleEditItemFieldChange(item.id, "measurement_unit", event.target.value)} className={inputClasses}>
+                                  {!hasSelectedProduct && <option value="">—</option>}
                                   <option value="in">in</option>
                                   <option value="ft">ft</option>
                                   <option value="cm">cm</option>
@@ -5039,35 +5818,37 @@ function SiteInspection() {
                               </label>
                               <label className="min-w-0">
                                 <span className={labelClasses}>Quantity</span>
-                                <input type="number" min="1" inputMode="numeric" aria-label={`Quantity for measurement ${index + 1}`} value={item.qty || item.quantity || 1} onChange={(event) => handleEditItemFieldChange(item.id, "qty", event.target.value)} className={inputClasses} />
+                                <input type="number" min="1" inputMode="numeric" aria-label={`Quantity for measurement ${index + 1}`} value={hasSelectedProduct ? item.qty ?? item.quantity ?? 1 : ""} disabled={!hasSelectedProduct} onChange={(event) => handleEditItemFieldChange(item.id, "qty", event.target.value)} className={inputClasses} />
                               </label>
                             </div>
                             <div className={`mt-3 grid grid-cols-2 gap-3 border-t pt-3 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                               <div className="min-w-0">
                                 <span className={labelClasses}>Rate / Unit</span>
-                                <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{formatRateLabel(item)}</p>
+                                <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{hasSelectedProduct ? formatRateLabel(item) : "—"}</p>
                               </div>
                               <div className="min-w-0 text-right">
                                 <span className={labelClasses}>Row Total</span>
-                                <p className={`truncate text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{formatCurrency(rowSubtotal)}</p>
+                                <p className={`truncate text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{hasSelectedProduct ? formatCurrency(rowSubtotal) : "—"}</p>
                               </div>
                             </div>
                           </div>
                         );
                       })}
                     </div>
+                    </fieldset>
 
-                    <div className="mt-4 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-                      <button type="button" onClick={addEditItemRow} className={`rounded-[12px] border px-4 py-2 text-sm font-bold transition ${darkMode ? "border-red-500/30 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
-                        + Add Row
-                      </button>
+                    <button type="button" disabled={!editMeasurementsEnabled} onClick={addEditItemRow} className={`mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
+                      <Plus size={15} aria-hidden="true" /> Add measurement
+                    </button>
+
+                    <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                       <div className={`text-right text-lg font-black ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        Total: <span className="text-red-400">{formatCurrency(computeEditTotals().totalEstimate)}</span>
+                        Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeEditTotals().totalEstimate)}</span>
                       </div>
                     </div>
                   </section>
 
-                  <section className={`rounded-2xl p-5 ${modalSectionClass}`}>
+                  <section className={`${editInspectionStep === 2 ? "" : "hidden"} rounded-2xl p-5 ${modalSectionClass}`}>
                     <h3 className={`mb-4 text-[13px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-red-400" : "text-red-600"}`}>
                       Payment Information
                     </h3>
@@ -5095,7 +5876,7 @@ function SiteInspection() {
                           <div className="mb-5 space-y-3">
                             <div className={proofNoticeClass}>
                               <p className="font-medium leading-6">
-                                Customer says they paid <span className={`font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>₱{Number(proof.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>. Confirm it matches what you received.
+                                Customer says they paid <span className={`font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{formatCurrency(proof.amount)}</span>. Confirm it matches what you received.
                               </p>
                               <p className={`mt-1 text-[10px] font-semibold uppercase tracking-[0.12em] ${darkMode ? "text-amber-300" : "text-amber-700"}`}>Use this amount</p>
                             </div>
@@ -5125,7 +5906,7 @@ function SiteInspection() {
                                   <div className={`rounded-lg border p-3 ${darkMode ? "border-slate-600 bg-slate-900/80" : "border-slate-200 bg-slate-50"}`}>
                                     <div className={`mb-2 text-[11px] font-bold uppercase tracking-[0.12em] ${proofSecondaryTextClass}`}>Customer declared</div>
                                     <div className={`text-xl font-bold tracking-tight ${darkMode ? "text-white" : "text-slate-900"}`}>
-                                      ₱{Number(proof.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                      {formatCurrency(proof.amount)}
                                     </div>
                                   </div>
 
@@ -5133,7 +5914,7 @@ function SiteInspection() {
                                     <div className="flex items-center justify-between gap-2">
                                       <span className="font-medium">Admin recorded</span>
                                       <span className={`font-semibold ${darkMode ? "text-red-400" : "text-red-600"}`}>
-                                        ₱{Number(proof.amount || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                                        {formatCurrency(proof.amount)}
                                       </span>
                                     </div>
                                     {proof.transactionNumber && (
@@ -5175,7 +5956,7 @@ function SiteInspection() {
                       <div>
                         <label className={`mb-2 block text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
                         <input
-                          type="number"
+                          type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           placeholder="Enter adjusted total..."
                           className={fieldClass}
@@ -5196,7 +5977,7 @@ function SiteInspection() {
                         <label htmlFor="edit-required-downpayment-amount" className="shrink-0">Downpayment to be Paid</label>
                         <input
                           id="edit-required-downpayment-amount"
-                          type="number"
+                          type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           max={Number(editInspection.manual_override) || computeEditTotals().totalEstimate}
                           step="0.01"
@@ -5219,9 +6000,6 @@ function SiteInspection() {
                         >
                           <option value="50%_down_payment">50% downpayment, 50% upon completion</option>
                           <option value="full_payment">Full Payment</option>
-                          <option value="installment_3_months">Installment (3 months)</option>
-                          <option value="installment_6_months">Installment (6 months)</option>
-                          <option value="custom_arrangement">Custom Arrangement</option>
                         </select>
                         {shouldShowAgreedPaymentDate(editInspection.payment_terms || "") && (
                           <div className="mt-3">
@@ -5275,19 +6053,98 @@ function SiteInspection() {
                 <div className={`sticky bottom-0 z-10 flex shrink-0 flex-col-reverse gap-2 px-4 py-3 sm:flex-row sm:justify-end sm:gap-3 sm:px-7 sm:py-4 ${footerClass}`}>
                   <button
                     type="button"
-                    onClick={() => setEditInspection(null)}
+                    onClick={requestCloseEditInspection}
                     className={`${secondaryButtonClass} w-full sm:w-auto`}
                     disabled={savingEdit}
                   >
                     Cancel
                   </button>
+                  {editInspectionStep === 2 && <button type="button" onClick={() => changeInspectionStep(1, setEditInspectionStep, editInspectionBodyRef)} className={`${secondaryButtonClass} w-full sm:w-auto`} disabled={savingEdit}>Back</button>}
+                  {editInspectionStep === 1 ? (
+                    <button type="button" onClick={() => advanceInspectionForm(editInspection, setEditInspectionStep, editInspectionBodyRef)} className={`${primaryButtonClass} w-full sm:w-auto`} disabled={savingEdit}>Continue to project details</button>
+                  ) : (
+                    <button type="button" onClick={requestSaveEdit} className={`${primaryButtonClass} w-full sm:w-auto`} disabled={savingEdit}>
+                      {savingEdit ? "Saving..." : "Save Changes"}
+                    </button>
+                  )}
+                </div>
+              </div>
+            </div>
+          )}
+
+          {highCancellationConfirmation && (
+            <div
+              className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/45 p-4"
+              onClick={() => setHighCancellationConfirmation(false)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setHighCancellationConfirmation(false);
+              }}
+            >
+              <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="high-cancellation-title"
+                aria-describedby="high-cancellation-description"
+                className={`w-full max-w-xl rounded-2xl border px-6 py-6 shadow-2xl ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-violet-200 bg-white text-slate-900"}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <h2 id="high-cancellation-title" className="text-lg font-semibold">Confirm site inspection changes</h2>
+                <p id="high-cancellation-description" className={`mt-3 text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
+                  This customer has canceled orders 3 times already. Do you want to continue?
+                </p>
+                <div className="mt-6 flex flex-col-reverse gap-3 sm:flex-row sm:justify-end">
                   <button
                     type="button"
-                    onClick={saveEdit}
-                    className={`${primaryButtonClass} w-full sm:w-auto`}
-                    disabled={savingEdit}
+                    onClick={() => setHighCancellationConfirmation(false)}
+                    className={`min-h-11 rounded-full px-5 text-sm font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 ${darkMode ? "bg-slate-700 text-slate-100 hover:bg-slate-600" : "bg-violet-100 text-violet-950 hover:bg-violet-200"}`}
                   >
-                    {savingEdit ? "Saving..." : "Save Changes"}
+                    Cancel
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setHighCancellationConfirmation(false);
+                      saveEdit();
+                    }}
+                    disabled={savingEdit}
+                    className="min-h-11 rounded-full bg-violet-900 px-6 text-sm font-semibold text-white transition hover:bg-violet-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-violet-500 focus-visible:ring-offset-2 disabled:opacity-60"
+                  >
+                    Continue
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+
+          {measurementDeleteConfirmation && (
+            <div
+              className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
+              onClick={() => setMeasurementDeleteConfirmation(null)}
+              onKeyDown={(event) => {
+                if (event.key === "Escape") setMeasurementDeleteConfirmation(null);
+              }}
+            >
+              <div
+                role="alertdialog"
+                aria-modal="true"
+                aria-labelledby="delete-measurement-title"
+                aria-describedby="delete-measurement-description"
+                className={`w-full max-w-md rounded-2xl border p-5 shadow-2xl ${darkMode ? "border-[#263040] bg-[#161c26] text-[#eef1f6]" : "border-[#dde3ec] bg-white text-[#1a2230]"}`}
+                onClick={(event) => event.stopPropagation()}
+              >
+                <div className={`mb-4 flex size-11 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/15 text-[#ff8080]" : "bg-[#fdecea] text-[#d64545]"}`}>
+                  <Trash2 size={20} aria-hidden="true" />
+                </div>
+                <h2 id="delete-measurement-title" className="text-lg font-bold">Delete measurement?</h2>
+                <p id="delete-measurement-description" className={`mt-2 text-sm ${darkMode ? "text-[#93a0b4]" : "text-[#6f7a8c]"}`}>
+                  Are you sure you want to delete <span className="font-semibold">{measurementDeleteConfirmation.label}</span>?
+                </p>
+                <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                  <button type="button" onClick={() => setMeasurementDeleteConfirmation(null)} className={`${secondaryButtonClass} w-full sm:w-auto`}>
+                    Cancel
+                  </button>
+                  <button type="button" onClick={confirmMeasurementDelete} className="inline-flex min-h-10 w-full items-center justify-center gap-2 rounded-xl bg-[#d64545] px-4 py-2 text-sm font-bold text-white transition hover:bg-[#c73a3a] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#d64545]/40 sm:w-auto">
+                    <Trash2 size={15} aria-hidden="true" /> Delete
                   </button>
                 </div>
               </div>
@@ -5310,6 +6167,13 @@ function SiteInspection() {
           onRegenerate={handleRegenerateContract}
           onSendToCustomer={contractInspection?.order_type === "walk_in_customer" ? undefined : handleSendToCustomer}
           isSendingToCustomer={sendingCustomerEmail}
+          hidePaymentAmounts={hidePaymentAmounts}
+        />
+        <UnsavedChangesDialog
+          open={Boolean(exitConfirmation)}
+          darkMode={darkMode}
+          onStay={() => setExitConfirmation(null)}
+          onDiscard={discardInspectionChanges}
         />
       </div>
     </div>

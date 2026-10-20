@@ -14,6 +14,8 @@ export const normalizeUserProfile = (user = {}) => {
     is_active: true,
     access_permissions: user.access_permissions || {},
     staff_access: user.staff_access || {},
+    customer_cancellation_count: Number(user.customer_cancellation_count) || 0,
+    online_order_cooldown_until: user.online_order_cooldown_until || null,
     created_at: user.created_at || user.createdAt || null,
     updated_at: user.updated_at || user.updatedAt || null,
   };

@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import logo from "../../assets/images/ACGCLOGO1.png";
-import { Bell, Moon, Sun, ClipboardCheck, CheckCircle2, XCircle, ShoppingCart, CheckCheck, CreditCard, Send, LogOut } from "lucide-react";
+import { Bell, Moon, Sun, ClipboardCheck, CheckCircle2, XCircle, ShoppingCart, CheckCheck, CreditCard, Send, LogOut, X } from "lucide-react";
 import { getAdminOrders } from "@/api/orders";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { formatDateTimeToMMDDYYYY, formatTimeAgo } from "@/lib/dateUtils";
@@ -155,14 +155,21 @@ function NotificationMenu() {
       const showInitialLoading = !adminNotificationCache.initialized;
       if (showInitialLoading) setLoading(true);
       try {
-        const [newOrders, inspections, accepted, declined, sentContracts, paymentSubmissions] = await Promise.all([
+        const [newOrders, inspections, accepted, declined, sentContracts, paymentSubmissions, cancelledOrders] = await Promise.all([
           fetchModuleOrders({ status: "order_submitted" }, "dashboard"),
           fetchModuleOrders({ status: "site_inspection" }, "site_inspection"),
           fetchModuleOrders({ contract_status: "accepted" }, "site_inspection"),
           fetchModuleOrders({ contract_status: "declined" }, "site_inspection"),
           fetchModuleOrders({ contract_status: "sent" }, "site_inspection"),
           fetchModuleOrders({ payment_proof_submitted: "true" }, "transactions"),
+          fetchModuleOrders({ status: "cancelled" }, "site_inspection"),
         ]);
+        const isLegacyUnscheduledOnlineOrder = (order) => (
+          String(order.order_type || "").toLowerCase() === "online_order"
+          && !order.inspection_date
+          && !["scheduled", "completed"].includes(String(order.inspection_status || "pending").toLowerCase())
+        );
+        const legacyUnscheduledOrders = (inspections.orders || []).filter(isLegacyUnscheduledOnlineOrder);
 
         const readNotificationIds = getAdminReadNotificationIds();
         const items = [
@@ -178,8 +185,44 @@ function NotificationMenu() {
             path: "/dashboard",
             date: order.createdAt,
           })),
+          ...(cancelledOrders.orders || []).map((order) => {
+            const customerName = `${order.customer?.first_name || ""} ${order.customer?.last_name || ""}`.trim()
+              || order.customer_name
+              || "Customer";
+            const orderNumber = order.tracking || order.order_number || order.orderNumber || "this order";
+            const cancellationReason = String(order.cancellation_reason || "").trim();
+            return {
+              id: getAdminNotificationId("cancelled", order),
+              recordId: String(order._id || order.id || order.tracking),
+              tracking: order.tracking || order.order_number || order.orderNumber || "Not assigned",
+              title: "Order cancelled",
+              message: `${customerName}'s order ${orderNumber} was cancelled.${cancellationReason ? ` Reason: ${cancellationReason}` : ""}`,
+              icon: XCircle,
+              color: "text-red-600",
+              category: "orders",
+              path: "/site-inspection",
+              notificationType: "cancelled",
+              date: order.updatedAt || order.createdAt,
+            };
+          }),
+          ...legacyUnscheduledOrders.map((order) => ({
+            id: getAdminNotificationId("pending-inspection-order", order),
+            recordId: String(order._id || order.id || order.tracking),
+            tracking: order.tracking || order.order_number || order.orderNumber || "Not assigned",
+            title: "Order awaiting inspection scheduling",
+            message: `${order.tracking || "An order"} is waiting for an inspection to be scheduled.`,
+            icon: ShoppingCart,
+            color: "text-blue-600",
+            category: "orders",
+            path: "/site-inspection",
+            notificationType: "pending-inspection-order",
+            date: order.updatedAt || order.createdAt,
+          })),
           ...(inspections.orders || [])
-            .filter((order) => !["sent", "declined"].includes(String(order.contract_status || "").toLowerCase()))
+            .filter((order) => (
+              !["sent", "declined"].includes(String(order.contract_status || "").toLowerCase())
+              && !isLegacyUnscheduledOnlineOrder(order)
+            ))
             .map((order) => {
               const customerName = `${order.customer?.first_name || ""} ${order.customer?.last_name || ""}`.trim() || order.customer_name || "Customer";
               const inspectionMessage = getAdminSiteInspectionNotificationMessage(order, customerName);
@@ -255,7 +298,6 @@ function NotificationMenu() {
           }),
         ]
           .sort(sortAdminNotificationsNewestFirst)
-          .slice(0, 8)
           .map((item) => ({ ...item, read: readNotificationIds.has(item.id) }));
 
         adminNotificationCache.ownerId = ownerId;
@@ -294,6 +336,7 @@ function NotificationMenu() {
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     window.addEventListener("storage", refreshReadState);
+    window.addEventListener("admin-notifications-updated", scheduleRefresh);
     return () => {
       active = false;
       if (refreshTimeout) window.clearTimeout(refreshTimeout);
@@ -301,6 +344,7 @@ function NotificationMenu() {
       window.removeEventListener("focus", refreshWhenVisible);
       document.removeEventListener("visibilitychange", refreshWhenVisible);
       window.removeEventListener("storage", refreshReadState);
+      window.removeEventListener("admin-notifications-updated", scheduleRefresh);
     };
   }, [user, ownerId]);
 
@@ -308,6 +352,7 @@ function NotificationMenu() {
   const filteredNotifications = notifications.filter((notification) => (
     notificationFilter === "all" || notification.category === notificationFilter
   ));
+  const visibleNotifications = filteredNotifications.slice(0, 8);
   const adminFilterOptions = [
     ["all", "All"],
     ["orders", "Orders"],
@@ -326,9 +371,13 @@ function NotificationMenu() {
     setOpen(false);
     navigate(notification.path, {
       state: {
+        ...(notification.notificationType === "cancelled" ? { activeTab: "cancelled" } : {}),
+        ...(notification.notificationType === "sent" || notification.category === "sent" ? { openContract: true } : {}),
         notificationHighlight: {
           recordId: notification.recordId,
-          recordType: notification.category === "payments"
+          recordType: notification.notificationType === "pending-inspection-order" || notification.notificationType === "cancelled"
+            ? "inspection"
+            : notification.category === "payments"
             ? "payment"
             : notification.category === "inspections"
               ? "inspection"
@@ -364,7 +413,7 @@ function NotificationMenu() {
       </button>
 
       {open && (
-        <div className={`fixed left-auto right-3 top-[calc(5.25rem+env(safe-area-inset-top))] z-[70] mt-1 flex max-h-[calc(100dvh-11rem-env(safe-area-inset-top)-env(safe-area-inset-bottom))] w-[min(24rem,calc(100vw-1.5rem))] max-w-md flex-col overflow-hidden rounded-2xl border shadow-2xl lg:right-4 lg:top-[calc(5.25rem+env(safe-area-inset-top))] lg:z-20 lg:mt-0 lg:max-h-[min(36rem,calc(100vh-6rem))] lg:w-96 ${darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
+        <div className={`fixed inset-x-0 bottom-0 top-[calc(3.5rem+env(safe-area-inset-top))] z-[70] m-0 flex h-auto max-h-none w-screen max-w-none flex-col overflow-hidden border-0 pb-[env(safe-area-inset-bottom)] shadow-none lg:inset-auto lg:right-4 lg:top-[calc(5.25rem+env(safe-area-inset-top))] lg:z-20 lg:mt-0 lg:h-auto lg:max-h-[min(36rem,calc(100vh-6rem))] lg:w-96 lg:max-w-md lg:rounded-2xl lg:border lg:p-0 lg:shadow-2xl ${darkMode ? "bg-slate-800 border-slate-700" : "bg-white border-slate-200"}`}>
           <div className={`flex shrink-0 items-center justify-between border-b px-3 py-2.5 sm:px-4 sm:py-3 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
             <div>
               <p className={`text-sm font-bold ${darkMode ? "text-white" : "text-slate-950"}`}>Admin activity</p>
@@ -380,6 +429,14 @@ function NotificationMenu() {
               >
                 <CheckCheck size={12} className="sm:h-[14px] sm:w-[14px]" />
                 Mark all as read
+              </button>
+              <button
+                type="button"
+                onClick={() => setOpen(false)}
+                className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-lg transition-colors lg:hidden ${darkMode ? "text-slate-300 hover:bg-slate-700" : "text-slate-600 hover:bg-slate-100"}`}
+                aria-label="Close notifications"
+              >
+                <X size={18} />
               </button>
             </div>
           </div>
@@ -424,8 +481,8 @@ function NotificationMenu() {
                 <p>{notificationFilter === "all" ? "No action items right now" : `No ${notificationFilter} notifications`}</p>
               </div>
             ) : (
-              <div className="min-h-0 flex-1 divide-y overflow-y-auto overscroll-contain">
-                {filteredNotifications.map((n) => (
+              <div className="min-h-0 flex-1 divide-y overflow-y-auto overscroll-contain pb-20 lg:pb-0">
+                {visibleNotifications.map((n) => (
                   <button
                     key={n.id}
                     onClick={() => openNotification(n)}

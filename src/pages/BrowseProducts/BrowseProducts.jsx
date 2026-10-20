@@ -113,7 +113,7 @@ function BrowseProducts() {
         </div>
       </header>
 
-      <main className="mx-auto max-w-7xl px-6 py-14">
+      <main className="mx-auto max-w-7xl px-6 py-14 !pb-[calc(10rem+env(safe-area-inset-bottom))] lg:!pb-14">
         <div className="flex flex-col justify-between gap-6 md:flex-row md:items-end">
           <div>
             <p className="text-xs font-black uppercase tracking-[0.25em] text-red-600">ACGC Catalog</p>

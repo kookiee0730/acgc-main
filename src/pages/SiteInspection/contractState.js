@@ -36,6 +36,7 @@ export const getContractBladeDetails = (item = {}, sourceItem = {}) => {
 
   return {
     isBlade: true,
+    hasPriceOverride: Number(item.estimated_price_override ?? sourceItem.estimated_price_override) > 0,
     glassName,
     bladeCount: Number(item.blade_count) || Number(sourceItem.blade_count) || Number(selectedFrame?.blade_count) || 0,
     bladeRate,

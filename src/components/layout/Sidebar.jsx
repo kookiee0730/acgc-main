@@ -1,4 +1,4 @@
-import { startTransition, useContext, useEffect, useState } from "react";
+import { startTransition, useContext, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { createPortal } from "react-dom";
 import logo from "../../assets/images/ACGCLOGO1.png";
@@ -13,8 +13,7 @@ import {
   UserCog,
   Settings,
   LogOut,
-  ChevronLeft,
-  ChevronRight,
+  Pin,
 } from "lucide-react";
 
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
@@ -39,7 +38,24 @@ const handleSpaNavigation = (event, to, navigate) => {
   startTransition(() => navigate(to));
 };
 
-function Sidebar({ isOpen, onToggle, forceRender = false }) {
+function Sidebar({ forceRender = false }) {
+  const [isHovered, setIsHovered] = useState(false);
+  const [pinMode, setPinMode] = useState(null);
+  const hoverOpenTimerRef = useRef(null);
+  const isOpen = pinMode === "open" || (pinMode !== "collapsed" && isHovered);
+  const handleSidebarMouseEnter = (event) => {
+    if (pinMode === "collapsed" || event.target.closest("[data-sidebar-pin]")) return;
+    window.clearTimeout(hoverOpenTimerRef.current);
+    hoverOpenTimerRef.current = window.setTimeout(() => setIsHovered(true), 150);
+  };
+  const cancelSidebarHoverOpen = () => window.clearTimeout(hoverOpenTimerRef.current);
+  const toggleSidebarPin = () => {
+    if (pinMode) {
+      setPinMode(null);
+      return;
+    }
+    setPinMode(isHovered ? "open" : "collapsed");
+  };
   const isProvidedByAppShell = useContext(AdminNavigationContext);
   const [showLogoutModal, setShowLogoutModal] = useState(false);
 
@@ -65,7 +81,7 @@ function Sidebar({ isOpen, onToggle, forceRender = false }) {
         let page = 1;
         let totalPages = 1;
         do {
-          const response = await getAdminOrders({ ...params, module: key, view, limit: 500, page });
+          const response = await getAdminOrders({ ...params, module: key, view, limit: 100, ...(page > 1 ? { page } : {}) });
           allOrders.push(...(response.orders || []));
           totalPages = response.pagination?.totalPages || 1;
           page += 1;
@@ -160,7 +176,20 @@ function Sidebar({ isOpen, onToggle, forceRender = false }) {
 
   return (
     <>
-      <div className={`relative hidden shrink-0 transition-[width] duration-300 ease-in-out motion-reduce:transition-none lg:block ${isOpen ? "w-52" : "w-20"}`}>
+      <div
+        onMouseEnter={handleSidebarMouseEnter}
+        onMouseLeave={() => {
+          cancelSidebarHoverOpen();
+          setIsHovered(false);
+        }}
+        onFocusCapture={(event) => {
+          if (pinMode !== "collapsed" && !event.target.closest("[data-sidebar-pin]")) setIsHovered(true);
+        }}
+        onBlurCapture={(event) => {
+          if (!event.currentTarget.contains(event.relatedTarget)) setIsHovered(false);
+        }}
+        className={`relative hidden shrink-0 transition-[width] duration-300 ease-in-out motion-reduce:transition-none lg:block ${isOpen ? "w-52" : "w-20"}`}
+      >
         <aside
           className={`admin-sidebar relative h-full min-h-screen w-full border-r shadow-sm overflow-hidden ${darkMode ? "border-red-950/70 bg-gradient-to-b from-[#050817] via-[#10162d] to-[#3b0b1b] text-slate-100" : "border-slate-300 bg-gradient-to-b from-slate-100 via-white to-slate-200 text-slate-900"}`}
         >
@@ -171,11 +200,11 @@ function Sidebar({ isOpen, onToggle, forceRender = false }) {
         <div className={`pointer-events-none absolute -bottom-28 right-6 h-56 w-56 rounded-full border ${darkMode ? "border-red-200/10" : "border-slate-900/10"}`} />
         <div className={`pointer-events-none absolute -bottom-12 right-24 h-28 w-28 rounded-full border ${darkMode ? "border-red-200/10" : "border-slate-900/10"}`} />
 
-        <div className={`relative z-10 flex border-b ${isOpen ? "items-center gap-0 p-2" : "flex-col items-center gap-2 p-2"}`}>
+        <div className={`relative z-10 flex border-b ${isOpen ? "items-center justify-center gap-1 p-2" : "flex-col items-center gap-2 p-2"}`}>
           <button
             type="button"
             onClick={handleLogoClick}
-            className={`grid min-w-0 cursor-pointer items-center text-left transition-[grid-template-columns,gap] duration-300 ease-in-out motion-reduce:transition-none ${isOpen ? "flex-1 grid-cols-[40px_minmax(0,1fr)] gap-2" : "w-full grid-cols-[1fr_0fr] gap-0"}`}
+            className={`grid min-w-0 max-w-full cursor-pointer items-center text-left transition-[grid-template-columns,gap] duration-300 ease-in-out motion-reduce:transition-none ${isOpen ? "w-fit grid-cols-[40px_max-content] gap-2" : "w-full grid-cols-[1fr_0fr] gap-0"}`}
             aria-label="Go to dashboard"
           >
             <img
@@ -185,11 +214,11 @@ function Sidebar({ isOpen, onToggle, forceRender = false }) {
             />
 
             <div className={`min-w-0 overflow-hidden transition-[max-width,opacity] duration-200 ease-in-out motion-reduce:transition-none ${isOpen ? "max-w-full opacity-100" : "max-w-0 opacity-0"}`}>
-              <h1 className="truncate text-[17px] font-bold leading-tight text-[#ff3038]">
+              <h1 className="whitespace-nowrap text-base font-bold leading-tight text-[#ff3038]">
                 ACGC Services
               </h1>
 
-              <p className={`whitespace-nowrap text-[11px] leading-tight font-bold ${darkMode ? "text-slate-300" : "text-gray-700"}`}>
+              <p className={`whitespace-nowrap text-[10px] leading-tight font-bold tracking-[-0.03em] ${darkMode ? "text-slate-300" : "text-gray-700"}`}>
                 Aluminum & Glass Services
               </p>
             </div>
@@ -288,17 +317,19 @@ function Sidebar({ isOpen, onToggle, forceRender = false }) {
           </button>
 
         </nav>
-        </aside>
         <button
           type="button"
-          onClick={onToggle}
-          aria-label={isOpen ? "Collapse sidebar" : "Expand sidebar"}
-          aria-pressed={!isOpen}
-          title={isOpen ? "Collapse sidebar" : "Expand sidebar"}
-          className={`absolute right-0 top-7 z-20 inline-flex h-8 w-8 translate-x-1/2 cursor-pointer items-center justify-center rounded-full border shadow-[0_2px_8px_rgba(15,23,42,0.18)] ring-1 ring-black/5 transition-[transform,background-color,border-color,box-shadow,color] duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 motion-reduce:transition-none ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 ring-white/10 hover:border-red-800 hover:bg-slate-700 hover:text-red-300" : "border-slate-200 bg-white text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"}`}
+          data-sidebar-pin
+          onMouseEnter={cancelSidebarHoverOpen}
+          onClick={toggleSidebarPin}
+          aria-label={pinMode === "open" ? "Unpin expanded sidebar" : pinMode === "collapsed" ? "Unpin collapsed sidebar" : isHovered ? "Pin sidebar open" : "Pin collapsed sidebar"}
+          aria-pressed={Boolean(pinMode)}
+          title={pinMode === "open" ? "Unpin expanded sidebar" : pinMode === "collapsed" ? "Unpin collapsed sidebar" : isHovered ? "Pin sidebar open" : "Pin collapsed sidebar"}
+          className={`absolute bottom-4 right-3 z-20 inline-flex h-10 w-10 items-center justify-center rounded-xl border-2 shadow-md transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 ${pinMode ? "border-red-700 bg-red-600 text-white shadow-red-900/30 hover:bg-red-700" : darkMode ? "border-amber-400 bg-amber-300 text-red-900 shadow-black/30 hover:bg-amber-200" : "border-amber-500 bg-amber-300 text-red-900 shadow-amber-900/20 hover:bg-amber-200"}`}
         >
-          {isOpen ? <ChevronLeft size={18} aria-hidden="true" /> : <ChevronRight size={18} aria-hidden="true" />}
+          <Pin size={20} className={pinMode ? "fill-current" : ""} aria-hidden="true" />
         </button>
+        </aside>
       </div>
 
       <nav

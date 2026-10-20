@@ -12,6 +12,8 @@ import {
   X,
   Info,
   ChevronDown,
+  ChevronLeft,
+  ChevronRight,
   TriangleAlert,
   Paperclip,
   LoaderCircle,
@@ -52,6 +54,7 @@ const TRANSACTION_REPORT_OPTIONS = [
 function Transactions() {
   const isMobile = useIsMobile();
   const { user } = useAuth();
+  const hidePaymentAmounts = user?.role === "skilled_worker" && user?.staff_access?.hide_payment_amounts === true;
   const { darkMode } = useAdminTheme();
   const canGenerateTransactionReport = ["admin", "super_admin"].includes(user?.role);
   const navigate = useNavigate();
@@ -64,6 +67,7 @@ function Transactions() {
 
   const [activeTable, setActiveTable] =
     useState("all");
+  const [showTransactionActions, setShowTransactionActions] = useState(true);
 
   const location = useLocation();
   const highlightedNotificationRecordId = useNotificationHighlight(location);
@@ -1238,7 +1242,7 @@ function Transactions() {
   const averageRating = validRatings.length
     ? validRatings.reduce((total, rating) => total + rating, 0) / validRatings.length
     : 0;
-  const formatCurrency = (amount) => `₱${amount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const formatCurrency = (amount) => hidePaymentAmounts ? "••••••" : `₱${amount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const summaryMetrics = [
     { label: "Total Revenue", value: formatCurrency(financialTotals.revenue), color: "text-rose-300" },
     { label: "Total Collected", value: formatCurrency(financialTotals.collected), color: "text-emerald-300" },
@@ -2028,13 +2032,13 @@ function Transactions() {
       <div className="flex-1 min-h-0 flex flex-col">
         <Navbar />
 
-        <main className="flex-1 min-h-0 overflow-y-auto p-6">
+        <main className="flex-1 min-h-0 overflow-y-auto p-6 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] lg:!pb-24">
 
           <AdminPageHeader
             title="Transactions"
             description="Manage receipts, contracts and completed projects."
             compactStats
-            statsClassName="grid-cols-2 gap-3 sm:grid-cols-3 2xl:grid-cols-5"
+            statsClassName="grid-cols-1 min-[430px]:grid-cols-2 gap-3 sm:grid-cols-3 2xl:grid-cols-5"
             stats={[
               ...summaryMetrics,
             ]}
@@ -2106,7 +2110,24 @@ function Transactions() {
                         <th className="p-4 text-left">Rating</th>
                         <th className="p-4 text-left">Photos</th>
                         <th className="p-4 text-left">Submitted</th>
-                        <th className="p-4 text-center">Actions</th>
+                        <th
+                          className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
+                          style={{ width: showTransactionActions ? "160px" : "56px" }}
+                        >
+                          <div className="flex items-center justify-center gap-1.5">
+                            <span className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "max-w-16 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0"}`}>Actions</span>
+                            <button
+                              type="button"
+                              onClick={() => setShowTransactionActions((visible) => !visible)}
+                              className={`inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border shadow-[0_2px_8px_rgba(15,23,42,0.18)] ring-1 ring-black/5 transition-[transform,background-color,border-color,box-shadow,color] duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 motion-reduce:transition-none ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 ring-white/10 hover:border-red-800 hover:bg-slate-700 hover:text-red-300" : "border-slate-200 bg-white text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"}`}
+                              title={showTransactionActions ? "Hide all actions" : "Show all actions"}
+                              aria-label={showTransactionActions ? "Hide all action buttons" : "Show all action buttons"}
+                              aria-expanded={showTransactionActions}
+                            >
+                              <ChevronLeft className={`transition-transform duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "rotate-0" : "rotate-180"}`} size={18} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </th>
                       </tr>
                     ) : (
                       <tr>
@@ -2119,7 +2140,24 @@ function Transactions() {
                         <th className="p-4 text-left">Project Progress</th>
                         {activeTable === "receipts" && <th className="p-4 text-left">Warranty Status</th>}
                         <th className="p-4 text-left">Status</th>
-                        <th className="p-4 text-center">Actions</th>
+                        <th
+                          className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
+                          style={{ width: showTransactionActions ? "190px" : "56px" }}
+                        >
+                          <div className="flex items-center justify-center gap-1.5">
+                            <span className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "max-w-16 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0"}`}>Actions</span>
+                            <button
+                              type="button"
+                              onClick={() => setShowTransactionActions((visible) => !visible)}
+                              className={`inline-flex h-8 w-8 shrink-0 cursor-pointer items-center justify-center rounded-full border shadow-[0_2px_8px_rgba(15,23,42,0.18)] ring-1 ring-black/5 transition-[transform,background-color,border-color,box-shadow,color] duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 motion-reduce:transition-none ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 ring-white/10 hover:border-red-800 hover:bg-slate-700 hover:text-red-300" : "border-slate-200 bg-white text-slate-600 hover:border-red-200 hover:bg-red-50 hover:text-red-700"}`}
+                              title={showTransactionActions ? "Hide all actions" : "Show all actions"}
+                              aria-label={showTransactionActions ? "Hide all action buttons" : "Show all action buttons"}
+                              aria-expanded={showTransactionActions}
+                            >
+                              <ChevronLeft className={`transition-transform duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "rotate-0" : "rotate-180"}`} size={18} aria-hidden="true" />
+                            </button>
+                          </div>
+                        </th>
                       </tr>
                     )}
                   </thead>
@@ -2132,7 +2170,7 @@ function Transactions() {
                       const paymentSummary = getPaymentSummary(order);
                       const amountVal = paymentSummary.totalAmount;
                       const paidAmount = paymentSummary.paidAmount;
-                      const amount = `₱${Number(amountVal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+                      const amount = hidePaymentAmounts ? "••••••" : `₱${Number(amountVal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
                       const inspectionLabel = productLabel;
                       const orderType = order.order_type === "walk_in_customer" ? "Walk-in" : "Website Order";
                       const paymentMethod = order.payment_method || (order.acceptance_method === "online" ? "Online" : "Cash");
@@ -2183,12 +2221,15 @@ function Transactions() {
                               <td className="whitespace-nowrap p-4 text-sm text-slate-600">
                                 {order.review?.submittedAt ? formatDateToMMMDDYYYY(order.review.submittedAt) : "—"}
                               </td>
-                              <td className="p-4 text-center">
-                                <div className="flex justify-center gap-2">
-                                  <button type="button" onClick={() => setFeedbackPreviewOrder(order)} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${darkMode ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`} aria-label={`View feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="View feedback">
+                              <td
+                                className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
+                                style={{ width: showTransactionActions ? "160px" : "56px" }}
+                              >
+                                <div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "80px" : "0px" }}>
+                                  <button type="button" onClick={() => setFeedbackPreviewOrder(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${darkMode ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`} aria-label={`View feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="View feedback">
                                     <Eye size={17} aria-hidden="true" />
                                   </button>
-                                  <button type="button" onClick={() => setFeedbackDeleteOrder(order)} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "bg-red-500/15 text-red-300 hover:bg-red-500/25" : "bg-red-100 text-red-600 hover:bg-red-200"}`} aria-label={`Delete feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="Delete Customer Feedback">
+                                  <button type="button" onClick={() => setFeedbackDeleteOrder(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "bg-red-500/15 text-red-300 hover:bg-red-500/25" : "bg-red-100 text-red-600 hover:bg-red-200"}`} aria-label={`Delete feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="Delete Customer Feedback">
                                     <Trash2 size={17} aria-hidden="true" />
                                   </button>
                                 </div>
@@ -2198,14 +2239,17 @@ function Transactions() {
                             <>
                               <td className="p-4">{renderClientCell(order, customerName)}</td>
                               <td className="p-4"><div className="font-semibold text-slate-900">{inspectionLabel}</div><div className="text-xs text-slate-500">Order ID: {order.tracking || order._id || order.id || "—"}</div></td>
-                              <td className="p-4"><div className="font-bold text-emerald-600">₱{paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</div><div className="text-xs text-slate-500">of {amount}</div></td>
+                              <td className="p-4"><div className="font-bold text-emerald-600">{hidePaymentAmounts ? "••••••" : `₱${paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</div><div className="text-xs text-slate-500">of {amount}</div></td>
                               <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${paymentMethod === "Online" ? (darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-50 text-rose-700") : (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-50 text-emerald-700")}`}>{paymentMethod}</span></td>
                               <td className="p-4"><span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">{orderType}</span></td>
                               <td className="p-4 text-sm text-slate-600">{installDate}</td>
                               <td className="p-4"><span className={`inline-flex rounded-md px-3 py-1 text-xs font-semibold ${projectCategory === "Completed" ? "bg-rose-50 text-rose-700" : "bg-violet-50 text-violet-700"}`}>{projectCategory}</span></td>
                               {activeTable === "receipts" && <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${getWarrantyStatusClass(warrantyStatus)}`}>{warrantyStatus}</span></td>}
                               <td className="p-4"><div className="flex flex-col items-start gap-1.5"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${isFullyPaid ? (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700") : (darkMode ? "border border-amber-400/40 bg-amber-500/15 text-amber-300" : "bg-amber-50 text-amber-700")}`}>{statusLabel}</span>{showNeedsConfirmation && (<span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700"}`}><span aria-hidden="true">🔔</span>Needs Confirmation</span>)}</div></td>
-                              <td className="p-4"><div className="flex flex-wrap justify-center gap-2"><button title="View Transaction" onClick={() => openContractModal(order)} className="p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><Eye size={18} /></button>{isFullyPaid ? (<button type="button" title="Fully paid" aria-label="Fully paid. Payment editing is locked." disabled className={`cursor-not-allowed rounded-lg p-2 ${darkMode ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500"}`}><Lock size={18} aria-hidden="true" /></button>) : (<button type="button" title="Add Payment" aria-label="Add Payment" onClick={() => openEditPaymentModal(order)} className="p-2 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"><Pencil size={18} /></button>)}<button type="button" title="View Contract" aria-label="View Contract" onClick={() => openReadOnlyContract(order)} className="p-2 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 transition"><FileText size={18} /></button></div></td>
+                              <td
+                                className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
+                                style={{ width: showTransactionActions ? "190px" : "56px" }}
+                              ><div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "128px" : "0px" }}><button title="View Transaction" onClick={() => openContractModal(order)} className="shrink-0 p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><Eye size={18} /></button>{isFullyPaid ? (<button type="button" title="Fully paid" aria-label="Fully paid. Payment editing is locked." disabled className={`shrink-0 cursor-not-allowed rounded-lg p-2 ${darkMode ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500"}`}><Lock size={18} aria-hidden="true" /></button>) : (<button type="button" title="Add Payment" aria-label="Add Payment" onClick={() => openEditPaymentModal(order)} className="shrink-0 p-2 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"><Pencil size={18} /></button>)}<button type="button" title="View Contract" aria-label="View Contract" onClick={() => openReadOnlyContract(order)} className="shrink-0 p-2 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 transition"><FileText size={18} /></button></div></td>
                             </>
                           )}
                         </tr>
@@ -2359,7 +2403,7 @@ function Transactions() {
 
           {showGenerateReportModal && (
             <div
-              className="transaction-report-modal-overlay fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
+              className="transaction-report-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/60 p-4 backdrop-blur-sm"
               role="presentation"
               onMouseDown={(event) => event.target === event.currentTarget && !reportGenerationLoading && setShowGenerateReportModal(false)}
             >
@@ -2509,6 +2553,7 @@ function Transactions() {
               order={contractPreviewOrder}
               onClose={closeContractModal}
               onViewContract={openFullContractModal}
+              hidePaymentAmounts={hidePaymentAmounts}
             />
           )}
 
@@ -2672,6 +2717,7 @@ function Transactions() {
               contractData={contractPreviewData}
               onDownload={downloadContractPDF}
               onPrint={printContract}
+              hidePaymentAmounts={hidePaymentAmounts}
             />
           )}
 

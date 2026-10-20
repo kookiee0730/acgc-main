@@ -2,6 +2,8 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { X, UploadCloud, Plus, CheckCircle2, Lock, Trash2, AlertTriangle, ChevronDown, Scissors, Wrench, Package, Truck, Check, Pencil } from "lucide-react";
 import { formatDateToMMDDYYYY, formatDateTimeToMMDDYYYY, getTodayIso } from "@/lib/dateUtils";
 import { getInstallationDateError, getMinimumInstallationDate } from "@/lib/installationSchedule";
+import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
+import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
 
 const focusableSelectors = [
   "button",
@@ -164,6 +166,8 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const [newSubStageName, setNewSubStageName] = useState("");
   const [newMainStagePresetKey, setNewMainStagePresetKey] = useState("");
   const [newCustomMainStageName, setNewCustomMainStageName] = useState("");
+  const [confirmExit, setConfirmExit] = useState(false);
+  const initialProgressSnapshot = useRef(null);
   const [newMainStageAfterKey, setNewMainStageAfterKey] = useState("");
   const [editingMainStageIndex, setEditingMainStageIndex] = useState(null);
   const [editedMainStageName, setEditedMainStageName] = useState("");
@@ -201,8 +205,27 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       || nextStages.at(-1);
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStages(nextStages);
+    initialProgressSnapshot.current = createUnsavedSnapshot({
+      progress: project.progress || 0,
+      status: project.status || "Pending",
+      installationDate: (() => {
+        const value = project.estimated_installation_date || project.rawOrder?.estimated_installation_date;
+        if (!value) return "";
+        const date = new Date(value);
+        return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+      })(),
+      stages: nextStages,
+    });
     setNewMainStageAfterKey(currentStage?.key || "");
   }, [project.stages, project.progress_stages]);
+
+  const currentProgressSnapshot = createUnsavedSnapshot({ progress, status, installationDate, stages });
+  const hasUnsavedChanges = initialProgressSnapshot.current !== null && currentProgressSnapshot !== initialProgressSnapshot.current;
+  const requestClose = useCallback(() => {
+    if (isSaving) return;
+    if (hasUnsavedChanges) setConfirmExit(true);
+    else onClose();
+  }, [hasUnsavedChanges, isSaving, onClose]);
 
   useEffect(() => {
     previousActiveElement.current = document.activeElement;
@@ -214,7 +237,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     const handleKeyDown = (event) => {
       if (event.key === "Escape") {
         event.preventDefault();
-        onClose();
+        requestClose();
       }
       if (event.key === "Tab") {
         const nodes = modalRef.current?.querySelectorAll(focusableSelectors);
@@ -240,7 +263,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
         previousActiveElement.current.focus();
       }
     };
-  }, [onClose]);
+  }, [requestClose]);
 
   const getLatestCompletedStageIndex = () => {
     return stages.reduce((latestIndex, stage, index) => {
@@ -1036,10 +1059,10 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const handleOverlayClick = useCallback(
     (event) => {
       if (event.target === event.currentTarget) {
-        onClose();
+        requestClose();
       }
     },
-    [onClose]
+    [requestClose]
   );
 
   return (
@@ -1078,7 +1101,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
             </p>
           </div>
           <button
-            onClick={onClose}
+            onClick={requestClose}
             className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-slate-200 text-slate-600 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             aria-label="Close edit progress dialog"
           >
@@ -2007,7 +2030,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
         <div className="flex shrink-0 justify-end gap-3 border-t border-slate-200 px-4 py-3 pb-[calc(0.75rem+env(safe-area-inset-bottom))] sm:px-5 lg:pb-3">
           <button
             type="button"
-            onClick={onClose}
+            onClick={requestClose}
             className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-medium text-slate-700 transition hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500"
             disabled={isSaving}
           >
@@ -2022,6 +2045,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
             {isSaving ? "Saving..." : "Save Changes"}
           </button>
         </div>
+        <UnsavedChangesDialog open={confirmExit} onStay={() => setConfirmExit(false)} onDiscard={onClose} />
       </div>
     </div>
   );

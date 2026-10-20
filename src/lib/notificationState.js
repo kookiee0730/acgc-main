@@ -43,6 +43,8 @@ export const getAdminNotificationId = (type, order) => {
       return `${orderId}-accepted`;
     case "declined":
       return `${orderId}-declined`;
+    case "cancelled":
+      return `${orderId}-cancelled`;
     case "sent": {
       const date = order?.contractSentAt || order?.updatedAt || order?.createdAt;
       return `${orderId}-contract-sent-${new Date(date || 0).getTime()}`;

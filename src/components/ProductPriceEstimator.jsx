@@ -1,6 +1,6 @@
 import { ClipboardList, Ruler } from "lucide-react";
-import { calculateEstimate } from "@/lib/estimator";
-import { getDefaultExtraChargeSelections, getProductLineTotal } from "@/lib/productPricing";
+import { calculateEstimate, toSquareFeet } from "@/lib/estimator";
+import { getBladePriceOverrideRate, getDefaultExtraChargeSelections, getProductLineBreakdown, getProductLineTotal, getProductOverrideBaseSubtotal } from "@/lib/productPricing";
 
 const currency = (value) =>
   `PHP ${Number(value || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
@@ -42,8 +42,30 @@ export const getDefaultProductEstimatorForm = (product = {}) => {
 const getProductEstimateRate = (product, form) => {
   const pricingMethod = String(product?.pricing_method || "").toLowerCase();
   const legacyUnit = String(product?.unit || "").toLowerCase();
-  if (pricingMethod === "sqft" || legacyUnit === "per_sqft") return Number(product?.price_per_sqft) || undefined;
-  if (pricingMethod === "per_meter" || legacyUnit === "per_meter") return Number(product?.unit_price) || undefined;
+  const override = Number(product?.estimated_price_override) || 0;
+  if (override > 0) {
+    const overrideBaseSubtotal = getProductOverrideBaseSubtotal(product);
+    if (isBladePricingProduct(product)) {
+      return getBladePriceOverrideRate(product);
+    }
+    if (isPiecePricingProduct(product) || pricingMethod === "fixed") return overrideBaseSubtotal;
+    if (["sqft", "per_sqft"].includes(pricingMethod) || legacyUnit === "per_sqft") {
+      const standardArea = Number(product?.estimated_area)
+        || (Number(product?.width) > 0 && Number(product?.height) > 0
+          ? toSquareFeet(product.width, product.height, product.measurement_unit || "in")
+          : 0);
+      return standardArea > 0 ? overrideBaseSubtotal / standardArea : overrideBaseSubtotal;
+    }
+    if (["per_meter", "meter"].includes(pricingMethod) || legacyUnit === "per_meter") {
+      const length = Number(product?.length ?? product?.width) || 0;
+      const unit = product?.measurement_unit || product?.unit || "m";
+      const meters = length * ({ in: 0.0254, ft: 0.3048, cm: 0.01, m: 1 }[unit] || 1);
+      return meters > 0 ? overrideBaseSubtotal / meters : overrideBaseSubtotal;
+    }
+    return overrideBaseSubtotal;
+  }
+  if (["sqft", "per_sqft"].includes(pricingMethod) || legacyUnit === "per_sqft") return Number(product?.price_per_sqft) || undefined;
+  if (["per_meter", "meter"].includes(pricingMethod) || legacyUnit === "per_meter") return Number(product?.unit_price) || undefined;
   if (isPiecePricingProduct(product)) return Number(product?.base_price || product?.unit_price) || undefined;
   if (isBladePricingProduct(product)) {
     const selectedGlass = (product?.blade_glass_types || []).find((glass) => glass.name === form.blade_glass_type);
@@ -67,7 +89,6 @@ export const getProductEstimatorState = (product, form = {}) => {
       bladeCountMinimum: 1,
       selectedGlass: null,
       selectedFrame: null,
-      lineItems: [],
     };
   }
 
@@ -139,8 +160,12 @@ export const getProductEstimatorState = (product, form = {}) => {
     ...rawResult,
     estimated_price: estimatedPrice,
     rate: isBladeEstimator
-      ? Number(selectedGlass?.price_per_blade ?? product.price_per_blade) || 0
-      : isMeterEstimator || isPieceEstimator ? Number(getProductEstimateRate(product, form)) || 0 : rawResult.rate || 0,
+      ? Number(product.estimated_price_override) > 0
+        ? getBladePriceOverrideRate(product)
+        : Number(selectedGlass?.price_per_blade ?? product.price_per_blade) || 0
+      : Number(product.estimated_price_override) > 0 || isMeterEstimator || isPieceEstimator
+        ? Number(getProductEstimateRate(product, form)) || 0
+        : rawResult.rate || 0,
     areaDisplay: isBladeEstimator
       ? `${bladeCount} blade${bladeCount === 1 ? "" : "s"}`
       : isMeterEstimator ? `${width} ${item.measurement_unit}` : isPieceEstimator ? "1 piece" : rawResult.areaDisplay,
@@ -148,7 +173,7 @@ export const getProductEstimatorState = (product, form = {}) => {
   const hasBladeEstimate = Boolean(
     isBladeEstimator &&
     selectedGlass &&
-    Number(selectedGlass.price_per_blade ?? product.price_per_blade) > 0 &&
+    (Number(product.estimated_price_override) > 0 || Number(selectedGlass.price_per_blade ?? product.price_per_blade) > 0) &&
     !bladeCountError &&
     bladeCount >= bladeCountMinimum &&
     (maximumBlades <= 0 || bladeCount <= maximumBlades) &&
@@ -164,22 +189,6 @@ export const getProductEstimatorState = (product, form = {}) => {
       : isPieceEstimator
         ? Number(result.estimated_price) > 0
       : width > 0 && height > 0 && Number(result.estimated_price) > 0;
-  const baseSubtotal = isBladeEstimator ? (Number(result.rate) || 0) * bladeCount : Number(result.estimated_price) || 0;
-  const frameTotal = isBladeEstimator && item.sale_mode === "frame"
-    ? Number(item.custom_frame_size ? product.custom_frame_price : selectedFrame?.price) || 0
-    : 0;
-  const charges = item.extra_charges || [];
-  const lineItems = charges
-    .filter((charge) => charge?.is_active !== false)
-    .map((charge) => {
-      const amount = Number(charge.amount) || 0;
-      let total = amount;
-      if (charge.type === "percentage") total = (baseSubtotal + frameTotal) * amount / 100;
-      if (charge.type === "per_blade") total = bladeCount * amount;
-      if (charge.is_optional === true && charge.is_selected === false) total = 0;
-      return { ...charge, total };
-    });
-
   return {
     isBladeEstimator,
     isMeterEstimator,
@@ -187,6 +196,7 @@ export const getProductEstimatorState = (product, form = {}) => {
     needsDimensions,
     hasEstimate,
     result,
+    item,
     bladeCount,
     minimumBlades,
     maximumBlades,
@@ -196,13 +206,13 @@ export const getProductEstimatorState = (product, form = {}) => {
     selectedFrame,
     glassTypes,
     frameTypes,
-    lineItems,
-    frameTotal,
   };
 };
 
-function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, formatCurrency = currency, compact = false }) {
+function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, formatCurrency = currency, compact = false, defaultMeasurements = null }) {
   const state = getProductEstimatorState(product, form);
+  const hasExactPriceOverride = Number(product?.estimated_price_override) > 0;
+  const priceBreakdown = getProductLineBreakdown(product, state.item);
   const {
     isBladeEstimator,
     isMeterEstimator,
@@ -219,8 +229,6 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
     selectedFrame,
     glassTypes,
     frameTypes,
-    lineItems,
-    frameTotal,
   } = state;
   const fieldClass = `h-10 w-full rounded-lg border px-3 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/15 ${darkMode ? "border-slate-600 bg-slate-900 text-white" : "border-slate-200 bg-white text-slate-900"}`;
   const labelClass = `mb-1 block text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`;
@@ -236,18 +244,19 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
   const showMaximumBlades = maximumBlades > 0 && maximumBlades >= bladeCountMinimum;
 
   const updateForm = (patch) => onFormChange({ ...form, ...patch });
-  const updateCharge = (index, patch) => {
-    const charges = (form.extra_charges?.length ? form.extra_charges : getDefaultExtraChargeSelections(product)).map((charge, chargeIndex) => (
-      chargeIndex === index ? { ...charge, ...patch } : charge
-    ));
-    updateForm({ extra_charges: charges });
-  };
-
+  const hasDefaultMeasurements = Boolean(defaultMeasurements);
+  const isShowingDefaultMeasurements = hasDefaultMeasurements
+    && Number(form.width) === Number(defaultMeasurements.width)
+    && (isMeterEstimator || Number(form.height) === Number(defaultMeasurements.height))
+    && String(form.unit || "in") === String(defaultMeasurements.unit || "in");
   return (
     <section className={`overflow-hidden rounded-xl border border-t-2 p-3.5 ${darkMode ? "border-slate-700 border-t-red-500 bg-slate-900" : "border-slate-200 border-t-red-600 bg-white"}`} aria-labelledby="product-estimator-title">
       <div className="flex items-center gap-2">
         <ClipboardList size={15} className="text-red-600" aria-hidden="true" />
         <h4 id="product-estimator-title" className={`text-sm font-bold ${strongClass}`}>Price Estimator</h4>
+        {hasDefaultMeasurements && <span className={`ml-auto rounded-full px-2.5 py-1 text-[10px] font-semibold ${isShowingDefaultMeasurements
+          ? darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-600"
+          : darkMode ? "bg-red-950/60 text-red-200" : "bg-red-50 text-red-700"}`}>{isShowingDefaultMeasurements ? "Default measurements" : "Customize measurements"}</span>}
       </div>
 
       {needsDimensions && (isMeterEstimator ? (
@@ -360,29 +369,16 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
             {bladeCountError && <span id="product-blade-count-error" role="alert" className="mt-1 block text-[11px] font-semibold text-red-600">{bladeCountError}</span>}
           </label>
 
-          {lineItems.length > 0 && (
-            <div className="space-y-1.5">
-              {lineItems.map((charge, index) => (
-                <label key={`${charge.name || charge.label}-${index}`} className={`flex items-center justify-between gap-2 text-[11px] ${textClass}`}>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <input type="checkbox" checked={charge.is_selected !== false} onChange={(event) => updateCharge(index, { is_selected: event.target.checked })} className="accent-red-700" />
-                    <span className="truncate">{charge.name || charge.label}</span>
-                    <strong className={strongClass}>+{formatCurrency(charge.amount)}</strong>
-                  </span>
-                </label>
-              ))}
-            </div>
-          )}
         </div>
       )}
 
-      {!isBladeEstimator && (product.extra_charges || []).some((charge) => charge.is_optional && charge.is_active !== false) && (
+      {(product.extra_charges || []).some((charge) => charge.is_optional && charge.is_active !== false) && (
         <div className="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
           <p className={labelClass}>Optional charges</p>
           {(product.extra_charges || []).map((charge, index) => {
             if (!charge.is_optional || charge.is_active === false) return null;
             const selectedCharge = form.extra_charges?.[index];
-            const checked = selectedCharge?.is_selected ?? charge.is_default_selected !== false;
+            const checked = selectedCharge?.is_selected ?? false;
             return (
               <label key={`${charge.name || charge.label}-${index}`} className={`flex items-center justify-between gap-2 text-xs ${textClass}`}>
                 <span className="flex min-w-0 items-center gap-2">
@@ -413,14 +409,16 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
             <span className={`font-bold ${strongClass}`}>{isBladeEstimator ? bladeCount : result?.areaDisplay || "N/A"}</span>
           </div>
           <div className="flex items-center justify-between gap-3">
-            <span>Base Rate</span>
-            <span className={`font-bold ${strongClass}`}>{Number(result?.rate) > 0 ? `${formatCurrency(result.rate)} / ${isBladeEstimator ? "blade" : isMeterEstimator ? "meter" : isPieceEstimator ? "piece" : "sq ft"}` : "Contact us"}</span>
+            <span>{hasExactPriceOverride ? "Product price override" : "Base Rate"}</span>
+            <span className={`font-bold ${strongClass}`}>{hasExactPriceOverride
+              ? formatCurrency(product.estimated_price_override)
+              : Number(result?.rate) > 0 ? `${formatCurrency(result.rate)} / ${isBladeEstimator ? "blade" : isMeterEstimator ? "meter" : isPieceEstimator ? "piece" : "sq ft"}` : "Contact us"}</span>
           </div>
-          {isBladeEstimator && <div className="space-y-2 text-xs">
-            <div className="flex items-center justify-between gap-3"><span>Blades ({bladeCount} x {formatCurrency(result.rate)})</span><strong className={strongClass}>{formatCurrency(bladeCount * Number(result.rate || 0))}</strong></div>
-            {frameTotal > 0 && <div className="flex items-center justify-between gap-3"><span>Frame ({selectedFrame?.name || "Custom"})</span><strong className={strongClass}>{formatCurrency(frameTotal)}</strong></div>}
-            {lineItems.filter((charge) => charge.total > 0).map((charge, index) => <div key={`${charge.name || charge.label}-total-${index}`} className="flex items-center justify-between gap-3"><span>{charge.name || charge.label}</span><strong className={strongClass}>{formatCurrency(charge.total)}</strong></div>)}
-          </div>}
+          {priceBreakdown.extraCharges.map((charge, index) => (
+            <div key={`${charge.name}-${index}`} className="flex items-center justify-between gap-3 text-xs">
+              <span>{charge.name}</span><strong className={strongClass}>{formatCurrency(charge.total)}</strong>
+            </div>
+          ))}
           <div className={`flex items-center justify-between gap-3 rounded-xl border px-3 py-3 ${darkMode ? "border-red-900 bg-slate-800 text-red-300" : "border-red-100 bg-red-50 text-red-800"}`}>
             <span className="font-bold">Estimated Total</span>
             <span className="text-base font-black">{formatCurrency(result.estimated_price)}</span>

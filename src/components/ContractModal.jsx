@@ -5,12 +5,12 @@ import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getFinalProjectCost, getRequiredDownpayment } from "@/lib/orderPricing";
 import { getContractBladeDetails } from "@/pages/SiteInspection/contractState";
 
-function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, onDecline, onRegenerate, isLoading, actionError, onDownload, onDownloadPNG, onPrint, onSendToCustomer, isSendingToCustomer = false, notificationRecordId = null, transparentBackdrop = false, acceptedOverride, awaitingResponseOverride }) {
+function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, onDecline, onRegenerate, isLoading, actionError, onDownload, onDownloadPNG, onPrint, onSendToCustomer, isSendingToCustomer = false, notificationRecordId = null, transparentBackdrop = false, acceptedOverride, awaitingResponseOverride, hidePaymentAmounts = false }) {
   if (!isOpen || !inspection || !contractData) return null;
 
   const darkMode = false;
 
-  const formatCurrency = (value) => new Intl.NumberFormat("en-PH", {
+  const formatCurrency = (value) => hidePaymentAmounts ? "••••••" : new Intl.NumberFormat("en-PH", {
     style: "currency",
     currency: "PHP",
     minimumFractionDigits: 2,
@@ -100,7 +100,6 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
   const paymentReceivedLabel = isFullPaymentMethod ? "Full Payment Required" : "Required Downpayment";
   const balanceLabel = isFullPaymentMethod ? "Balance Due" : "Balance Upon Completion";
   const agreedPaymentDate = contractData.agreedPaymentDate || formatDate(inspection.agreed_payment_date, null);
-
   return (
     <div className={`${transparentBackdrop ? "customer-modal-overlay" : ""} mobile-fullscreen-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-1.5`}>
       <div
@@ -173,6 +172,15 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
             <div><span className={infoLabelClass}>Order ID</span><p className={`${infoValueClass} break-all`}>{inspection.tracking || inspection._id || inspection.id || contractData.orderNumber || "N/A"}</p></div>
           </div>
 
+          <section className="border-b border-slate-200 bg-rose-50/70 px-4 py-4 sm:px-6 sm:py-5">
+            <h2 className={sectionLabelClass}>Contracts, Terms, Cancellation &amp; Warranty Policies</h2>
+            <ol className="mt-3 space-y-2 text-[10px] leading-relaxed text-slate-700 sm:text-[11px]">
+              <li><span className="font-bold text-slate-900">1. Non-Refundable Downpayment.</span> Once a downpayment has been made, it is strictly non-refundable and the order cannot be cancelled.</li>
+              <li><span className="font-bold text-slate-900">2. Material Turnover After Cancellation Request.</span> If the customer insists on cancelling after paying the downpayment, no cash or monetary refund will be given. Only the materials already purchased for the order may be turned over to the customer.</li>
+              <li><span className="font-bold text-slate-900">3. Repairs Outside the Warranty Period.</span> Service or repair requested after the warranty period has ended is subject to a service/repair fee. The applicable fee will be communicated before the repair work begins.</li>
+            </ol>
+          </section>
+
           <section className="grid grid-cols-1 gap-0 border-b border-slate-200 sm:grid-cols-2">
             <div className="border-b border-slate-200 px-4 py-4 sm:border-b-0 sm:border-r sm:px-6 sm:py-5">
               <h2 className={sectionLabelClass}>Service Provider</h2>
@@ -223,7 +231,7 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
                     <td className="px-3 py-3 text-slate-500">{index + 1}</td>
                     <td className="px-3 py-3 font-semibold">
                       {item.name || "Item"}
-                      {bladeDetails.isBlade && (
+                      {bladeDetails.isBlade && !bladeDetails.hasPriceOverride && (
                         <div className={`mt-1 text-[10px] font-normal ${darkMode ? "text-slate-300" : "text-slate-500"}`}>
                           <div>{bladeDetails.glassName || "Glass"} · {bladeDetails.bladeCount} blades × {formatCurrency(bladeDetails.bladeRate)}/blade</div>
                           {bladeDetails.saleMode === "frame" && (
@@ -231,10 +239,13 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
                           )}
                         </div>
                       )}
+                      {bladeDetails.isBlade && bladeDetails.hasPriceOverride && (
+                        <div className={`mt-1 text-[10px] font-normal ${darkMode ? "text-slate-300" : "text-slate-500"}`}>Product price override</div>
+                      )}
                     </td>
                     <td className="px-3 py-3 text-center">{item.width || 0} x {item.height || 0} ({item.unit || sourceItem.measurement_unit || "in"})</td>
                     <td className="px-3 py-3 text-center">{item.quantity || 1}</td>
-                    <td className="px-3 py-3 text-right">{bladeDetails.isBlade ? <>{formatCurrency(bladeDetails.bladeRate)} / blade{bladeDetails.framePrice > 0 ? <div className="text-[10px]">+ {formatCurrency(bladeDetails.framePrice)} frame</div> : null}</> : formatCurrency(item.unitPrice)}</td>
+                    <td className="px-3 py-3 text-right">{bladeDetails.isBlade && !bladeDetails.hasPriceOverride ? <>{formatCurrency(bladeDetails.bladeRate)} / blade{bladeDetails.framePrice > 0 ? <div className="text-[10px]">+ {formatCurrency(bladeDetails.framePrice)} frame</div> : null}</> : formatCurrency(item.unitPrice)}</td>
                     {isPerProductWarranty && (
                       <td className="px-3 py-3 text-center text-[10px]">
                         <div className="font-bold">{warranty.periodText}</div>

@@ -1,12 +1,12 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   Calendar,
-  CalendarClock,
   CalendarDays,
   CalendarRange,
   ChevronDown,
   Circle,
   CircleCheck,
+  Clock3,
   CloudUpload,
   Database,
   Download,
@@ -24,12 +24,13 @@ import {
   X,
 } from "lucide-react";
 import { RadioGroup } from "radix-ui";
-import { motion, useReducedMotion } from "framer-motion";
+import { AnimatePresence, motion, useReducedMotion } from "framer-motion";
 import toast, { Toaster } from "react-hot-toast";
 
 import Sidebar from "../../components/layout/Sidebar";
 import Navbar from "../../components/layout/Navbar";
 import AdminPageHeader from "../../components/layout/AdminPageHeader";
+import OtpCodeInput from "../../components/OtpCodeInput";
 import { useAuth } from "../../contexts/AuthContext";
 import { useAdminTheme } from "../../contexts/AdminThemeContext";
 import { recordActivity } from "@/lib/activityLog";
@@ -41,9 +42,13 @@ import {
   getAdminUsers,
   getBackupRecoveryPassword,
   getSystemSettings,
+  requestBackupRecoveryPasswordReset,
+  resetBackupRecoveryPassword,
+  verifyBackupRecoveryPasswordResetCode,
   restoreSystemBackup,
   setBackupRecoveryPassword,
   uploadSystemBackup,
+  unrestrictCustomerOnlineOrdering,
   updateAdminUserAccess,
   updateSystemSettings,
 } from "@/api/users";
@@ -70,6 +75,7 @@ const STAFF_MODULES = [
   { key: "profile", label: "Profile", actions: [{ key: "view", label: "View", enabled: true }, { key: "edit", label: "Edit" }] },
 ];
 const STAFF_SUBROLES = ["Helper", "Installer", "Fabricator", "Site Inspector", "Supervisor"];
+const SETTINGS_LIST_PAGE_SIZE = 10;
 
 const defaultPermissions = () => Object.fromEntries(PERMISSIONS.map(({ key }) => [key, key !== "view_only_access"]));
 
@@ -99,6 +105,7 @@ const normalizeStaffAccess = (staffAccess = {}) => {
   return {
     profile_version: 2,
     subrole: staffAccess.subrole || defaults.subrole,
+    hide_payment_amounts: staffAccess.hide_payment_amounts === true,
     custom_subroles: Array.isArray(staffAccess.custom_subroles) ? staffAccess.custom_subroles : [],
     modules: Object.fromEntries(STAFF_MODULES.map(({ key, actions }) => {
       const moduleAccess = staffAccess.modules?.[key] || defaults.modules[key];
@@ -140,6 +147,7 @@ function Settings() {
   const [expandedStaffModule, setExpandedStaffModule] = useState(null);
   const [customSubroleInput, setCustomSubroleInput] = useState("");
   const [showUpgradeConfirm, setShowUpgradeConfirm] = useState(false);
+  const [restrictionConfirmation, setRestrictionConfirmation] = useState(null);
   const [globalPermissions, setGlobalPermissions] = useState(normalizeGlobalCustomerPermissions);
   const [globalOpen, setGlobalOpen] = useState(false);
   const [savingGlobal, setSavingGlobal] = useState(false);
@@ -147,6 +155,40 @@ function Settings() {
   const [savingMaintenance, setSavingMaintenance] = useState(false);
   const [loadingBackupSettings, setLoadingBackupSettings] = useState(true);
   const [backupRecoveryConfigured, setBackupRecoveryConfigured] = useState(false);
+  const [recoveryPasswordResetMode, setRecoveryPasswordResetMode] = useState(false);
+  const [recoveryPasswordResetCode, setRecoveryPasswordResetCode] = useState("");
+  const [recoveryPasswordResetCodeVerified, setRecoveryPasswordResetCodeVerified] = useState(false);
+  const [verifyingRecoveryPasswordResetCode, setVerifyingRecoveryPasswordResetCode] = useState(false);
+  const [recoveryPasswordResetCodeError, setRecoveryPasswordResetCodeError] = useState("");
+  const [requestingRecoveryPasswordCode, setRequestingRecoveryPasswordCode] = useState(false);
+  const [showScheduleTimeModal, setShowScheduleTimeModal] = useState(false);
+  const [scheduleTimeDraft, setScheduleTimeDraft] = useState("00:00");
+
+  useEffect(() => {
+    if (!recoveryPasswordResetMode || !/^\d{6}$/.test(recoveryPasswordResetCode)) {
+      setRecoveryPasswordResetCodeVerified(false);
+      setVerifyingRecoveryPasswordResetCode(false);
+      setRecoveryPasswordResetCodeError("");
+      return undefined;
+    }
+
+    let active = true;
+    setRecoveryPasswordResetCodeVerified(false);
+    setVerifyingRecoveryPasswordResetCode(true);
+    setRecoveryPasswordResetCodeError("");
+    verifyBackupRecoveryPasswordResetCode(recoveryPasswordResetCode)
+      .then(() => {
+        if (active) setRecoveryPasswordResetCodeVerified(true);
+      })
+      .catch((error) => {
+        if (active) setRecoveryPasswordResetCodeError(error?.data?.message || error?.message || "The verification code is incorrect.");
+      })
+      .finally(() => {
+        if (active) setVerifyingRecoveryPasswordResetCode(false);
+      });
+
+    return () => { active = false; };
+  }, [recoveryPasswordResetMode, recoveryPasswordResetCode]);
   const [recoveryPassword, setRecoveryPassword] = useState("");
   const [newRecoveryPassword, setNewRecoveryPassword] = useState("");
   const [confirmRecoveryPassword, setConfirmRecoveryPassword] = useState("");
@@ -157,6 +199,7 @@ function Settings() {
   const [restoreRecoveryPassword, setRestoreRecoveryPassword] = useState("");
   const [creatingBackup, setCreatingBackup] = useState(false);
   const [backupImportFile, setBackupImportFile] = useState(null);
+  const [backupFilePickerOpen, setBackupFilePickerOpen] = useState(false);
   const [isDraggingBackupFile, setIsDraggingBackupFile] = useState(false);
   const [uploadedBackup, setUploadedBackup] = useState(null);
   const [uploadingBackupFile, setUploadingBackupFile] = useState(false);
@@ -169,18 +212,56 @@ function Settings() {
   const restoreDialogRef = useRef(null);
   const restoreDialogTriggerRef = useRef(null);
   const backupUploadInputRef = useRef(null);
+  const backupFilePickerTriggerRef = useRef(null);
   const deleteDialogRef = useRef(null);
   const deleteDialogTriggerRef = useRef(null);
   const [activeSettingsTab, setActiveSettingsTab] = useState("user-management");
+  const [userManagementPage, setUserManagementPage] = useState(1);
+  const [orderingRestrictionPage, setOrderingRestrictionPage] = useState(1);
+  const [restrictionSearch, setRestrictionSearch] = useState("");
+
+  useEffect(() => {
+    setUserManagementPage(1);
+  }, [activeTab, search]);
+
+  useEffect(() => {
+    setOrderingRestrictionPage(1);
+  }, [restrictionSearch]);
+
+  useEffect(() => {
+    if (!backupFilePickerOpen) return undefined;
+
+    let returnFocusTimer;
+    const handlePickerReturn = () => {
+      if (document.visibilityState === "hidden") return;
+      window.clearTimeout(returnFocusTimer);
+      returnFocusTimer = window.setTimeout(() => {
+        setBackupFilePickerOpen(false);
+        setIsDraggingBackupFile(false);
+        const input = backupUploadInputRef.current;
+        if (input && !input.files?.length) input.value = "";
+        backupFilePickerTriggerRef.current?.focus({ preventScroll: true });
+      }, 150);
+    };
+
+    window.addEventListener("focus", handlePickerReturn);
+    document.addEventListener("visibilitychange", handlePickerReturn);
+    return () => {
+      window.clearTimeout(returnFocusTimer);
+      window.removeEventListener("focus", handlePickerReturn);
+      document.removeEventListener("visibilitychange", handlePickerReturn);
+    };
+  }, [backupFilePickerOpen]);
   const backupOptions = [
+    { id: "daily", label: "Daily", description: "Every day at midnight" },
     { id: "weekly", label: "Weekly", description: "Every Sunday at midnight" },
     { id: "monthly", label: "Monthly", description: "1st of every month" },
-    { id: "yearly", label: "Yearly", description: "December 31st at midnight" },
   ];
 
   const getDefaultBackupState = () => {
     return {
       selectedSchedule: "weekly",
+      scheduleTime: "00:00",
       lastBackupAt: null,
       nextBackupAt: null,
       status: null,
@@ -193,6 +274,7 @@ function Settings() {
   const [backupPage, setBackupPage] = useState(1);
   const settingsTabs = [
     { key: "user-management", label: "User Management" },
+    ...(isAdmin ? [{ key: "ordering-restriction", label: "Ordering Restriction" }] : []),
     { key: "backup-recovery", label: "Backup & Recovery" },
   ];
   const isOwnStaffAccount = Boolean(
@@ -215,7 +297,8 @@ function Settings() {
           setGlobalPermissions(normalizeGlobalCustomerPermissions(response.global_permissions));
         }
         setBackupState({
-          selectedSchedule: ["weekly", "monthly", "yearly"].includes(response.backup_schedule) ? response.backup_schedule : "weekly",
+          selectedSchedule: ["daily", "weekly", "monthly"].includes(response.backup_schedule) ? response.backup_schedule : "weekly",
+          scheduleTime: response.backup_schedule_time || "00:00",
           status: response.backup_status || null,
           lastBackupAt: response.last_backup_at || null,
           nextBackupAt: response.next_backup_at || null,
@@ -325,6 +408,24 @@ function Settings() {
     return [authAdmin, ...realUsers];
   }, [users, user]);
 
+  const restrictedCustomers = useMemo(() => {
+    const now = Date.now();
+    return users.filter((account) => (
+      account.role === "customer"
+      && account.online_order_cooldown_until
+      && new Date(account.online_order_cooldown_until).getTime() > now
+    ));
+  }, [users]);
+
+  const filteredRestrictedCustomers = useMemo(() => {
+    const query = restrictionSearch.trim().toLowerCase();
+    if (!query) return restrictedCustomers;
+    return restrictedCustomers.filter((account) => (
+      [account.first_name, account.last_name, account.email, account.username, account.phone]
+        .some((value) => String(value || "").toLowerCase().includes(query))
+    ));
+  }, [restrictedCustomers, restrictionSearch]);
+
   const counts = useMemo(() => ({
     all: allDisplayUsers.length,
     customer: allDisplayUsers.filter((account) => account.role === "customer").length,
@@ -354,6 +455,35 @@ function Settings() {
       return matchesRole && matchesSearch;
     });
   }, [allDisplayUsers, activeTab, search]);
+
+  const userManagementPageCount = Math.max(1, Math.ceil(displayUsers.length / SETTINGS_LIST_PAGE_SIZE));
+  const currentUserManagementPage = Math.min(userManagementPage, userManagementPageCount);
+  const paginatedUsers = displayUsers.slice(
+    (currentUserManagementPage - 1) * SETTINGS_LIST_PAGE_SIZE,
+    currentUserManagementPage * SETTINGS_LIST_PAGE_SIZE,
+  );
+  const orderingRestrictionPageCount = Math.max(1, Math.ceil(filteredRestrictedCustomers.length / SETTINGS_LIST_PAGE_SIZE));
+  const currentOrderingRestrictionPage = Math.min(orderingRestrictionPage, orderingRestrictionPageCount);
+  const paginatedRestrictedCustomers = filteredRestrictedCustomers.slice(
+    (currentOrderingRestrictionPage - 1) * SETTINGS_LIST_PAGE_SIZE,
+    currentOrderingRestrictionPage * SETTINGS_LIST_PAGE_SIZE,
+  );
+
+  const renderListPagination = (total, page, pageCount, setPage) => {
+    if (total <= SETTINGS_LIST_PAGE_SIZE) return null;
+    const firstItem = (page - 1) * SETTINGS_LIST_PAGE_SIZE + 1;
+    const lastItem = Math.min(page * SETTINGS_LIST_PAGE_SIZE, total);
+    return (
+      <div className={`flex flex-col gap-3 border-t px-4 py-3 sm:flex-row sm:items-center sm:justify-between sm:px-6 ${darkMode ? "border-slate-800" : "border-slate-100"}`}>
+        <p className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Showing {firstItem}–{lastItem} of {total}</p>
+        <div className="flex items-center justify-end gap-2">
+          <button type="button" onClick={() => setPage((current) => Math.max(1, current - 1))} disabled={page <= 1} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}>Previous</button>
+          <span className={`min-w-16 text-center text-xs font-semibold tabular-nums ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Page {page} of {pageCount}</span>
+          <button type="button" onClick={() => setPage((current) => Math.min(pageCount, current + 1))} disabled={page >= pageCount} className={`rounded-lg border px-3 py-1.5 text-xs font-semibold transition disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}>Next</button>
+        </div>
+      </div>
+    );
+  };
 
   const getPermissions = (account) => normalizePermissions(account.access_permissions);
 
@@ -385,6 +515,26 @@ function Settings() {
     }
   };
 
+  const handleUnrestrictCustomer = async (account) => {
+    if (!account) return;
+    const accountId = account._id || account.id;
+    const customerName = `${account.first_name || "Customer"} ${account.last_name || ""}`.trim();
+    setSavingId(accountId);
+    try {
+      const response = await unrestrictCustomerOnlineOrdering(accountId);
+      setUsers((current) => current.map((item) => (
+        (item._id || item.id) === accountId ? response.user : item
+      )));
+      setRestrictionConfirmation(null);
+      recordActivity(user, `Removed the online ordering restriction for ${customerName}.`, "Settings");
+      toast.success(`Online ordering restriction removed for ${customerName}.`);
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to remove the online ordering restriction.");
+    } finally {
+      setSavingId(null);
+    }
+  };
+
   const renderBackupRecovery = (metrics) => {
     const isSuccessfulStatus = metrics.status === "Success";
     const isFailedStatus = metrics.status === "Failed" || metrics.status === "Error";
@@ -404,22 +554,22 @@ function Settings() {
       <>
         {activeSettingsTab === "backup-recovery" && (
           <div className="mt-4.5 min-w-0 max-w-full space-y-4.5 overflow-x-clip">
-            <div className="grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3.5">
-              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-3.5 rounded-2xl border px-4.5 py-4 transition-colors motion-reduce:transition-none hover:border-brand/30", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
-                <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand dark:bg-brand/15 dark:text-brand-dark-text"><Calendar aria-hidden="true" className="size-[21px]" /></span>
-                <span className="min-w-0"><span className="block text-[11px] font-medium uppercase tracking-[0.1em] text-muted-foreground">Last backup</span><span className="mt-1 block text-[19px] font-medium text-foreground">{metrics.lastBackupAt ? formatBackupDateShort(metrics.lastBackupAt) : "No backup"}</span></span>
+            <div className="grid grid-cols-1 gap-2 pr-2 sm:gap-3.5 sm:pr-0 sm:grid-cols-[repeat(auto-fit,minmax(200px,1fr))]">
+              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-2.5 rounded-2xl border px-3 py-2.5 transition-colors motion-reduce:transition-none hover:border-brand/30 sm:gap-3.5 sm:px-4.5 sm:py-4", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-brand/10 text-brand dark:bg-brand/15 dark:text-brand-dark-text sm:size-11"><Calendar aria-hidden="true" className="size-[18px] sm:size-[21px]" /></span>
+                <span className="min-w-0"><span className="block text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground sm:text-[11px]">Last backup</span><span className="mt-0.5 block text-base font-medium text-foreground sm:mt-1 sm:text-[19px]">{metrics.lastBackupAt ? formatBackupDateShort(metrics.lastBackupAt) : "No backup"}</span></span>
               </motion.article>
-              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-3.5 rounded-2xl border px-4.5 py-4 transition-colors motion-reduce:transition-none hover:border-brand/30", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
-                <span className={cn("flex size-11 shrink-0 items-center justify-center rounded-xl", statusTone)}><History aria-hidden="true" className="size-[21px]" /></span>
-                <span className="min-w-0"><span className="block text-[11px] font-medium uppercase tracking-[0.1em] text-muted-foreground">Backup status</span><span className={cn("mt-1 inline-flex items-center gap-2 text-[19px] font-medium", statusValueTone)}><span className="relative flex size-[9px] shrink-0" aria-hidden="true"><span className={cn("absolute inline-flex size-full rounded-full motion-safe:animate-ping motion-reduce:animate-none", isSuccessfulStatus ? "bg-green-500/45" : isFailedStatus ? "bg-red-500/45" : "bg-amber-500/45")} /><span className={cn("relative inline-flex size-[9px] rounded-full", isSuccessfulStatus ? "bg-green-500" : isFailedStatus ? "bg-red-500" : "bg-amber-500")} /></span>{metrics.status}</span></span>
+              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-2.5 rounded-2xl border px-3 py-2.5 transition-colors motion-reduce:transition-none hover:border-brand/30 sm:gap-3.5 sm:px-4.5 sm:py-4", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
+                <span className={cn("flex size-9 shrink-0 items-center justify-center rounded-xl sm:size-11", statusTone)}><History aria-hidden="true" className="size-[18px] sm:size-[21px]" /></span>
+                <span className="min-w-0"><span className="block text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground sm:text-[11px]">Backup status</span><span className={cn("mt-0.5 inline-flex items-center gap-2 text-base font-medium sm:mt-1 sm:text-[19px]", statusValueTone)}><span className="relative flex size-[9px] shrink-0" aria-hidden="true"><span className={cn("absolute inline-flex size-full rounded-full motion-safe:animate-ping motion-reduce:animate-none", isSuccessfulStatus ? "bg-green-500/45" : isFailedStatus ? "bg-red-500/45" : "bg-amber-500/45")} /><span className={cn("relative inline-flex size-[9px] rounded-full", isSuccessfulStatus ? "bg-green-500" : isFailedStatus ? "bg-red-500" : "bg-amber-500")} /></span>{metrics.status}</span></span>
               </motion.article>
-              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-3.5 rounded-2xl border px-4.5 py-4 transition-colors motion-reduce:transition-none hover:border-brand/30", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
-                <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300"><Database aria-hidden="true" className="size-[21px]" /></span>
-                <span className="min-w-0"><span className="block text-[11px] font-medium uppercase tracking-[0.1em] text-muted-foreground">Backup snapshots</span><span className="mt-1 block text-[19px] font-medium text-foreground">{metrics.totalBackups} backups</span></span>
+              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-2.5 rounded-2xl border px-3 py-2.5 transition-colors motion-reduce:transition-none hover:border-brand/30 sm:gap-3.5 sm:px-4.5 sm:py-4", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-blue-500/10 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300 sm:size-11"><Database aria-hidden="true" className="size-[18px] sm:size-[21px]" /></span>
+                <span className="min-w-0"><span className="block text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground sm:text-[11px]">Backup snapshots</span><span className="mt-0.5 block text-base font-medium text-foreground sm:mt-1 sm:text-[19px]">{metrics.totalBackups} backups</span></span>
               </motion.article>
-              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-3.5 rounded-2xl border px-4.5 py-4 transition-colors motion-reduce:transition-none hover:border-brand/30", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
-                <span className="flex size-11 shrink-0 items-center justify-center rounded-xl bg-green-500/10 text-green-700 dark:bg-green-950/60 dark:text-green-300"><CircleCheck aria-hidden="true" className="size-[21px]" /></span>
-                <span className="min-w-0"><span className="block text-[11px] font-medium uppercase tracking-[0.1em] text-muted-foreground">Success rate</span><span className="mt-1 block text-[19px] font-medium text-foreground">{metrics.successRate}%</span></span>
+              <motion.article whileHover={prefersReducedMotion ? undefined : { y: -2 }} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className={cn("flex min-w-0 items-center gap-2.5 rounded-2xl border px-3 py-2.5 transition-colors motion-reduce:transition-none hover:border-brand/30 sm:gap-3.5 sm:px-4.5 sm:py-4", "border-border bg-card dark:border-slate-700 dark:bg-slate-900")}>
+                <span className="flex size-9 shrink-0 items-center justify-center rounded-xl bg-green-500/10 text-green-700 dark:bg-green-950/60 dark:text-green-300 sm:size-11"><CircleCheck aria-hidden="true" className="size-[18px] sm:size-[21px]" /></span>
+                <span className="min-w-0"><span className="block text-[9px] font-medium uppercase tracking-[0.1em] text-muted-foreground sm:text-[11px]">Success rate</span><span className="mt-0.5 block text-base font-medium text-foreground sm:mt-1 sm:text-[19px]">{metrics.successRate}%</span></span>
               </motion.article>
             </div>
 
@@ -427,45 +577,80 @@ function Settings() {
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div className="min-w-0">
                   <h3 className="text-[19px] font-medium text-foreground">Recovery Password</h3>
-                  <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">Set a private password required to authorize a full restore. The current password stays visible to admins here until it is changed.</p>
+                  <p className="mt-1 max-w-2xl text-sm leading-relaxed text-muted-foreground">Set a private password required to authorize a full restore. The current password stays visible to admins here until it is changed. Recovery reset codes are sent to <span className="font-medium text-foreground">{user?.email || "your administrator email"}</span>.</p>
                 </div>
-                <span className={cn("inline-flex shrink-0 items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium", backupRecoveryConfigured ? "bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300" : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300")}>
-                  <ShieldCheck aria-hidden="true" className="size-4" />
-                  {backupRecoveryConfigured ? "Configured" : "Setup required"}
-                </span>
+                <div className="flex shrink-0 flex-wrap items-center gap-2">
+                  {backupRecoveryConfigured && (
+                    <button type="button" onClick={recoveryPasswordResetMode ? cancelRecoveryPasswordReset : handleRequestRecoveryPasswordCode} disabled={requestingRecoveryPasswordCode || savingRecoveryPassword} className="rounded-md border border-border px-3 py-1.5 text-xs font-medium text-foreground transition-colors hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:hover:bg-slate-800">
+                      {requestingRecoveryPasswordCode ? "Sending code..." : recoveryPasswordResetMode ? "Cancel reset" : "Forgot password?"}
+                    </button>
+                  )}
+                  <span className={cn("inline-flex items-center gap-2 rounded-full px-3 py-1.5 text-xs font-medium", backupRecoveryConfigured ? "bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300" : "bg-amber-100 text-amber-800 dark:bg-amber-950/60 dark:text-amber-300")}>
+                    <ShieldCheck aria-hidden="true" className="size-4" />
+                    {backupRecoveryConfigured ? "Configured" : "Setup required"}
+                  </span>
+                </div>
               </div>
-              <form onSubmit={handleSaveBackupRecoveryPassword} className="mt-4 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <span>Current password</span>
-                  <span className="relative block">
-                    <input type={showCurrentRecoveryPassword ? "text" : "password"} autoComplete="new-password" data-1p-ignore="true" data-lpignore="true" data-form-type="other" value={recoveryPassword} onChange={(event) => setRecoveryPassword(event.target.value)} placeholder={backupRecoveryConfigured ? "Enter current password" : "Not set yet"} disabled={!backupRecoveryConfigured || savingRecoveryPassword} required={backupRecoveryConfigured} minLength={12} maxLength={128} className="h-10 w-full rounded-md border border-border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-70 dark:border-slate-700 dark:bg-slate-950" />
-                    <button type="button" onClick={() => setShowCurrentRecoveryPassword((visible) => !visible)} disabled={!backupRecoveryConfigured || savingRecoveryPassword} aria-label={showCurrentRecoveryPassword ? "Hide current recovery password" : "Show current recovery password"} aria-pressed={showCurrentRecoveryPassword} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50">
-                      {showCurrentRecoveryPassword ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
-                    </button>
-                  </span>
-                </label>
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <span>{backupRecoveryConfigured ? "New password" : "New recovery password"}</span>
-                  <span className="relative block">
-                    <input type={showRecoveryPassword ? "text" : "password"} autoComplete="new-password" value={newRecoveryPassword} onChange={(event) => setNewRecoveryPassword(event.target.value)} required minLength={12} maxLength={128} aria-describedby="recovery-password-requirements" className="h-10 w-full rounded-md border border-border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-brand dark:border-slate-700 dark:bg-slate-950" />
-                    <button type="button" onClick={() => setShowRecoveryPassword((visible) => !visible)} aria-label={showRecoveryPassword ? "Hide new recovery password" : "Show new recovery password"} aria-pressed={showRecoveryPassword} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
-                      {showRecoveryPassword ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
-                    </button>
-                  </span>
-                </label>
-                <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
-                  <span>Confirm new password</span>
-                  <span className="relative block">
-                    <input type={showRecoveryPasswordConfirmation ? "text" : "password"} autoComplete="new-password" value={confirmRecoveryPassword} onChange={(event) => setConfirmRecoveryPassword(event.target.value)} required minLength={12} maxLength={128} aria-invalid={recoveryPasswordConfirmationMismatch} aria-describedby="recovery-password-requirements" className={cn("h-10 w-full rounded-md border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 dark:bg-slate-950", recoveryPasswordConfirmationMismatch ? "border-red-500 focus-visible:ring-red-500" : recoveryPasswordsMatch ? "border-emerald-500 focus-visible:ring-emerald-500" : "border-border focus-visible:ring-brand", "dark:border-slate-700")} />
-                    <button type="button" onClick={() => setShowRecoveryPasswordConfirmation((visible) => !visible)} aria-label={showRecoveryPasswordConfirmation ? "Hide password confirmation" : "Show password confirmation"} aria-pressed={showRecoveryPasswordConfirmation} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
-                      {showRecoveryPasswordConfirmation ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
-                    </button>
-                  </span>
-                  {confirmRecoveryPassword.length > 0 && <span role="status" aria-live="polite" className={recoveryPasswordsMatch ? "text-xs font-medium text-emerald-700 dark:text-emerald-400" : "text-xs font-medium text-red-600 dark:text-red-400"}>{recoveryPasswordsMatch ? "Passwords match" : "Passwords do not match"}</span>}
-                </label>
-                <div className="flex items-end"><button type="submit" disabled={savingRecoveryPassword || loadingBackupSettings || recoveryPasswordConfirmationMismatch || !recoveryPasswordsMatch || !recoveryPasswordChecks.every(({ met }) => met)} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-brand px-4 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-brand-dark-fill">{savingRecoveryPassword && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}{savingRecoveryPassword ? "Saving..." : backupRecoveryConfigured ? "Change Password" : "Set Password"}</button></div>
+              <form onSubmit={handleSaveBackupRecoveryPassword} className="mt-4 grid gap-3 sm:grid-cols-2">
+                {recoveryPasswordResetMode ? (
+                  <AnimatePresence initial={false}>
+                    {!recoveryPasswordResetCodeVerified && (
+                      <motion.label
+                        key="recovery-verification-code"
+                        initial={{ opacity: 0, y: 5 }}
+                        animate={{ opacity: 1, y: 0, transition: { duration: prefersReducedMotion ? 0 : 0.3, ease: "easeOut" } }}
+                        exit={{ opacity: 0, y: -5, transition: { duration: prefersReducedMotion ? 0 : 0.45, ease: "easeInOut" } }}
+                        className="grid gap-1.5 text-xs font-medium text-muted-foreground"
+                      >
+                        <span>Email verification code</span>
+                        <OtpCodeInput id="recovery-password-reset-code" value={recoveryPasswordResetCode} onChange={setRecoveryPasswordResetCode} darkMode={darkMode} autoFocus />
+                        {verifyingRecoveryPasswordResetCode ? (
+                          <span className="text-[11px] font-normal" role="status" aria-live="polite">Checking verification code...</span>
+                        ) : recoveryPasswordResetCodeError ? (
+                          <span className="text-[11px] font-medium text-red-600 dark:text-red-400" role="alert">{recoveryPasswordResetCodeError}</span>
+                        ) : (
+                          <span className="text-[11px] font-normal">Check your administrator email. The code expires in 10 minutes.</span>
+                        )}
+                      </motion.label>
+                    )}
+                  </AnimatePresence>
+                ) : (
+                  <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                    <span>Current password</span>
+                    <span className="relative block">
+                      <input type={showCurrentRecoveryPassword ? "text" : "password"} autoComplete="new-password" data-1p-ignore="true" data-lpignore="true" data-form-type="other" value={recoveryPassword} onChange={(event) => setRecoveryPassword(event.target.value)} placeholder={backupRecoveryConfigured ? "Enter current password" : "Not set yet"} disabled={!backupRecoveryConfigured || savingRecoveryPassword} required={backupRecoveryConfigured} minLength={12} maxLength={128} className="h-10 w-full rounded-md border border-border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-70 dark:border-slate-700 dark:bg-slate-950" />
+                      <button type="button" onClick={() => setShowCurrentRecoveryPassword((visible) => !visible)} disabled={!backupRecoveryConfigured || savingRecoveryPassword} aria-label={showCurrentRecoveryPassword ? "Hide current recovery password" : "Show current recovery password"} aria-pressed={showCurrentRecoveryPassword} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-50">
+                        {showCurrentRecoveryPassword ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
+                      </button>
+                    </span>
+                  </label>
+                )}
+                {(!recoveryPasswordResetMode || recoveryPasswordResetCodeVerified) && (
+                  <>
+                    <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                      <span>{backupRecoveryConfigured ? "New password" : "New recovery password"}</span>
+                      <span className="relative block">
+                        <input type={showRecoveryPassword ? "text" : "password"} autoComplete="new-password" value={newRecoveryPassword} onChange={(event) => setNewRecoveryPassword(event.target.value)} required minLength={12} maxLength={128} aria-describedby="recovery-password-requirements" className="h-10 w-full rounded-md border border-border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 focus-visible:ring-brand dark:border-slate-700 dark:bg-slate-950" />
+                        <button type="button" onClick={() => setShowRecoveryPassword((visible) => !visible)} aria-label={showRecoveryPassword ? "Hide new recovery password" : "Show new recovery password"} aria-pressed={showRecoveryPassword} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
+                          {showRecoveryPassword ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
+                        </button>
+                      </span>
+                    </label>
+                    <label className="grid gap-1.5 text-xs font-medium text-muted-foreground">
+                      <span>Confirm new password</span>
+                      <span className="relative block">
+                        <input type={showRecoveryPasswordConfirmation ? "text" : "password"} autoComplete="new-password" value={confirmRecoveryPassword} onChange={(event) => setConfirmRecoveryPassword(event.target.value)} required minLength={12} maxLength={128} aria-invalid={recoveryPasswordConfirmationMismatch} aria-describedby="recovery-password-requirements" className={cn("h-10 w-full rounded-md border bg-background px-3 pr-10 text-sm text-foreground outline-none focus-visible:ring-2 dark:bg-slate-950", recoveryPasswordConfirmationMismatch ? "border-red-500 focus-visible:ring-red-500" : recoveryPasswordsMatch ? "border-emerald-500 focus-visible:ring-emerald-500" : "border-border focus-visible:ring-brand", "dark:border-slate-700")} />
+                        <button type="button" onClick={() => setShowRecoveryPasswordConfirmation((visible) => !visible)} aria-label={showRecoveryPasswordConfirmation ? "Hide password confirmation" : "Show password confirmation"} aria-pressed={showRecoveryPasswordConfirmation} className="absolute inset-y-0 right-0 inline-flex w-10 items-center justify-center text-muted-foreground hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-brand">
+                          {showRecoveryPasswordConfirmation ? <EyeOff aria-hidden="true" className="size-4" /> : <Eye aria-hidden="true" className="size-4" />}
+                        </button>
+                      </span>
+                      {confirmRecoveryPassword.length > 0 && <span role="status" aria-live="polite" className={recoveryPasswordsMatch ? "text-xs font-medium text-emerald-700 dark:text-emerald-400" : "text-xs font-medium text-red-600 dark:text-red-400"}>{recoveryPasswordsMatch ? "Passwords match" : "Passwords do not match"}</span>}
+                    </label>
+                    <div className="flex items-end"><button type="submit" disabled={savingRecoveryPassword || requestingRecoveryPasswordCode || loadingBackupSettings || (recoveryPasswordResetMode && !recoveryPasswordResetCodeVerified) || recoveryPasswordConfirmationMismatch || !recoveryPasswordsMatch || !recoveryPasswordChecks.every(({ met }) => met)} className="inline-flex h-10 w-full items-center justify-center gap-2 rounded-md bg-brand px-4 text-sm font-medium text-white transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50 dark:bg-brand-dark-fill">{savingRecoveryPassword && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}{savingRecoveryPassword ? "Saving..." : recoveryPasswordResetMode ? "Reset Password" : backupRecoveryConfigured ? "Change Password" : "Set Password"}</button></div>
+                  </>
+                )}
               </form>
-              <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950/60">
+              {(!recoveryPasswordResetMode || recoveryPasswordResetCodeVerified) && <div className="mt-3 rounded-md border border-slate-200 bg-slate-50 px-3 py-2.5 dark:border-slate-700 dark:bg-slate-950/60">
                 <p className="mb-2 text-xs font-medium leading-relaxed text-slate-700 dark:text-slate-200">Use 12+ characters with uppercase, lowercase, a number, and a symbol for a stronger password.</p>
                 <ul id="recovery-password-requirements" aria-label="Recovery password requirements" className="flex flex-wrap items-center gap-x-5 gap-y-2">
                   {recoveryPasswordChecks.map(({ label, met }) => {
@@ -478,7 +663,7 @@ function Settings() {
                     );
                   })}
                 </ul>
-              </div>
+              </div>}
             </section>
             <p className="text-sm leading-relaxed text-muted-foreground">Full backups include every acgc_db collection, document, and index — database only, no files. Archives are protected with your recovery password and kept for 30 days (the latest backup is always protected). Cloudinary-hosted media stays in Cloudinary; existing database references remain unchanged.</p>
 
@@ -489,7 +674,7 @@ function Settings() {
                   <RadioGroup.Root value={backupState.selectedSchedule} onValueChange={handleScheduleChange} disabled={loadingBackupSettings} aria-label="Backup Schedule" aria-labelledby="backup-schedule-heading" className="flex flex-col gap-2.5">
                     {backupOptions.map((option) => {
                       const isSelected = backupState.selectedSchedule === option.id;
-                      const ScheduleIcon = { weekly: CalendarDays, monthly: CalendarRange, yearly: CalendarClock }[option.id];
+                      const ScheduleIcon = { daily: Calendar, weekly: CalendarDays, monthly: CalendarRange }[option.id];
                       return (
                         <label key={option.id} htmlFor={`backup-schedule-${option.id}`} className={cn(
                           "flex min-h-[74px] cursor-pointer items-center gap-3 rounded-[14px] px-4 py-3.25 transition-colors motion-reduce:transition-none",
@@ -504,10 +689,16 @@ function Settings() {
                       );
                     })}
                   </RadioGroup.Root>
+                  <label className="mt-4 block text-sm font-medium text-foreground">Scheduled backup time</label>
+                  <button type="button" disabled={loadingBackupSettings} onClick={() => { setScheduleTimeDraft(backupState.scheduleTime || "00:00"); setShowScheduleTimeModal(true); }} className="mt-1.5 flex h-10 w-full items-center justify-between rounded-lg border border-border bg-background px-3 text-sm text-foreground outline-none transition-colors hover:bg-muted/50 focus-visible:ring-2 focus-visible:ring-brand disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-950 dark:hover:bg-slate-900">
+                    <span>{new Date(`2000-01-01T${backupState.scheduleTime || "00:00"}:00`).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })}</span>
+                    <Clock3 aria-hidden="true" className="size-4 text-muted-foreground" />
+                  </button>
+                  <p className="mt-1.5 text-xs text-muted-foreground">Uses Asia/Manila time.</p>
                   <p className="mt-3.5 text-xs leading-relaxed text-muted-foreground">
                     {backupState.nextBackupAt
                       ? `Next ${backupState.selectedSchedule} backup: ${new Date(backupState.nextBackupAt).toLocaleString("en-US", { month: "short", day: "numeric", year: "numeric", hour: "numeric", minute: "2-digit", timeZone: "Asia/Manila" })} · Asia/Manila`
-                      : "Scheduled backups run at midnight, Asia/Manila time."}
+                      : "Scheduled backups use your selected time, Asia/Manila."}
                   </p>
                 </div>
                 <footer className="flex min-h-[70px] items-center border-t border-border bg-muted/50 px-6 py-3.5 dark:border-slate-700 dark:bg-slate-800/50 max-[520px]:px-4">
@@ -552,11 +743,40 @@ function Settings() {
                     ) : (
                       <p className="text-[15px] text-muted-foreground">{isDraggingBackupFile ? "Drop backup file to select" : "Drop a backup file here or choose a file"}</p>
                     )}
-                    <label htmlFor="system-backup-upload" className={cn("inline-flex h-10.5 cursor-pointer items-center justify-center gap-2 rounded-xl border border-border bg-background px-5 text-sm font-medium text-foreground transition-colors focus-within:outline-none focus-within:ring-2 focus-within:ring-brand focus-within:ring-offset-2 focus-within:ring-offset-background motion-reduce:transition-none", "hover:border-brand hover:text-brand dark:border-slate-600 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-brand-dark-text dark:hover:text-brand-dark-text", uploadedBackup || uploadingBackupFile ? "cursor-not-allowed opacity-50" : "")}>
-                      <input ref={backupUploadInputRef} id="system-backup-upload" type="file" accept=".zip,.json.gz.enc,.json.gz,application/zip,application/octet-stream,application/gzip,application/x-gzip" disabled={Boolean(uploadedBackup) || uploadingBackupFile} onChange={(event) => { handleBackupFileSelection(event.target.files?.[0]); event.target.value = ""; }} className="sr-only" />
+                    <button
+                      ref={backupFilePickerTriggerRef}
+                      type="button"
+                      data-no-pull-refresh
+                      disabled={Boolean(uploadedBackup) || uploadingBackupFile}
+                      onClick={() => {
+                        setBackupFilePickerOpen(true);
+                        backupUploadInputRef.current?.click();
+                      }}
+                      aria-busy={backupFilePickerOpen}
+                      className={cn("inline-flex h-10.5 cursor-pointer items-center justify-center gap-2 rounded-xl border border-border bg-background px-5 text-sm font-medium text-foreground transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none", "hover:border-brand hover:text-brand dark:border-slate-600 dark:bg-slate-950 dark:text-slate-200 dark:hover:border-brand-dark-text dark:hover:text-brand-dark-text", uploadedBackup || uploadingBackupFile ? "cursor-not-allowed opacity-50" : "")}
+                    >
                       <Upload aria-hidden="true" className="size-4" />
                       Choose backup file
-                    </label>
+                    </button>
+                    <input
+                      ref={backupUploadInputRef}
+                      id="system-backup-upload"
+                      type="file"
+                      accept=".zip,.json.gz.enc,.json.gz,application/zip,application/octet-stream,application/gzip,application/x-gzip"
+                      disabled={Boolean(uploadedBackup) || uploadingBackupFile}
+                      onCancel={() => {
+                        setBackupFilePickerOpen(false);
+                        setIsDraggingBackupFile(false);
+                        if (backupUploadInputRef.current) backupUploadInputRef.current.value = "";
+                        backupFilePickerTriggerRef.current?.focus({ preventScroll: true });
+                      }}
+                      onChange={(event) => {
+                        setBackupFilePickerOpen(false);
+                        handleBackupFileSelection(event.target.files?.[0]);
+                        event.target.value = "";
+                      }}
+                      className="sr-only"
+                    />
                   </div>
                 </div>
                 <footer className="flex min-h-[70px] flex-wrap items-center gap-2.5 border-t border-border bg-muted/50 px-6 py-3.5 dark:border-slate-700 dark:bg-slate-800/50 max-[520px]:grid max-[520px]:grid-cols-2 max-[520px]:px-4">
@@ -591,7 +811,13 @@ function Settings() {
                       <tbody>
                         {paginatedBackups.map((backup) => (
                           <tr key={backup.id} className="border-b border-border transition-colors last:border-b-0 hover:bg-muted/50 motion-reduce:transition-none">
-                            <td className={`px-4 py-3 ${darkMode ? "text-slate-200" : "text-slate-900"}`}><span className="block break-all font-mono text-[13px]">{backup.name}</span>{Number.isFinite(backup.collectionCount) && <span className={`mt-1 block text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{backup.collectionCount} collections · {backup.documentCount || 0} records · {backup.trigger || "Manual"}</span>}</td>
+                            <td className={`px-4 py-3 ${darkMode ? "text-slate-200" : "text-slate-900"}`}>
+                              <span className="block break-all font-mono text-[13px]">{backup.name}</span>
+                              <span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-medium ${["Scheduled", "System"].includes(backup.trigger) ? darkMode ? "border-emerald-800 bg-emerald-950/60 text-emerald-300" : "border-emerald-200 bg-emerald-50 text-emerald-800" : darkMode ? "border-blue-800 bg-blue-950/60 text-blue-300" : "border-blue-200 bg-blue-50 text-blue-800"}`}>
+                                {["Scheduled", "System"].includes(backup.trigger) ? "Automatic Backup" : "Manual Backup"}
+                              </span>
+                              {Number.isFinite(backup.collectionCount) && <span className={`mt-1 block text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{backup.collectionCount} collections · {backup.documentCount || 0} records</span>}
+                            </td>
                             <td className={`px-4 py-3 text-sm ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{formatBackupDateShort(backup.date)}</td>
                             <td className={`px-4 py-3 text-sm tabular-nums ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{formatBackupTime(backup.date)}</td>
                             <td className="px-4 py-3">
@@ -638,6 +864,9 @@ function Settings() {
                           <div className="min-w-0">
                             <p className={`break-all font-mono text-xs font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{backup.name}</p>
                             <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{formatBackupDateShort(backup.date)} · {formatBackupTime(backup.date)}</p>
+                            <span className={`mt-1 inline-flex rounded-full border px-2 py-0.5 text-[10px] font-medium ${["Scheduled", "System"].includes(backup.trigger) ? darkMode ? "border-emerald-800 bg-emerald-950/60 text-emerald-300" : "border-emerald-200 bg-emerald-50 text-emerald-800" : darkMode ? "border-blue-800 bg-blue-950/60 text-blue-300" : "border-blue-200 bg-blue-50 text-blue-800"}`}>
+                              {["Scheduled", "System"].includes(backup.trigger) ? "Automatic Backup" : "Manual Backup"}
+                            </span>
                             {Number.isFinite(backup.collectionCount) && <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{backup.collectionCount} collections · {backup.documentCount || 0} records · {backup.trigger || "Manual"}{backup.verified === true ? " · SHA-256 verified" : ""}</p>}
                           </div>
                           <span className={`shrink-0 rounded-full px-2 py-1 text-[10px] font-medium ${darkMode ? "bg-green-950/50 text-green-300" : "bg-green-500/10 text-green-700"}`}>{backup.status}</span>
@@ -955,6 +1184,7 @@ function Settings() {
   const persistBackupState = async (nextState) => {
     const payload = {
       backup_schedule: nextState.selectedSchedule || "weekly",
+      backup_schedule_time: nextState.scheduleTime || "00:00",
       backup_status: nextState.status || "Success",
       last_backup_at: nextState.lastBackupAt || null,
       backup_history: Array.isArray(nextState.backups) ? nextState.backups : [],
@@ -964,6 +1194,7 @@ function Settings() {
     if (response?.backup_history) {
       setBackupState((current) => ({
         selectedSchedule: response.backup_schedule || nextState.selectedSchedule || "weekly",
+        scheduleTime: response.backup_schedule_time || nextState.scheduleTime || "00:00",
         status: response.backup_status || nextState.status || "Success",
         lastBackupAt: response.last_backup_at || nextState.lastBackupAt || null,
         nextBackupAt: response.next_backup_at || current.nextBackupAt || null,
@@ -985,6 +1216,17 @@ function Settings() {
     }
   };
 
+  const handleScheduleTimeSave = async () => {
+    if (!scheduleTimeDraft) return;
+    try {
+      await persistBackupState({ ...backupState, scheduleTime: scheduleTimeDraft });
+      setShowScheduleTimeModal(false);
+      toast.success("Backup time updated.");
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to update backup time.");
+    }
+  };
+
   const handleSaveBackupRecoveryPassword = async (event) => {
     event.preventDefault();
     if (savingRecoveryPassword) return;
@@ -999,20 +1241,51 @@ function Settings() {
 
     setSavingRecoveryPassword(true);
     try {
-      await setBackupRecoveryPassword({
-        current_password: backupRecoveryConfigured ? recoveryPassword : undefined,
-        new_password: newRecoveryPassword,
-      });
+      if (recoveryPasswordResetMode) {
+        await resetBackupRecoveryPassword({ code: recoveryPasswordResetCode, new_password: newRecoveryPassword });
+      } else {
+        await setBackupRecoveryPassword({
+          current_password: backupRecoveryConfigured ? recoveryPassword : undefined,
+          new_password: newRecoveryPassword,
+        });
+      }
       setBackupRecoveryConfigured(true);
       setRecoveryPassword(newRecoveryPassword);
       setNewRecoveryPassword("");
       setConfirmRecoveryPassword("");
-      toast.success("Backup recovery password saved.");
+      setRecoveryPasswordResetCode("");
+      setRecoveryPasswordResetMode(false);
+      toast.success(recoveryPasswordResetMode ? "Backup recovery password reset." : "Backup recovery password saved.");
     } catch (error) {
       toast.error(error?.data?.message || error?.message || "Unable to save the recovery password.");
     } finally {
       setSavingRecoveryPassword(false);
     }
+  };
+
+  const handleRequestRecoveryPasswordCode = async () => {
+    if (requestingRecoveryPasswordCode || savingRecoveryPassword) return;
+    setRequestingRecoveryPasswordCode(true);
+    try {
+      const response = await requestBackupRecoveryPasswordReset();
+      setRecoveryPasswordResetMode(true);
+      setRecoveryPasswordResetCode("");
+      setRecoveryPassword("");
+      setNewRecoveryPassword("");
+      setConfirmRecoveryPassword("");
+      toast.success(response?.message || "A verification code was sent to your administrator email.");
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to send a recovery password code.");
+    } finally {
+      setRequestingRecoveryPasswordCode(false);
+    }
+  };
+
+  const cancelRecoveryPasswordReset = () => {
+    setRecoveryPasswordResetMode(false);
+    setRecoveryPasswordResetCode("");
+    setNewRecoveryPassword("");
+    setConfirmRecoveryPassword("");
   };
 
   const recoveryPasswordsMatch = newRecoveryPassword.length > 0 && newRecoveryPassword === confirmRecoveryPassword;
@@ -1168,6 +1441,8 @@ function Settings() {
       const response = await restoreSystemBackup(backup.id, restoreRecoveryPassword);
       setBackupState({
         selectedSchedule: response.backup_schedule || backupState.selectedSchedule,
+        scheduleTime: backupState.scheduleTime || "00:00",
+        nextBackupAt: backupState.nextBackupAt,
         status: response.backup_status || "Restored",
         lastBackupAt: response.last_backup_at || backup.date,
         backups: Array.isArray(response.backup_history) ? response.backup_history : backupState.backups,
@@ -1199,6 +1474,8 @@ function Settings() {
       const response = await deleteSystemBackup(backup.id);
       setBackupState({
         selectedSchedule: response.backup_schedule || backupState.selectedSchedule,
+        scheduleTime: backupState.scheduleTime || "00:00",
+        nextBackupAt: backupState.nextBackupAt,
         status: response.backup_status || "Success",
         lastBackupAt: response.last_backup_at || null,
         backups: Array.isArray(response.backup_history) ? response.backup_history : [],
@@ -1216,12 +1493,14 @@ function Settings() {
     <div className={`admin-settings settings-premium flex h-dvh min-h-dvh overflow-hidden ${darkMode ? "dark bg-slate-950 text-slate-100" : "bg-[#eef1f3] text-slate-900"}`}>
       <Toaster position="bottom-right" />
       <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen((open) => !open)} />
-      <div className="flex min-h-0 flex-1 flex-col">
+      <div className="flex min-h-0 min-w-0 flex-1 flex-col">
         <Navbar />
-        <main className="min-w-0 flex-1 min-h-0 overflow-x-hidden overflow-y-auto overscroll-y-contain p-4 sm:p-6 lg:p-8">
+        <main className="min-w-0 flex-1 min-h-0 touch-pan-y overflow-x-hidden overflow-y-auto overscroll-y-contain p-4 !pr-6 !pb-[calc(10rem+env(safe-area-inset-bottom))] sm:p-6 sm:!pr-6 sm:!pb-[calc(10rem+env(safe-area-inset-bottom))] lg:p-8 lg:!pr-8 lg:!pb-24">
           <AdminPageHeader
             title="System Settings"
             description="Manage customer access, permissions, and account availability."
+            statsClassName="grid-cols-1 min-[600px]:grid-cols-3 gap-2 sm:gap-3"
+            mobileCompact
             stats={[
               { label: "Users", value: counts.all },
               { label: "Active", value: counts.active, color: "text-emerald-300" },
@@ -1230,7 +1509,7 @@ function Settings() {
           />
 
           <section className="mt-6 min-w-0 max-w-full overflow-hidden">
-            <div role="tablist" aria-label="Settings tabs" className="inline-flex max-w-full gap-1 overflow-x-auto rounded-2xl border border-border bg-muted/50 p-1.5 dark:border-slate-700 dark:bg-slate-900">
+            <div role="tablist" aria-label="Settings tabs" className="grid w-full min-w-0 grid-cols-3 gap-1 rounded-2xl border border-border bg-muted/50 p-1.5 dark:border-slate-700 dark:bg-slate-900 sm:inline-flex sm:max-w-full sm:flex-nowrap sm:overflow-x-auto sm:w-auto">
               {settingsTabs.map((tab) => (
                 <button
                   key={tab.key}
@@ -1238,7 +1517,7 @@ function Settings() {
                   role="tab"
                   aria-selected={activeSettingsTab === tab.key}
                   onClick={() => setActiveSettingsTab(tab.key)}
-                  className={cn("relative inline-flex h-10 shrink-0 items-center justify-center whitespace-nowrap rounded-[11px] border border-transparent px-5 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none", activeSettingsTab === tab.key ? "text-brand dark:text-brand-dark-text" : "text-secondary-foreground hover:bg-background/80 hover:text-foreground dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100")}
+                  className={cn("relative inline-flex h-auto min-h-10 min-w-0 items-center justify-center whitespace-normal rounded-[11px] border border-transparent px-1 py-2 text-[10px] font-medium leading-tight transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-background motion-reduce:transition-none sm:h-10 sm:shrink-0 sm:whitespace-nowrap sm:px-5 sm:text-sm", activeSettingsTab === tab.key ? "text-brand dark:text-brand-dark-text" : "text-secondary-foreground hover:bg-background/80 hover:text-foreground dark:text-slate-400 dark:hover:bg-slate-800 dark:hover:text-slate-100")}
                 >
                   {activeSettingsTab === tab.key && <motion.span layoutId="settings-tab-indicator" aria-hidden="true" initial={false} transition={{ duration: prefersReducedMotion ? 0 : 0.18 }} className="absolute inset-0 rounded-[11px] border border-brand/50 bg-brand/[0.07] dark:border-brand-dark-text/50 dark:bg-brand-dark-fill/10" />}
                   <span className="relative z-10">{tab.label}</span>
@@ -1255,7 +1534,7 @@ function Settings() {
                 <div className="mt-0.5 flex h-10 w-10 items-center justify-center rounded-2xl bg-red-900 text-white shadow-lg shadow-red-950/20"><Settings2 size={17} /></div>
                 <div><p className={`text-[10px] font-black uppercase tracking-[0.2em] ${darkMode ? "text-red-300" : "text-red-700"}`}>Access control</p><h2 className={`mt-1 text-base font-black ${darkMode ? "text-white" : "text-red-950"}`}>Global Customer Permissions</h2><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Saved globally without changing individual account matrices.</p></div>
               </div>
-              <button type="button" onClick={() => setGlobalOpen((open) => !open)} className={`inline-flex items-center gap-2 self-end rounded-full border px-4 py-2 text-xs font-bold transition sm:self-auto ${darkMode ? "border-red-900/70 bg-red-950/50 text-red-200 hover:bg-red-900/60" : "border-red-200 bg-red-100 text-red-900 hover:bg-red-200"}`}>{globalOpen ? "Collapse" : "Manage All"}<ChevronDown size={14} className={`transition-transform ${globalOpen ? "rotate-180" : ""}`} /></button>
+              <button type="button" onClick={() => setGlobalOpen((open) => !open)} className={`inline-flex max-w-full items-center gap-2 self-start rounded-full border px-4 py-2 text-xs font-bold transition sm:self-auto ${darkMode ? "border-red-900/70 bg-red-950/50 text-red-200 hover:bg-red-900/60" : "border-red-200 bg-red-100 text-red-900 hover:bg-red-200"}`}>{globalOpen ? "Collapse" : "Manage All"}<ChevronDown size={14} className={`transition-transform ${globalOpen ? "rotate-180" : ""}`} /></button>
             </div>
             {globalOpen && <>
               <div className={`flex items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-800" : "border-slate-100"}`}><div><p className={`text-[10px] font-black uppercase tracking-[0.18em] ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Global customer access profile</p><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Choose the global profile; each account's matrix remains independent.</p></div><span className={`rounded-full px-3 py-1 text-[10px] font-black uppercase tracking-wide ${darkMode ? "bg-slate-800 text-slate-300" : "bg-slate-100 text-slate-600"}`}>{Object.values(globalPermissions).filter(Boolean).length} enabled</span></div>
@@ -1309,11 +1588,11 @@ function Settings() {
           </div>
 
           <section className={`settings-user-access mt-4 overflow-hidden rounded-[22px] border shadow-[0_18px_45px_-28px_rgba(15,23,42,0.55)] ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
-            {loading ? <div className={`flex items-center justify-center gap-2 p-16 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}><Loader2 size={18} className="animate-spin" /> Loading user access...</div> : displayUsers.length === 0 ? <div className="p-16 text-center"><ShieldCheck size={30} className="mx-auto text-slate-300" /><p className={`mt-3 text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-600"}`}>No users found</p><p className="mt-1 text-xs text-slate-400">Try another search or permission group.</p></div> : <div className="overflow-x-auto"><table className="min-w-[1180px] w-full border-collapse text-left"><thead className={darkMode ? "bg-slate-800/80" : "bg-slate-50"}><tr className={`border-b ${darkMode ? "border-slate-700" : "border-slate-200"}`}><th className={`sticky left-0 z-10 w-[280px] px-5 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-50 text-slate-500"}`}>User</th><th className={`w-[200px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Role</th><th className={`w-[240px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Module Access</th><th className={`w-[190px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Actions</th></tr></thead><tbody className={`divide-y ${darkMode ? "divide-slate-800" : "divide-slate-100"}`}>{displayUsers.map((account) => { const accountId = account._id || account.id; const permissions = getPermissions(account); const accountActive = account.is_active !== false; const accountIsAdmin = account.role === "admin" || account.role === "super_admin"; const isStaff = account.role === "skilled_worker"; const staffAccess = isStaff ? normalizeStaffAccess(account.staff_access) : null; const effectivePermissions = accountIsAdmin ? Object.fromEntries(PERMISSIONS.map(({ key }) => [key, true])) : permissions; const enabledStaffModules = isStaff ? STAFF_MODULES.filter(({ key }) => staffAccess.modules[key].enabled).length : 0; const moduleCount = isStaff || accountIsAdmin ? STAFF_MODULES.length : 6; const enabledModuleCount = accountIsAdmin ? moduleCount : isStaff ? enabledStaffModules : Math.min(5, Object.values(effectivePermissions).filter(Boolean).length); const moduleAccessLabel = accountIsAdmin ? "Full Module Access" : isStaff ? `${enabledStaffModules} of ${STAFF_MODULES.length} staff modules` : getModuleAccessLabel(effectivePermissions); const actionClasses = accountIsAdmin ? (darkMode ? "border-emerald-800 bg-emerald-950/70 text-emerald-200" : "border-emerald-200 bg-emerald-50 text-emerald-700") : (darkMode ? "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100"); const avatarLetters = `${(account.first_name || account.email || "U").charAt(0)}${(account.last_name || account.email || "U").charAt(0)}`.toUpperCase(); const name = `${account.first_name || ""} ${account.last_name || ""}`.trim() || "User"; return <tr key={accountId} className={`transition ${darkMode ? "hover:bg-slate-800/50" : "hover:bg-slate-50"}`}><td className={`sticky left-0 z-10 px-5 py-4 ${darkMode ? "bg-slate-900" : "bg-white"}`}><div className="flex min-w-[245px] items-center gap-3"><span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-red-700 to-amber-600 text-[10px] font-black text-white shadow-sm ${darkMode ? "ring-1 ring-white/10" : ""}`}>{avatarLetters}</span><div className="min-w-0"><div className="truncate text-[15px] font-semibold text-slate-900 dark:text-slate-200">{name}</div><div className="truncate text-xs text-slate-500">{account.email}</div></div></div></td><td className="px-3 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.08em] ${getRoleBadgeClasses(account.role)}`}>{accountActive ? roleLabel(account.role) : "Disabled"}</span></td><td className="px-3 py-4"><div className="flex items-center gap-2"><span className="inline-flex items-center gap-1">{Array.from({ length: moduleCount }).map((_, dotIndex) => (<span key={dotIndex} className={`h-2.5 w-2.5 rounded-full ${dotIndex < enabledModuleCount ? "bg-red-700" : darkMode ? "bg-slate-600" : "bg-slate-300"}`} />))}</span><span className={`text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{moduleAccessLabel}</span></div></td><td className="px-3 py-4"><div className="flex items-center justify-end">{accountIsAdmin ? <span className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold ${actionClasses}`}>✓ Full Access</span> : isStaff ? <button type="button" onClick={() => openStaffAccess(account)} className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold transition ${actionClasses}`} aria-label={`Manage access for ${name}`}>Manage Access</button> : canManageAccess ? <button type="button" onClick={() => openPermissionMatrix(account)} className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold transition ${actionClasses}`} aria-label={`View permissions for ${name}`}>View Permissions</button> : <span className="px-3 py-2 text-xs text-slate-400">Read Only</span>}</div></td></tr>; })}</tbody></table></div>}
+            {loading ? <div className={`flex items-center justify-center gap-2 p-16 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}><Loader2 size={18} className="animate-spin" /> Loading user access...</div> : displayUsers.length === 0 ? <div className="p-16 text-center"><ShieldCheck size={30} className="mx-auto text-slate-300" /><p className={`mt-3 text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-600"}`}>No users found</p><p className="mt-1 text-xs text-slate-400">Try another search or permission group.</p></div> : <div className="overflow-x-auto"><table className="min-w-[1180px] w-full border-collapse text-left"><thead className={darkMode ? "bg-slate-800/80" : "bg-slate-50"}><tr className={`border-b ${darkMode ? "border-slate-700" : "border-slate-200"}`}><th className={`sticky left-0 z-10 w-[280px] px-5 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-50 text-slate-500"}`}>User</th><th className={`w-[200px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Role</th><th className={`w-[240px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Module Access</th><th className={`w-[190px] px-3 py-4 text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Actions</th></tr></thead><tbody className={`divide-y ${darkMode ? "divide-slate-800" : "divide-slate-100"}`}>{paginatedUsers.map((account) => { const accountId = account._id || account.id; const permissions = getPermissions(account); const accountActive = account.is_active !== false; const accountIsAdmin = account.role === "admin" || account.role === "super_admin"; const isStaff = account.role === "skilled_worker"; const staffAccess = isStaff ? normalizeStaffAccess(account.staff_access) : null; const effectivePermissions = accountIsAdmin ? Object.fromEntries(PERMISSIONS.map(({ key }) => [key, true])) : permissions; const enabledStaffModules = isStaff ? STAFF_MODULES.filter(({ key }) => staffAccess.modules[key].enabled).length : 0; const moduleCount = isStaff || accountIsAdmin ? STAFF_MODULES.length : 6; const enabledModuleCount = accountIsAdmin ? moduleCount : isStaff ? enabledStaffModules : Math.min(5, Object.values(effectivePermissions).filter(Boolean).length); const moduleAccessLabel = accountIsAdmin ? "Full Module Access" : isStaff ? `${enabledStaffModules} of ${STAFF_MODULES.length} staff modules` : getModuleAccessLabel(effectivePermissions); const actionClasses = accountIsAdmin ? (darkMode ? "border-emerald-800 bg-emerald-950/70 text-emerald-200" : "border-emerald-200 bg-emerald-50 text-emerald-700") : (darkMode ? "border-slate-700 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-100"); const avatarLetters = `${(account.first_name || account.email || "U").charAt(0)}${(account.last_name || account.email || "U").charAt(0)}`.toUpperCase(); const name = `${account.first_name || ""} ${account.last_name || ""}`.trim() || "User"; return <tr key={accountId} className={`transition ${darkMode ? "hover:bg-slate-800/50" : "hover:bg-slate-50"}`}><td className={`sticky left-0 z-10 px-5 py-4 ${darkMode ? "bg-slate-900" : "bg-white"}`}><div className="flex min-w-[245px] items-center gap-3"><span className={`inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-gradient-to-br from-red-700 to-amber-600 text-[10px] font-black text-white shadow-sm ${darkMode ? "ring-1 ring-white/10" : ""}`}>{avatarLetters}</span><div className="min-w-0"><div className="truncate text-[15px] font-semibold text-slate-900 dark:text-slate-200">{name}</div><div className="truncate text-xs text-slate-500">{account.email}</div></div></div></td><td className="px-3 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-black uppercase tracking-[0.08em] ${getRoleBadgeClasses(account.role)}`}>{accountActive ? roleLabel(account.role) : "Disabled"}</span></td><td className="px-3 py-4"><div className="flex items-center gap-2"><span className="inline-flex items-center gap-1">{Array.from({ length: moduleCount }).map((_, dotIndex) => (<span key={dotIndex} className={`h-2.5 w-2.5 rounded-full ${dotIndex < enabledModuleCount ? "bg-red-700" : darkMode ? "bg-slate-600" : "bg-slate-300"}`} />))}</span><span className={`text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{moduleAccessLabel}</span></div></td><td className="px-3 py-4"><div className="flex items-center justify-end">{accountIsAdmin ? <span className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold ${actionClasses}`}>✓ Full Access</span> : isStaff ? <button type="button" onClick={() => openStaffAccess(account)} className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold transition ${actionClasses}`} aria-label={`Manage access for ${name}`}>Manage Access</button> : canManageAccess ? <button type="button" onClick={() => openPermissionMatrix(account)} className={`inline-flex min-w-[120px] items-center justify-center rounded-xl border px-3 py-2 text-xs font-semibold transition ${actionClasses}`} aria-label={`View permissions for ${name}`}>View Permissions</button> : <span className="px-3 py-2 text-xs text-slate-400">Read Only</span>}</div></td></tr>; })}</tbody></table></div>}
           </section>
           {!loading && displayUsers.length > 0 && (
             <div className="mt-3 space-y-3 md:hidden">
-              {displayUsers.map((account) => {
+              {paginatedUsers.map((account) => {
                 const accountIsAdmin = account.role === "admin" || account.role === "super_admin";
                 const isStaff = account.role === "skilled_worker";
                 const permissions = getPermissions(account);
@@ -1370,7 +1649,68 @@ function Settings() {
               })}
             </div>
           )}
+          {renderListPagination(displayUsers.length, currentUserManagementPage, userManagementPageCount, setUserManagementPage)}
             </>
+          )}
+
+          {activeSettingsTab === "ordering-restriction" && isAdmin && (
+            <section className={`mt-7 overflow-hidden rounded-[22px] border shadow-[0_18px_45px_-28px_rgba(15,23,42,0.55)] ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`} aria-labelledby="restricted-customers-heading">
+              <header className={`flex flex-wrap items-center justify-between gap-3 border-b px-5 py-4 sm:px-6 ${darkMode ? "border-slate-700 bg-amber-950/20" : "border-amber-200 bg-amber-50/70"}`}>
+                <div>
+                  <h2 id="restricted-customers-heading" className={`text-base font-bold ${darkMode ? "text-amber-200" : "text-amber-950"}`}>Online ordering restrictions</h2>
+                  <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-600"}`}>Review customers under the 7-day cooldown and remove a restriction early when appropriate.</p>
+                </div>
+                <span className={`rounded-full px-3 py-1.5 text-xs font-bold ${darkMode ? "bg-amber-900/60 text-amber-100" : "bg-amber-100 text-amber-900"}`}>{restrictedCustomers.length} restricted</span>
+              </header>
+              <div className={`border-b px-5 py-4 sm:px-6 ${darkMode ? "border-slate-800" : "border-slate-100"}`}>
+                <label htmlFor="ordering-restriction-search" className="sr-only">Search restricted customers</label>
+                <div className="relative w-full sm:max-w-md">
+                  <Search size={16} className="pointer-events-none absolute left-3 top-3 text-slate-400" aria-hidden="true" />
+                  <input
+                    id="ordering-restriction-search"
+                    type="search"
+                    value={restrictionSearch}
+                    onChange={(event) => setRestrictionSearch(event.target.value)}
+                    placeholder="Search by customer name, email, username, or phone..."
+                    className={`w-full rounded-xl border py-2.5 pl-9 pr-3 text-sm outline-none transition focus:border-red-500 focus:ring-2 focus:ring-red-100 ${darkMode ? "border-slate-700 bg-slate-950 text-slate-100 placeholder:text-slate-500" : "border-slate-200 bg-white text-slate-800 placeholder:text-slate-400"}`}
+                  />
+                </div>
+              </div>
+              {filteredRestrictedCustomers.length === 0 ? (
+                <div className="px-5 py-14 text-center">
+                  {restrictedCustomers.length === 0 ? <CircleCheck size={30} className="mx-auto text-emerald-500" aria-hidden="true" /> : <Search size={28} className="mx-auto text-slate-400" aria-hidden="true" />}
+                  <p className={`mt-3 text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{restrictedCustomers.length === 0 ? "No customers are currently restricted" : "No matching restricted customers"}</p>
+                  <p className="mt-1 text-xs text-slate-500">{restrictedCustomers.length === 0 ? "Customers who reach three cancellations will appear here for the duration of their cooldown." : "Try another name, email, username, or phone number."}</p>
+                </div>
+              ) : (
+                <div className={`divide-y ${darkMode ? "divide-slate-800" : "divide-slate-100"}`}>
+                  {paginatedRestrictedCustomers.map((account) => {
+                    const accountId = account._id || account.id;
+                    const customerName = `${account.first_name || "Customer"} ${account.last_name || ""}`.trim();
+                    const cooldownDate = new Date(account.online_order_cooldown_until);
+                    return (
+                      <div key={accountId} className="flex flex-col gap-3 px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
+                        <div className="min-w-0">
+                          <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{customerName}</p>
+                          <p className={`truncate text-xs ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{account.email}</p>
+                          <p className={`mt-1 text-xs font-medium ${darkMode ? "text-amber-200" : "text-amber-800"}`}>Restricted until {cooldownDate.toLocaleDateString("en-PH", { timeZone: "Asia/Manila", year: "numeric", month: "short", day: "numeric" })}</p>
+                        </div>
+                        <button
+                          type="button"
+                          onClick={() => setRestrictionConfirmation(account)}
+                          disabled={savingId === accountId}
+                          className="inline-flex shrink-0 items-center justify-center gap-2 rounded-lg bg-red-700 px-3.5 py-2 text-xs font-bold text-white transition hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 disabled:cursor-wait disabled:opacity-60"
+                        >
+                          {savingId === accountId ? <Loader2 size={14} className="animate-spin" /> : <RotateCcw size={14} aria-hidden="true" />}
+                          Remove restriction
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+              {renderListPagination(filteredRestrictedCustomers.length, currentOrderingRestrictionPage, orderingRestrictionPageCount, setOrderingRestrictionPage)}
+            </section>
           )}
 
           {renderBackupRecovery(backupMetrics)}
@@ -1421,6 +1761,12 @@ function Settings() {
                   </div>
                 </section>
                 <section className="px-5 py-4">
+                  <div className={`access-control-row flex min-h-[76px] items-center justify-between gap-3 rounded-md border px-3.5 py-3 ${staffDraft.hide_payment_amounts ? (darkMode ? "border-red-900/70 bg-red-950/30" : "border-red-200 bg-red-50") : (darkMode ? "border-slate-700 bg-slate-800/50" : "border-slate-200 bg-slate-50")}`}>
+                    <div className="min-w-0"><p className={`text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-800"}`}>Hide payment amounts</p><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Mask money values in staff payment and order views. Payment status remains visible.</p></div>
+                    <button type="button" role="switch" aria-label="Hide payment amounts" aria-checked={staffDraft.hide_payment_amounts} disabled={!isAdmin || isOwnStaffAccount} onClick={() => setStaffDraft((current) => ({ ...current, hide_payment_amounts: !current.hide_payment_amounts }))} className={`relative h-6 w-11 shrink-0 rounded-full transition disabled:cursor-not-allowed disabled:opacity-60 ${staffDraft.hide_payment_amounts ? "bg-red-900" : darkMode ? "bg-slate-600" : "bg-slate-300"}`}><span className={`absolute top-1 h-4 w-4 rounded-full bg-white shadow transition ${staffDraft.hide_payment_amounts ? "left-[22px]" : "left-1"}`} /></button>
+                  </div>
+                </section>
+                <section className="px-5 py-4">
                   <h3 className={`text-[10px] font-black uppercase tracking-wider ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Module System Permissions</h3>
                   <p className={`mb-3 mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Enable modules and configure their individual actions.</p>
                   <div className="space-y-2">
@@ -1445,6 +1791,40 @@ function Settings() {
                 {(isAdmin || canManageAccess) && !isOwnStaffAccount && <button type="button" onClick={convertStaffToCustomer} disabled={savingId === (staffAccount._id || staffAccount.id)} className={`rounded-md border px-3 py-2 text-xs font-semibold transition disabled:opacity-50 ${darkMode ? "border-red-500 bg-red-700 text-white hover:bg-red-600" : "border-red-200 text-red-700 hover:bg-red-50"}`}>↓ Convert to Customer</button>}
                 <div className="flex justify-end gap-2"><button type="button" onClick={() => { setStaffAccount(null); setStaffDraft(null); }} className={`rounded-md border px-4 py-2 text-sm ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-white"}`}>Close</button>{isAdmin && !isOwnStaffAccount && <button type="button" onClick={saveStaffAccess} disabled={savingId === (staffAccount._id || staffAccount.id)} className="inline-flex min-w-28 items-center justify-center gap-2 rounded-md bg-red-950 px-4 py-2 text-sm font-semibold text-white hover:bg-red-900 disabled:opacity-60">{savingId === (staffAccount._id || staffAccount.id) ? <Loader2 size={14} className="animate-spin" /> : null}Save Settings</button>}</div>
               </footer>
+            </section>
+          </div>}
+          {restrictionConfirmation && <div
+            className="fixed inset-0 z-[115] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
+            onMouseDown={(event) => {
+              const confirmationId = restrictionConfirmation._id || restrictionConfirmation.id;
+              if (event.target === event.currentTarget && savingId !== confirmationId) setRestrictionConfirmation(null);
+            }}
+          >
+            <section role="alertdialog" aria-modal="true" aria-labelledby="remove-restriction-title" aria-describedby="remove-restriction-description" className={`w-full max-w-md rounded-2xl border p-6 shadow-2xl ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+              <div className={`flex size-11 items-center justify-center rounded-xl ${darkMode ? "bg-amber-950/60 text-amber-300" : "bg-amber-100 text-amber-800"}`}>
+                <RotateCcw size={20} aria-hidden="true" />
+              </div>
+              <h2 id="remove-restriction-title" className={`mt-4 text-lg font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>Remove online ordering restriction?</h2>
+              <p id="remove-restriction-description" className={`mt-2 text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
+                Remove the 7-day restriction for {`${restrictionConfirmation.first_name || "this customer"} ${restrictionConfirmation.last_name || ""}`.trim()}? They will be able to place orders online immediately. Their cancellation history will remain unchanged.
+              </p>
+              <div className="mt-6 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                <button
+                  type="button"
+                  onClick={() => setRestrictionConfirmation(null)}
+                  disabled={savingId === (restrictionConfirmation._id || restrictionConfirmation.id)}
+                  className={`rounded-lg border px-4 py-2.5 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}
+                >Cancel</button>
+                <button
+                  type="button"
+                  onClick={() => handleUnrestrictCustomer(restrictionConfirmation)}
+                  disabled={savingId === (restrictionConfirmation._id || restrictionConfirmation.id)}
+                  className="inline-flex items-center justify-center gap-2 rounded-lg bg-red-700 px-4 py-2.5 text-sm font-bold text-white transition hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {savingId === (restrictionConfirmation._id || restrictionConfirmation.id) && <Loader2 size={15} className="animate-spin" />}
+                  Remove restriction
+                </button>
+              </div>
             </section>
           </div>}
           {showUpgradeConfirm && permissionAccount && <div className="fixed inset-0 z-[110] flex items-center justify-center bg-slate-950/45 p-4 backdrop-blur-sm">
@@ -1562,6 +1942,26 @@ function Settings() {
                   {deletingBackup && <Loader2 aria-hidden="true" className="size-4 animate-spin" />}
                   {deletingBackup ? "Deleting..." : "Delete Backup"}
                 </button>
+              </footer>
+            </section>
+          </div>}
+          {showScheduleTimeModal && <div
+            className="fixed inset-0 z-[140] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
+            onMouseDown={(event) => {
+              if (event.target === event.currentTarget) setShowScheduleTimeModal(false);
+            }}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") setShowScheduleTimeModal(false);
+            }}
+          >
+            <section role="dialog" aria-modal="true" aria-labelledby="backup-time-title" className={`w-full max-w-sm rounded-xl border p-6 shadow-2xl ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+              <h2 id="backup-time-title" className={`text-lg font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>Scheduled backup time</h2>
+              <p className={`mt-1 text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Choose a time in Asia/Manila.</p>
+              <label htmlFor="backup-schedule-time" className={`mt-5 block text-sm font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Time</label>
+              <input id="backup-schedule-time" type="time" autoFocus value={scheduleTimeDraft} onChange={(event) => setScheduleTimeDraft(event.target.value)} className={`mt-1.5 h-11 w-full rounded-lg border px-3 text-base outline-none focus-visible:ring-2 focus-visible:ring-brand ${darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`} />
+              <footer className={`mt-6 flex flex-col-reverse gap-2 border-t pt-4 sm:flex-row sm:justify-end ${darkMode ? "border-slate-800" : "border-slate-100"}`}>
+                <button type="button" onClick={() => setShowScheduleTimeModal(false)} className={`rounded-md border px-4 py-2.5 text-sm font-medium ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}>Cancel</button>
+                <button type="button" onClick={handleScheduleTimeSave} className="rounded-md bg-brand px-4 py-2.5 text-sm font-semibold text-white transition hover:opacity-90">Save time</button>
               </footer>
             </section>
           </div>}

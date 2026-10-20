@@ -120,10 +120,10 @@ export const deleteOrderReview = (orderId, itemIndex) =>
     method: "DELETE",
   });
 
-export const cancelCustomerOrder = (orderId) =>
+export const cancelCustomerOrder = (orderId, payload = {}) =>
   apiFetch(`/orders/${orderId}/cancel`, {
     method: "PUT",
-    body: JSON.stringify({}),
+    body: JSON.stringify(payload),
   });
 
 export const sendWalkInApprovalEmail = (orderId, payload = {}) =>

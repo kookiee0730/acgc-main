@@ -477,6 +477,21 @@ const OrderSchema = new mongoose.Schema(
       ],
       default: "order_submitted",
     },
+    cancellation_reason: {
+      type: String,
+      trim: true,
+      default: "",
+    },
+    customer_cancellation_count_at_cancel: {
+      type: Number,
+      min: 0,
+      default: null,
+    },
+    is_rush_order: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
     order_type: {
       type: String,
       enum: ["online_order", "walk_in_customer"],
@@ -744,6 +759,23 @@ const OrderSchema = new mongoose.Schema(
             acceptedAt: { type: Date, default: null },
             acceptanceMethod: { type: String, trim: true, default: "" },
             snapshot: { type: Object, default: {} },
+          },
+          { _id: false }
+        )
+      ],
+      default: [],
+    },
+    price_change_history: {
+      type: [
+        new mongoose.Schema(
+          {
+            changed_at: { type: Date, default: Date.now },
+            changed_by: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
+            changed_by_name: { type: String, trim: true, default: "" },
+            reason: { type: String, trim: true, default: "" },
+            previous_total: { type: Number, min: 0, default: 0 },
+            new_total: { type: Number, min: 0, default: 0 },
+            optional_charge_changes: { type: [mongoose.Schema.Types.Mixed], default: [] },
           },
           { _id: false }
         )
