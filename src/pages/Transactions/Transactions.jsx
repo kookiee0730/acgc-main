@@ -5,6 +5,8 @@ import {
   FileDown,
   CheckCircle,
   Eye,
+  BookSearch,
+  EyeClosed,
   Pencil,
   Lock,
   Star,
@@ -27,7 +29,7 @@ import Navbar from "../../components/layout/Navbar";
 import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import ContractModal from "../../components/ContractModal";
 import TransactionDetailsModal from "../../components/TransactionDetailsModal";
-import { getAdminOrders, acceptContract, declineContract, updateOrderStatus, deleteOrderReview, downloadTransactionReport } from "@/api/orders";
+import { getAdminOrders, acceptContract, declineContract, updateOrderStatus, deleteOrderReview, setOrderReviewVisibility, downloadTransactionReport } from "@/api/orders";
 import { formatDateToMMDDYYYY, formatDateTimeToMMDDYYYY, formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { useAuth } from "@/contexts/AuthContext";
 import { recordActivity } from "@/lib/activityLog";
@@ -57,6 +59,7 @@ function Transactions() {
   const hidePaymentAmounts = user?.role === "skilled_worker" && user?.staff_access?.hide_payment_amounts === true;
   const { darkMode } = useAdminTheme();
   const canGenerateTransactionReport = ["admin", "super_admin"].includes(user?.role);
+  const canManageFeedbackVisibility = ["admin", "super_admin"].includes(user?.role);
   const navigate = useNavigate();
   const [isSidebarOpen, setIsSidebarOpen] =
     useState(() => {
@@ -124,6 +127,8 @@ function Transactions() {
   const [feedbackPreviewOrder, setFeedbackPreviewOrder] = useState(null);
   const [feedbackDeleteOrder, setFeedbackDeleteOrder] = useState(null);
   const [feedbackDeleting, setFeedbackDeleting] = useState(false);
+  const [feedbackVisibilityUpdating, setFeedbackVisibilityUpdating] = useState(false);
+  const [selectedFeedbackKeys, setSelectedFeedbackKeys] = useState(() => new Set());
   const [showContractModal, setShowContractModal] = useState(false);
   const [showFullContractModal, setShowFullContractModal] = useState(false);
   const [contractPreviewOrder, setContractPreviewOrder] = useState(null);
@@ -560,6 +565,35 @@ function Transactions() {
       toast.error(error?.data?.message || error?.message || "Unable to delete customer feedback.");
     } finally {
       setFeedbackDeleting(false);
+    }
+  };
+
+  const handleToggleFeedbackVisibility = async (feedback) => {
+    const orderId = feedback?._id || feedback?.id;
+    if (!orderId || feedbackVisibilityUpdating) return;
+    const hiddenFromCustomers = feedback.review?.hiddenFromCustomers !== true;
+    setFeedbackVisibilityUpdating(true);
+    try {
+      const response = await setOrderReviewVisibility(orderId, {
+        itemIndex: feedback.reviewItemIndex,
+        hiddenFromCustomers,
+      });
+      setOrders((previous) => previous.map((order) => {
+        if (String(order._id || order.id) !== String(orderId)) return order;
+        if (response.order) return response.order;
+        if (Number.isInteger(feedback.reviewItemIndex)) {
+          return { ...order, items: order.items.map((item, index) => index === feedback.reviewItemIndex
+            ? { ...item, review: { ...item.review, hiddenFromCustomers } }
+            : item) };
+        }
+        return { ...order, review: { ...order.review, hiddenFromCustomers } };
+      }));
+      recordActivity(user, `${hiddenFromCustomers ? "Hid" : "Restored"} customer feedback for ${feedback.reviewProductName || "order"} ${feedback.tracking || orderId} ${hiddenFromCustomers ? "from" : "for"} customers.`, "Transactions");
+      toast.success(hiddenFromCustomers ? "Review hidden from all customers." : "Review is visible to customers again.");
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to update review visibility.");
+    } finally {
+      setFeedbackVisibilityUpdating(false);
     }
   };
 
@@ -1260,6 +1294,55 @@ function Transactions() {
     const comment = (order.review?.comment || "").toLowerCase();
     return [customer, products, tracking, title, comment].some((value) => value.includes(query));
   });
+  const feedbackSelectionKey = (feedback) => `${String(feedback._id || feedback.id)}:${Number.isInteger(feedback.reviewItemIndex) ? feedback.reviewItemIndex : "order"}`;
+  const selectableFeedbackOrders = filteredFeedbackOrders.filter((feedback) => feedback.review?.hiddenFromCustomers !== true);
+  const selectedFeedbackOrders = feedbackOrders.filter((feedback) => selectedFeedbackKeys.has(feedbackSelectionKey(feedback)) && feedback.review?.hiddenFromCustomers !== true);
+  const allVisibleFeedbackSelected = selectableFeedbackOrders.length > 0 && selectableFeedbackOrders.every((feedback) => selectedFeedbackKeys.has(feedbackSelectionKey(feedback)));
+  const toggleFeedbackSelection = (feedback, selected) => {
+    const key = feedbackSelectionKey(feedback);
+    setSelectedFeedbackKeys((current) => {
+      const next = new Set(current);
+      if (selected) next.add(key);
+      else next.delete(key);
+      return next;
+    });
+  };
+  const toggleAllVisibleFeedback = (selected) => {
+    setSelectedFeedbackKeys((current) => {
+      const next = new Set(current);
+      selectableFeedbackOrders.forEach((feedback) => {
+        const key = feedbackSelectionKey(feedback);
+        if (selected) next.add(key);
+        else next.delete(key);
+      });
+      return next;
+    });
+  };
+  const handleHideSelectedFeedback = async () => {
+    if (!selectedFeedbackOrders.length || feedbackVisibilityUpdating) return;
+    setFeedbackVisibilityUpdating(true);
+    const updatedOrders = new Map();
+    let failures = 0;
+    for (const feedback of selectedFeedbackOrders) {
+      try {
+        const response = await setOrderReviewVisibility(feedback._id || feedback.id, {
+          itemIndex: feedback.reviewItemIndex,
+          hiddenFromCustomers: true,
+        });
+        if (response.order) updatedOrders.set(String(response.order._id || response.order.id), response.order);
+      } catch (error) {
+        failures += 1;
+      }
+    }
+    if (updatedOrders.size) {
+      setOrders((current) => current.map((order) => updatedOrders.get(String(order._id || order.id)) || order));
+      recordActivity(user, `Hid ${updatedOrders.size} customer review${updatedOrders.size === 1 ? "" : "s"} from customers.`, "Transactions");
+    }
+    setSelectedFeedbackKeys(new Set());
+    if (updatedOrders.size) toast.success(`${updatedOrders.size} review${updatedOrders.size === 1 ? "" : "s"} hidden from customers.`);
+    if (failures) toast.error(`${failures} selected review${failures === 1 ? "" : "s"} could not be hidden.`);
+    setFeedbackVisibilityUpdating(false);
+  };
   const filteredAllOrders = transactionOrders.filter((o) => {
     if (!tableSearch) return true;
     const q = tableSearch.toLowerCase();
@@ -2086,16 +2169,29 @@ function Transactions() {
               }}
               className={`w-full rounded-lg border px-3 py-2 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/10 sm:max-w-sm ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100 placeholder:text-slate-500" : "border-slate-200 bg-white text-slate-900 placeholder:text-slate-400"}`}
             />
-            {canGenerateTransactionReport && (
-              <button
-                type="button"
-                onClick={() => setShowGenerateReportModal(true)}
-                className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-red-800 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
-              >
-                <FileDown size={17} aria-hidden="true" />
-                Generate Report
-              </button>
-            )}
+            <div className="flex flex-wrap items-center gap-3">
+              {canManageFeedbackVisibility && activeTable === "feedback" && selectedFeedbackOrders.length > 0 && (
+                <button
+                  type="button"
+                  onClick={handleHideSelectedFeedback}
+                  disabled={feedbackVisibilityUpdating}
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-amber-600 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-amber-700 disabled:cursor-wait disabled:opacity-60"
+                >
+                  <EyeClosed size={16} aria-hidden="true" />
+                  {feedbackVisibilityUpdating ? "Hiding reviews..." : `Hide selected (${selectedFeedbackOrders.length})`}
+                </button>
+              )}
+              {canGenerateTransactionReport && (
+                <button
+                  type="button"
+                  onClick={() => setShowGenerateReportModal(true)}
+                  className="inline-flex min-h-10 items-center justify-center gap-2 rounded-xl bg-red-800 px-4 py-2.5 text-sm font-semibold text-white shadow-sm transition hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2"
+                >
+                  <FileDown size={17} aria-hidden="true" />
+                  Generate Report
+                </button>
+              )}
+            </div>
           </div>
 
           <div className="bg-white rounded-3xl shadow mt-6 overflow-hidden">
@@ -2105,7 +2201,7 @@ function Transactions() {
                   <thead className="bg-gray-50">
                     {activeTable === "feedback" ? (
                       <tr>
-                        <th className="p-4 text-left">Customer</th>
+                        <th className="p-4 text-left"><div className="flex items-center gap-2">{canManageFeedbackVisibility && <input type="checkbox" aria-label="Select all visible reviews" checked={allVisibleFeedbackSelected} disabled={selectableFeedbackOrders.length === 0} onChange={(event) => toggleAllVisibleFeedback(event.target.checked)} className="h-4 w-4 accent-red-700" />}<span>Customer</span></div></th>
                         <th className="p-4 text-left">Product / Order</th>
                         <th className="p-4 text-left">Rating</th>
                         <th className="p-4 text-left">Photos</th>
@@ -2142,7 +2238,7 @@ function Transactions() {
                         <th className="p-4 text-left">Status</th>
                         <th
                           className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
-                          style={{ width: showTransactionActions ? "190px" : "56px" }}
+                          style={{ width: showTransactionActions ? ("190px") : "56px" }}
                         >
                           <div className="flex items-center justify-center gap-1.5">
                             <span className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "max-w-16 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0"}`}>Actions</span>
@@ -2192,7 +2288,7 @@ function Transactions() {
                         >
                           {activeTable === "feedback" ? (
                             <>
-                              <td className="p-4">{renderClientCell(order, customerName)}</td>
+                              <td className="p-4"><div className="flex items-center gap-3">{canManageFeedbackVisibility && <input type="checkbox" aria-label={`Select review from ${customerName}`} checked={selectedFeedbackKeys.has(feedbackSelectionKey(order))} disabled={order.review?.hiddenFromCustomers === true} onChange={(event) => toggleFeedbackSelection(order, event.target.checked)} className="h-4 w-4 shrink-0 accent-red-700" />}{renderClientCell(order, customerName)}</div></td>
                               <td className="p-4">
                                 <div className="space-y-1">
                                   <div className="font-semibold text-slate-900">{order.reviewProductName || "Order feedback"}</div>
@@ -2223,12 +2319,15 @@ function Transactions() {
                               </td>
                               <td
                                 className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
-                                style={{ width: showTransactionActions ? "160px" : "56px" }}
+                                style={{ width: showTransactionActions ? "204px" : "56px" }}
                               >
-                                <div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "80px" : "0px" }}>
+                                <div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "128px" : "0px" }}>
                                   <button type="button" onClick={() => setFeedbackPreviewOrder(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${darkMode ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`} aria-label={`View feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="View feedback">
-                                    <Eye size={17} aria-hidden="true" />
+                                    <BookSearch size={17} aria-hidden="true" />
                                   </button>
+                                  {canManageFeedbackVisibility && <button type="button" disabled={feedbackVisibilityUpdating} onClick={() => handleToggleFeedbackVisibility(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 ${darkMode ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`} aria-label={`${order.review?.hiddenFromCustomers === true ? "Show" : "Hide"} review from customers`} title={order.review?.hiddenFromCustomers === true ? "Show review to customers" : "Hide review from customers"}>
+                                    {order.review?.hiddenFromCustomers === true ? <Eye size={17} aria-hidden="true" /> : <EyeClosed size={17} aria-hidden="true" />}
+                                  </button>}
                                   <button type="button" onClick={() => setFeedbackDeleteOrder(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "bg-red-500/15 text-red-300 hover:bg-red-500/25" : "bg-red-100 text-red-600 hover:bg-red-200"}`} aria-label={`Delete feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="Delete Customer Feedback">
                                     <Trash2 size={17} aria-hidden="true" />
                                   </button>
@@ -2248,8 +2347,8 @@ function Transactions() {
                               <td className="p-4"><div className="flex flex-col items-start gap-1.5"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${isFullyPaid ? (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700") : (darkMode ? "border border-amber-400/40 bg-amber-500/15 text-amber-300" : "bg-amber-50 text-amber-700")}`}>{statusLabel}</span>{showNeedsConfirmation && (<span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700"}`}><span aria-hidden="true">🔔</span>Needs Confirmation</span>)}</div></td>
                               <td
                                 className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
-                                style={{ width: showTransactionActions ? "190px" : "56px" }}
-                              ><div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "128px" : "0px" }}><button title="View Transaction" onClick={() => openContractModal(order)} className="shrink-0 p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><Eye size={18} /></button>{isFullyPaid ? (<button type="button" title="Fully paid" aria-label="Fully paid. Payment editing is locked." disabled className={`shrink-0 cursor-not-allowed rounded-lg p-2 ${darkMode ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500"}`}><Lock size={18} aria-hidden="true" /></button>) : (<button type="button" title="Add Payment" aria-label="Add Payment" onClick={() => openEditPaymentModal(order)} className="shrink-0 p-2 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"><Pencil size={18} /></button>)}<button type="button" title="View Contract" aria-label="View Contract" onClick={() => openReadOnlyContract(order)} className="shrink-0 p-2 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 transition"><FileText size={18} /></button></div></td>
+                                style={{ width: showTransactionActions ? ("190px") : "56px" }}
+                              ><div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? ("128px") : "0px" }}><button title="View Transaction" onClick={() => openContractModal(order)} className="shrink-0 p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><BookSearch size={18} /></button>{isFullyPaid ? (<button type="button" title="Fully paid" aria-label="Fully paid. Payment editing is locked." disabled className={`shrink-0 cursor-not-allowed rounded-lg p-2 ${darkMode ? "bg-slate-700 text-slate-400" : "bg-slate-100 text-slate-500"}`}><Lock size={18} aria-hidden="true" /></button>) : (<button type="button" title="Add Payment" aria-label="Add Payment" onClick={() => openEditPaymentModal(order)} className="shrink-0 p-2 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"><Pencil size={18} /></button>)}<button type="button" title="View Contract" aria-label="View Contract" onClick={() => openReadOnlyContract(order)} className="shrink-0 p-2 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 transition"><FileText size={18} /></button></div></td>
                             </>
                           )}
                         </tr>
@@ -2269,6 +2368,7 @@ function Transactions() {
                     <article key={feedbackRowKey} className={`rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
                       <div className="flex items-start justify-between gap-3">
                         <div className="min-w-0">
+                          {canManageFeedbackVisibility && <label className="mb-2 flex items-center gap-2 text-xs font-semibold"><input type="checkbox" aria-label={`Select review from ${customerName}`} checked={selectedFeedbackKeys.has(feedbackSelectionKey(order))} disabled={order.review?.hiddenFromCustomers === true} onChange={(event) => toggleFeedbackSelection(order, event.target.checked)} className="h-4 w-4 accent-red-700" />Select review</label>}
                           <p className="truncate text-sm font-semibold">{order.reviewProductName || "Order feedback"}</p>
                           <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{customerName} · {order.tracking || order._id || order.id || "—"}</p>
                         </div>
@@ -2281,10 +2381,14 @@ function Transactions() {
                           ))}
                           <span className="ml-1 text-xs font-semibold">{Number(order.review?.rating || 0)}/5</span>
                         </div>
+                        {order.review?.hiddenFromCustomers === true && <span className="rounded-full bg-amber-100 px-2 py-1 text-[10px] font-bold text-amber-800">Hidden from customers</span>}
                         <div className="flex gap-2">
                           <button type="button" onClick={() => setFeedbackPreviewOrder(order)} aria-label={`View feedback for ${order.reviewProductName || "order"}`} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg ${darkMode ? "bg-blue-500/15 text-blue-300" : "bg-blue-100 text-blue-600"}`}>
-                            <Eye size={17} aria-hidden="true" />
+                            <BookSearch size={17} aria-hidden="true" />
                           </button>
+                          {canManageFeedbackVisibility && <button type="button" disabled={feedbackVisibilityUpdating} onClick={() => handleToggleFeedbackVisibility(order)} aria-label={`${order.review?.hiddenFromCustomers === true ? "Show" : "Hide"} review from customers`} title={order.review?.hiddenFromCustomers === true ? "Show review to customers" : "Hide review from customers"} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg disabled:opacity-50 ${darkMode ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-700"}`}>
+                            {order.review?.hiddenFromCustomers === true ? <Eye size={17} aria-hidden="true" /> : <EyeClosed size={17} aria-hidden="true" />}
+                          </button>}
                           <button type="button" onClick={() => setFeedbackDeleteOrder(order)} aria-label={`Delete feedback for ${order.reviewProductName || "order"}`} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-100 text-red-600"}`}>
                             <Trash2 size={17} aria-hidden="true" />
                           </button>
@@ -2335,7 +2439,7 @@ function Transactions() {
                       </div>
                     )}
                     <div className="mt-3 flex justify-end gap-2">
-                      <button title="View Transaction" onClick={() => openContractModal(order)} className="p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><Eye size={18} /></button>
+                      <button title="View Transaction" onClick={() => openContractModal(order)} className="p-2 rounded-lg bg-blue-100 text-blue-600 hover:bg-blue-200 transition"><BookSearch size={18} /></button>
                       {isFullyPaid ? (
                         <button type="button" title="Fully paid" aria-label="Fully paid. Payment editing is locked." disabled className="cursor-not-allowed rounded-lg bg-slate-100 p-2 text-slate-500">
                           <Lock size={18} aria-hidden="true" />
@@ -2344,6 +2448,7 @@ function Transactions() {
                         <button type="button" title="Add Payment" aria-label="Add Payment" onClick={() => openEditPaymentModal(order)} className="p-2 rounded-lg bg-violet-100 text-violet-700 hover:bg-violet-200 transition"><Pencil size={18} /></button>
                       )}
                       <button type="button" title="View Contract" aria-label="View Contract" onClick={() => openReadOnlyContract(order)} className="p-2 rounded-lg bg-amber-100 text-amber-700 hover:bg-amber-200 transition"><FileText size={18} /></button>
+
                     </div>
                   </div>
                 );

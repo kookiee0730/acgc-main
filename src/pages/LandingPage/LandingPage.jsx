@@ -216,7 +216,6 @@ function LandingPage() {
         setCatalogProducts(activeProducts);
         setFeaturedProducts(activeProducts.slice(0, 3));
         setCatalogLoaded(true);
-        setIsLoadingFeatured(false);
 
         const productReviewData = await Promise.all(
           activeProducts.map(async (product) => {
@@ -252,8 +251,8 @@ function LandingPage() {
           });
           return counts;
         }, { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 });
-        const weightedRatingTotal = [5, 4, 3, 2, 1].reduce(
-          (sum, star) => sum + ratingCounts[star] * star,
+        const weightedRatingTotal = productReviewData.reduce(
+          (sum, entry) => sum + entry.averageRating * entry.ratingsCount,
           0
         );
 
@@ -321,6 +320,9 @@ function LandingPage() {
       customized: false,
     };
   };
+
+  const formatProductDimensionLabel = (value) => String(value ?? "")
+    .replace(/\u00c3(?:\u0097|\u2014)|\u00c3\u0192\u00e2\u20ac\u201d/g, "\u00D7");
 
   const getDefaultCartOptions = (product) => ({
     ...getProductDefaultDimensions(product),
@@ -1297,9 +1299,9 @@ function LandingPage() {
             const image = getProductImage(product);
             const productName = product.product_name || product.name || "Unnamed Product";
             const category = product.product_type || product.category || "General";
-            const dimensions = product.dimensions || product.standard_size || (
+            const dimensions = formatProductDimensionLabel(product.dimensions || product.standard_size || (
               product.width && product.height ? `${product.width} × ${product.height}` : ""
-            );
+            ));
 
             return (
               <article

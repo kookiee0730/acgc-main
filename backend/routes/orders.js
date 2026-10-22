@@ -15,6 +15,7 @@ import {
   generateContract,
   submitOrderReview,
   deleteOrderReview,
+  setOrderReviewVisibility,
   respondToContract,
   cancelCustomerOrder,
   submitCustomerPaymentProof,
@@ -66,6 +67,7 @@ router.get(
   viewAdminPaymentSupportingDocument,
 );
 router.delete("/admin/:orderId/review", authMiddleware, roleMiddleware("admin"), deleteOrderReview);
+router.put("/admin/:orderId/review/visibility", authMiddleware, roleMiddleware(["admin", "super_admin"]), setOrderReviewVisibility);
 router.put("/admin/:orderId/inspection", authMiddleware, roleMiddleware("admin"), updateOrderInspection);
 router.put("/admin/:orderId/progress", authMiddleware, roleMiddleware(["admin", "super_admin", "skilled_worker"]), staffModulePermission("progress_monitoring", "edit"), updateOrderProgress);
 router.post("/admin/:orderId/contract", authMiddleware, roleMiddleware("admin"), generateContract);

@@ -239,6 +239,7 @@ const OrderItemSchema = new mongoose.Schema(
       comment: { type: String, trim: true, default: "" },
       tags: { type: [String], default: [] },
       photos: { type: [String], default: [] },
+      hiddenFromCustomers: { type: Boolean, default: false },
       submittedAt: { type: Date, default: null },
       updatedAt: { type: Date, default: null },
     },
@@ -838,6 +839,10 @@ const OrderSchema = new mongoose.Schema(
       photos: {
         type: [String],
         default: [],
+      },
+      hiddenFromCustomers: {
+        type: Boolean,
+        default: false,
       },
       submittedAt: {
         type: Date,

@@ -19,6 +19,7 @@ import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import { isUntransferredSiteInspection } from "./dashboardOrderUtils";
 import ProfileAvatar from "../../components/ui/ProfileAvatar";
 import TransactionDetailsModal from "../../components/TransactionDetailsModal";
+import { getRepairRequests } from "@/api/repairs";
 
 const formatCurrency = (value) => {
   const amount = Number(value);
@@ -148,6 +149,7 @@ function Dashboard() {
     return stored !== null ? JSON.parse(stored) : true;
   });
   const [orders, setOrders] = useState([]);
+  const [pendingRepairCount, setPendingRepairCount] = useState(0);
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [selectedOrder, setSelectedOrder] = useState(null);
   const [scrollToWarrantyOnOpen, setScrollToWarrantyOnOpen] = useState(false);
@@ -266,6 +268,21 @@ function Dashboard() {
   useEffect(() => {
     localStorage.setItem("sidebarOpen", JSON.stringify(isSidebarOpen));
   }, [isSidebarOpen]);
+
+  useEffect(() => {
+    let active = true;
+    const loadPendingRepairs = async () => {
+      try {
+        const response = await getRepairRequests();
+        if (active) setPendingRepairCount((response.repairs || []).filter((repair) => repair.status === "pending_review").length);
+      } catch (error) {
+        console.error("Failed to load pending repair requests:", error);
+      }
+    };
+    void loadPendingRepairs();
+    const unsubscribe = subscribeToRealtime(["repairs"], loadPendingRepairs);
+    return () => { active = false; unsubscribe(); };
+  }, []);
 
   useEffect(() => {
     let animationFrame;
@@ -642,7 +659,7 @@ function Dashboard() {
 
           {/* Statistics */}
 
-          <div className="grid grid-cols-1 gap-5 mt-6 md:grid-cols-3">
+          <div className="grid grid-cols-1 gap-5 mt-6 md:grid-cols-2 xl:grid-cols-4">
 
             <button
               type="button"
@@ -699,6 +716,16 @@ function Dashboard() {
               <p className="mt-2 text-sm text-red-500 transition group-hover:text-red-700">
                 View inspections →
               </p>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => navigate("/progress-monitor", { state: { statusFilter: "Product Repair" } })}
+              className="group rounded-3xl bg-white p-6 text-left shadow transition duration-200 hover:-translate-y-1 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
+            >
+              <p className="text-gray-500">Pending Repair</p>
+              <h2 className="mt-2 text-4xl font-bold text-gray-900">{pendingRepairCount}</h2>
+              <p className="mt-2 text-sm text-amber-500 transition group-hover:text-amber-700">View repairs →</p>
             </button>
 
           </div>

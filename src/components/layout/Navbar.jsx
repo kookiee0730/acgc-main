@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import logo from "../../assets/images/ACGCLOGO1.png";
-import { Bell, Moon, Sun, ClipboardCheck, CheckCircle2, XCircle, ShoppingCart, CheckCheck, CreditCard, Send, LogOut, X } from "lucide-react";
+import { Bell, Moon, Sun, ClipboardCheck, CheckCircle2, XCircle, ShoppingCart, CheckCheck, CreditCard, Send, LogOut, X, Wrench, UserCog } from "lucide-react";
 import { getAdminOrders } from "@/api/orders";
+import { getRepairRequests } from "@/api/repairs";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { formatDateTimeToMMDDYYYY, formatTimeAgo } from "@/lib/dateUtils";
 import { ADMIN_READ_NOTIFICATIONS_KEY, getAdminNotificationId, getAdminReadNotificationIds, markAdminNotificationRead, markAdminNotificationsRead, sortAdminNotificationsNewestFirst } from "@/lib/notificationState";
@@ -13,13 +14,18 @@ import { getAdminSiteInspectionNotificationMessage } from "@/pages/CustomerDashb
 function Navbar() {
   const { darkMode, toggleDarkMode } = useAdminTheme();
   const { user, logout } = useAuth();
+  const navigate = useNavigate();
+  const canOpenProfile = user?.role !== "skilled_worker" || (
+    user?.staff_access?.modules?.profile?.enabled === true
+    && user?.staff_access?.modules?.profile?.actions?.view === true
+  );
   const [logoutConfirmOpen, setLogoutConfirmOpen] = useState(false);
 
   return (
     <>
-      <header className={`admin-navbar flex items-center justify-between gap-2 px-3 py-2 shadow sm:px-6 sm:py-4 ${darkMode ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}>
+      <header className={`admin-navbar flex w-full min-w-0 items-center justify-between gap-2 pl-3 pr-5 py-2 shadow sm:px-6 sm:py-4 ${darkMode ? "bg-slate-900 text-white" : "bg-white text-slate-900"}`}>
 
-        <div className="flex min-w-0 items-center gap-2 sm:gap-4">
+        <div className="flex min-w-0 flex-1 items-center gap-2 sm:gap-4">
           <div className="flex min-w-0 items-center gap-2 sm:hidden">
             <img src={logo} alt="ACGC Aluminum Services" className="h-9 w-9 shrink-0 object-contain drop-shadow-[0_0_5px_rgba(255,255,255,0.9)]" />
             <div className="min-w-0">
@@ -35,7 +41,7 @@ function Navbar() {
 
         </div>
 
-        <div className="relative flex shrink-0 items-center gap-1.5 sm:gap-3">
+        <div className="relative flex shrink-0 items-center gap-1 sm:gap-3">
           <button
             type="button"
             onClick={toggleDarkMode}
@@ -53,6 +59,15 @@ function Navbar() {
 
           <div className="flex items-center gap-1 sm:gap-2">
             <NotificationMenu />
+            {canOpenProfile && <button
+              type="button"
+              onClick={() => navigate("/profile")}
+              className={`inline-flex h-10 w-10 items-center justify-center rounded-xl border transition sm:hidden ${darkMode ? "border-slate-700 text-slate-200 hover:bg-slate-800" : "border-slate-200 text-slate-700 hover:bg-slate-100"}`}
+              aria-label="Open profile"
+              title="Profile"
+            >
+              <UserCog size={18} aria-hidden="true" />
+            </button>}
             <button
               type="button"
               onClick={() => setLogoutConfirmOpen(true)}
@@ -155,7 +170,7 @@ function NotificationMenu() {
       const showInitialLoading = !adminNotificationCache.initialized;
       if (showInitialLoading) setLoading(true);
       try {
-        const [newOrders, inspections, accepted, declined, sentContracts, paymentSubmissions, cancelledOrders] = await Promise.all([
+        const [newOrders, inspections, accepted, declined, sentContracts, paymentSubmissions, cancelledOrders, repairRequests] = await Promise.all([
           fetchModuleOrders({ status: "order_submitted" }, "dashboard"),
           fetchModuleOrders({ status: "site_inspection" }, "site_inspection"),
           fetchModuleOrders({ contract_status: "accepted" }, "site_inspection"),
@@ -163,6 +178,7 @@ function NotificationMenu() {
           fetchModuleOrders({ contract_status: "sent" }, "site_inspection"),
           fetchModuleOrders({ payment_proof_submitted: "true" }, "transactions"),
           fetchModuleOrders({ status: "cancelled" }, "site_inspection"),
+          user?.role === "skilled_worker" ? Promise.resolve({ repairs: [] }) : getRepairRequests(),
         ]);
         const isLegacyUnscheduledOnlineOrder = (order) => (
           String(order.order_type || "").toLowerCase() === "online_order"
@@ -296,6 +312,36 @@ function NotificationMenu() {
               date: order.payment_proof_submitted_at,
             };
           }),
+          ...(repairRequests.repairs || []).flatMap((repair) => {
+            const titles = {
+              pending_review: "New repair request",
+              admin_approved: "Warranty claim approved",
+              rejected: "Warranty claim rejected",
+              quotation_issued: "Repair quotation issued",
+              customer_accepted: "Customer accepted quotation",
+              payment_proof_submitted: "Repair payment proof submitted",
+              payment_proof_approved: "Repair payment verified",
+              payment_proof_rejected: "Repair payment proof rejected",
+              cancelled: "Repair quotation declined",
+              scheduled: "Repair visit scheduled",
+              in_progress: "Repair work started",
+              completed: "Repair completed",
+            };
+            const history = repair.history?.length ? repair.history : [{ event: repair.status || "pending_review", detail: "Repair request updated.", createdAt: repair.updatedAt || repair.createdAt }];
+            return history.map((entry, index) => ({
+              id: `repair-${repair._id}-${entry.event}-${entry.createdAt ? new Date(entry.createdAt).getTime() : index}-${index}`,
+              recordId: String(repair._id),
+              tracking: repair.orderTracking || "Repair request",
+              title: titles[entry.event] || "Repair request updated",
+              message: entry.detail || `${repair.productName || "Product repair"} status updated to ${String(repair.status || "updated").replaceAll("_", " ")}.`,
+              icon: Wrench,
+              color: entry.event === "completed" || entry.event === "admin_approved" ? "text-emerald-600" : entry.event === "cancelled" || entry.event === "rejected" ? "text-red-600" : "text-amber-600",
+              category: "repairs",
+              path: "/progress-monitor",
+              notificationType: "repair-request",
+              date: entry.createdAt || repair.updatedAt || repair.createdAt,
+            }));
+          }),
         ]
           .sort(sortAdminNotificationsNewestFirst)
           .map((item) => ({ ...item, read: readNotificationIds.has(item.id) }));
@@ -332,7 +378,7 @@ function NotificationMenu() {
     const refreshReadState = (event) => {
       if (event.key === ADMIN_READ_NOTIFICATIONS_KEY) scheduleRefresh();
     };
-    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews"], scheduleRefresh);
+    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews", "repairs"], scheduleRefresh);
     window.addEventListener("focus", refreshWhenVisible);
     document.addEventListener("visibilitychange", refreshWhenVisible);
     window.addEventListener("storage", refreshReadState);
@@ -361,6 +407,7 @@ function NotificationMenu() {
     ["declined", "Declined"],
     ["sent", "Sent"],
     ["payments", "Payments"],
+    ["repairs", "Repairs"],
   ];
 
   const openNotification = (notification) => {
@@ -371,11 +418,14 @@ function NotificationMenu() {
     setOpen(false);
     navigate(notification.path, {
       state: {
+        ...(notification.notificationType === "repair-request" ? { statusFilter: "Product Repair" } : {}),
         ...(notification.notificationType === "cancelled" ? { activeTab: "cancelled" } : {}),
         ...(notification.notificationType === "sent" || notification.category === "sent" ? { openContract: true } : {}),
         notificationHighlight: {
           recordId: notification.recordId,
-          recordType: notification.notificationType === "pending-inspection-order" || notification.notificationType === "cancelled"
+          recordType: notification.notificationType === "repair-request"
+            ? "repair"
+            : notification.notificationType === "pending-inspection-order" || notification.notificationType === "cancelled"
             ? "inspection"
             : notification.category === "payments"
             ? "payment"
@@ -396,9 +446,9 @@ function NotificationMenu() {
 
   return (
     <div className="relative">
-      <button
+        <button
         onClick={() => setOpen((s) => !s)}
-        className={`relative rounded-xl p-2.5 transition ${open || unreadCount > 0 ? (darkMode ? "bg-red-950/60 text-red-300 ring-1 ring-red-400/60" : "bg-red-50 text-red-600 ring-1 ring-red-200") : (darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-gray-100")}`}
+        className={`relative inline-flex h-9 w-9 items-center justify-center rounded-xl transition ${open || unreadCount > 0 ? (darkMode ? "bg-red-950/60 text-red-300 ring-1 ring-red-400/60" : "bg-red-50 text-red-600 ring-1 ring-red-200") : (darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-gray-100")}`}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-label="Notifications"

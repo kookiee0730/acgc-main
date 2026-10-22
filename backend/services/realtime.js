@@ -17,6 +17,7 @@ const getAccountForToken = async (decoded) => {
 
 const realtimeModulesByArea = {
   orders: ["dashboard", "site_inspection", "transactions", "progress_monitoring"],
+  repairs: ["transactions"],
   products: ["product_management"],
   catalog: ["product_management"],
   reviews: ["transactions"],
@@ -47,7 +48,9 @@ export const buildRealtimeEvent = ({ method, url, user }, responseBody = {}, tim
   const [resource = "system", firstSegment = "", secondSegment = ""] = pathname.split("/").filter(Boolean);
   const reviewMutation = resource === "orders" && (firstSegment === "reviews" || pathname.split("/").includes("review"));
   const isSystemSettings = (resource === "auth" || resource === "users") && firstSegment === "system-settings";
-  const area = reviewMutation
+  const area = resource === "repairs"
+    ? "repairs"
+    : reviewMutation
     ? "reviews"
     : isSystemSettings
       ? "settings"
@@ -56,7 +59,7 @@ export const buildRealtimeEvent = ({ method, url, user }, responseBody = {}, tim
         : ["auth", "users"].includes(resource)
           ? "profile"
           : null;
-  const entity = responseBody?.order || responseBody?.product || responseBody?.item || responseBody?.user || null;
+  const entity = responseBody?.order || responseBody?.repair || responseBody?.product || responseBody?.item || responseBody?.user || null;
   const routeRecordId = resource === "orders"
     ? (firstSegment === "admin" ? secondSegment : firstSegment)
     : firstSegment;
@@ -160,7 +163,7 @@ export const realtimeResponseMiddleware = (io) => (req, res, next) => {
         for (const area of affectedAreas) {
           const scopedEvent = { ...publicEvent, area };
           const isSharedData = ["products", "catalog", "reviews", "settings"].includes(area);
-          if (["orders", "products", "catalog", "reviews", "settings"].includes(area)) {
+          if (["orders", "repairs", "products", "catalog", "reviews", "settings"].includes(area)) {
             io.to("admins").emit("realtime:changed", scopedEvent);
           }
           if (req.user.role === "skilled_worker") {

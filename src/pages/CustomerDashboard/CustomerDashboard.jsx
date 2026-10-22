@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+﻿import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 import toast, { Toaster } from "react-hot-toast";
@@ -90,6 +90,8 @@ import { requestEmailChange, resendEmailChangeCode, verifyEmailChangeCode } from
 import { getCart, saveCart } from "@/api/cart";
 import { formatDateToMMMDDYYYY, formatDateTimeToMMMDDYYYY, formatTimeAgo } from "@/lib/dateUtils";
 import { buildDelayNotifications, sortCustomerNotificationsNewestFirst } from "@/lib/delayNotifications";
+import CustomerRepairRequests from "@/components/CustomerRepairRequests";
+import { getCustomerRepairRequests } from "@/api/repairs";
 import {
   getCustomerOrderNotificationMessage,
   getOrderStatusClasses,
@@ -373,6 +375,7 @@ function CustomerDashboard() {
     counts: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 },
   });
   const [orders, setOrders] = useState([]);
+  const [repairRequests, setRepairRequests] = useState([]);
   const [customerPaymentContactPhone, setCustomerPaymentContactPhone] = useState("");
   const onlineOrderCooldownMessage = onlineOrderCooldownActive
     ? `Online ordering is restricted for 7 days, until ${formatDateToMMMDDYYYY(onlineOrderCooldownUntil)}. Please visit our shop or contact us by phone${customerPaymentContactPhone ? `: ${customerPaymentContactPhone}` : ""} to place an order during this period.`
@@ -628,7 +631,7 @@ function CustomerDashboard() {
   const [cancelRequestSubmitting, setCancelRequestSubmitting] = useState(false);
   const [expandedOrderId, setExpandedOrderId] = useState(null);
   const [highlightedOrderId, setHighlightedOrderId] = useState(null);
-  const validOrderFilters = ["all", "order", "review", "completed", "reviewed", "cancel"];
+  const validOrderFilters = ["all", "order", "review", "completed", "reviewed", "repair", "cancel"];
   const [orderFilter, setOrderFilter] = useState(() => {
     const filter = initialDashboardParams.get("orderFilter");
     return validOrderFilters.includes(filter) ? filter : "all";
@@ -830,7 +833,7 @@ function CustomerDashboard() {
       window.clearTimeout(dismissTimer);
     };
   }, [checkoutMessage]);
-  const customerNotificationItems = orders.flatMap((order) => {
+  const customerNotificationItems = [...orders.flatMap((order) => {
     const orderId = order._id || order.id || order.tracking;
     const status = normalizeOrderStatusKey(order?.status);
     const contractStatus = normalizeOrderStatusKey(order?.contract_status);
@@ -1004,7 +1007,72 @@ function CustomerDashboard() {
       }));
 
     return [...notifications, ...installationNotifications, ...buildDelayNotifications(order)];
-  });
+  }), ...repairRequests.flatMap((repair) => {
+    const eventTitles = {
+      pending_review: "Repair request received",
+      admin_approved: "Warranty claim approved",
+      rejected: "Warranty claim rejected",
+      quotation_issued: "Repair quotation ready",
+      customer_accepted: "Quotation accepted",
+      payment_proof_submitted: "Payment proof submitted",
+      payment_proof_approved: "Repair payment verified",
+      payment_proof_rejected: "Payment proof needs correction",
+      cancelled: "Quotation declined",
+      scheduled: "Repair visit scheduled",
+      in_progress: "Repair in progress",
+      completed: "Repair completed",
+    };
+    const eventStatuses = {
+      pending_review: "Pending Review",
+      admin_approved: "Warranty Approved",
+      rejected: "Repair Rejected",
+      quotation_issued: "Quotation Ready",
+      customer_accepted: "Quotation Accepted",
+      payment_proof_submitted: "Payment Review",
+      payment_proof_approved: "Payment Verified",
+      payment_proof_rejected: "Action Needed",
+      cancelled: "Cancelled",
+      scheduled: "Scheduled",
+      in_progress: "In Progress",
+      completed: "Completed",
+    };
+    const productName = repair.productName || "your product";
+    const requestType = repair.workflowType === "warranty" ? "warranty claim" : "paid repair request";
+    const history = repair.history?.length ? repair.history : [{
+      event: "pending_review",
+      createdAt: repair.requestedAt || repair.createdAt,
+    }];
+
+    return history.map((entry, index) => {
+      const eventMessages = {
+        pending_review: `Your ${requestType} for ${productName} was received and is pending review.`,
+        admin_approved: "Your warranty claim was approved. The repair will be provided at no charge.",
+        rejected: `Your warranty repair request for ${productName} was rejected after inspection. ${repair.warranty?.decisionReason || "Please contact ACGC if you have questions."}`,
+        quotation_issued: `A quotation of PHP ${Number(repair.quotation?.total || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} for ${productName} is ready for your review.`,
+        customer_accepted: `You accepted the repair quotation${repair.payment?.method ? ` and selected ${String(repair.payment.method).replaceAll("_", " ")}` : ""}.`,
+        payment_proof_submitted: "Your payment proof was submitted and is waiting for admin review.",
+        payment_proof_approved: "Your repair payment proof was verified by the admin.",
+        payment_proof_rejected: `Your payment proof needs correction. ${repair.payment?.proofRejectionReason || "Please review the request and submit a corrected proof."}`,
+        cancelled: "You declined the repair quotation. This request is now closed.",
+        scheduled: `Your repair visit is scheduled${repair.schedule?.date ? ` for ${new Date(repair.schedule.date).toLocaleString("en-PH")}` : ""}${repair.schedule?.technician ? ` with ${repair.schedule.technician}` : ""}.`,
+        in_progress: `Work on your repair for ${productName} is in progress.`,
+        completed: `Your repair for ${productName} is complete${repair.invoiceNumber ? `. Receipt ${repair.invoiceNumber} is available` : ""}.`,
+      };
+
+      return {
+        _id: repair.order,
+        items: [{ name: productName }],
+        tracking: repair.orderTracking,
+        status: "completed",
+        repairProgressStatus: eventStatuses[entry.event] || "Repair Update",
+        notificationType: "repair_request",
+        notificationId: `repair-${repair._id}-${entry.event}-${entry.createdAt ? new Date(entry.createdAt).getTime() : index}-${index}`,
+        notificationDate: entry.createdAt || repair.requestedAt || repair.createdAt,
+        title: eventTitles[entry.event] || "Repair request updated",
+        message: eventMessages[entry.event] || entry.detail || `There is an update to your repair request for ${productName}.`,
+      };
+    });
+  })];
   const unreadNotificationCount = customerNotificationItems.filter((notification) => !readNotificationIds.has(notification.notificationId)).length;
   const readNotificationCount = customerNotificationItems.length - unreadNotificationCount;
   const filteredNotifications = customerNotificationItems.filter((notification) => {
@@ -1947,6 +2015,35 @@ function CustomerDashboard() {
   }, [orderOwnerId]);
 
   useEffect(() => {
+    if (!orderOwnerId) {
+      setRepairRequests([]);
+      return undefined;
+    }
+    let active = true;
+    let inFlight = false;
+    const loadRepairRequests = async () => {
+      if (inFlight || document.visibilityState !== "visible") return;
+      inFlight = true;
+      try {
+        const response = await getCustomerRepairRequests();
+        if (active) setRepairRequests(response.repairs || []);
+      } catch (error) {
+        console.error("Failed to load customer repair notifications:", error);
+      } finally {
+        inFlight = false;
+      }
+    };
+    void loadRepairRequests();
+    const unsubscribe = subscribeToRealtime("repairs", loadRepairRequests);
+    window.addEventListener("focus", loadRepairRequests);
+    return () => {
+      active = false;
+      unsubscribe();
+      window.removeEventListener("focus", loadRepairRequests);
+    };
+  }, [orderOwnerId]);
+
+  useEffect(() => {
     if (activeTab !== "orders" || !orderOwnerId) return undefined;
     let active = true;
     getCustomerPaymentContact()
@@ -2013,7 +2110,7 @@ function CustomerDashboard() {
   const parseProductDimensionText = (value) => {
     if (!value) return {};
     const text = String(value);
-    const match = text.match(/(\d+(?:\.\d+)?)\s*(?:x|Ã—|by)\s*(\d+(?:\.\d+)?)/i);
+    const match = text.match(/(\d+(?:\.\d+)?)\s*(?:x||by)\s*(\d+(?:\.\d+)?)/i);
     const unitMatch = text.match(/\b(cm|mm|m|ft|in|inch|inches|feet|meter|meters)\b|"/i);
     const unitMap = {
       inch: "in",
@@ -2029,6 +2126,9 @@ function CustomerDashboard() {
       unit: unitMatch ? unitMap[unitMatch[1]?.toLowerCase()] || unitMatch[1]?.toLowerCase() || "in" : "in",
     };
   };
+
+  const formatProductDimensionLabel = (value) => String(value ?? "")
+    .replace(/\u00c3(?:\u0097|\u2014)|\u00c3\u0192\u00e2\u20ac\u201d/g, "×");
 
   const getProductDefaultDimensions = (product, quantity = 1) => {
     const parsed = parseProductDimensionText(product?.dimensions || product?.standard_size || product?.size);
@@ -2094,8 +2194,8 @@ function CustomerDashboard() {
       const quantity = Math.max(1, Number(dimensions.quantity ?? itemOrDimensions?.quantity) || 1);
       return `${quantity} piece${quantity === 1 ? "" : "s"}`;
     }
-    if (!areOrderItemDimensionsValid(dimensions)) return "â€”";
-    return `${dimensions.width} ${dimensions.unit} Ã— ${dimensions.height} ${dimensions.unit}`;
+    if (!areOrderItemDimensionsValid(dimensions)) return "—";
+    return `${dimensions.width} ${dimensions.unit} x ${dimensions.height} ${dimensions.unit}`;
   };
 
   const buildCustomerOrderItem = (product, options = {}) => {
@@ -4429,8 +4529,8 @@ function CustomerDashboard() {
       name: item.name || "Item",
       category: item.category || item.product_type || "General",
       quantity: item.quantity || 0,
-      width: item.width || "â€”",
-      height: item.height || "â€”",
+      width: item.width || "—",
+      height: item.height || "—",
       area: item.area || 0,
       unitPrice: Number(item.unit_price || 0),
       amount: Number(item.line_total || (item.is_estimate ? item.estimated_price : 0) || (item.quantity || 0) * Number(item.unit_price || 0)),
@@ -4632,6 +4732,7 @@ function CustomerDashboard() {
     if (orderFilter === "order") return !["installation", "completed", "cancelled"].includes(status);
     if (orderFilter === "review") return isOrderCompletedAndReviewable(order) && !hasOrderReview(order);
     if (orderFilter === "reviewed") return hasAnyOrderReview(order);
+    if (orderFilter === "repair") return false;
     if (orderFilter === "completed") return isOrderStatusCompleted(order);
     if (orderFilter === "cancel") return status === "cancelled";
     return true;
@@ -4656,6 +4757,12 @@ function CustomerDashboard() {
     const notification = notificationOrId && typeof notificationOrId === "object" ? notificationOrId : null;
     const notificationId = notification?.notificationId || notificationOrId;
     markCustomerNotificationRead(notificationId);
+
+    if (notification?.notificationType === "repair_request") {
+      setOrderFilter("repair");
+      setActiveTab("orders");
+      return;
+    }
 
     const myOrders = orders.filter((entry) =>
       !["installation", "completed", "cancelled"].includes(normalizeOrderStatus(entry?.status)),
@@ -4729,6 +4836,7 @@ function CustomerDashboard() {
     { value: "completed", label: "Completed" },
     { value: "review", label: "To Review" },
     { value: "reviewed", label: "Reviewed Product" },
+    { value: "repair", label: "Request Repair" },
     { value: "cancel", label: "Cancelled" },
   ].map((option) => ({
     ...option,
@@ -4738,6 +4846,7 @@ function CustomerDashboard() {
       if (option.value === "order") return !["installation", "completed", "cancelled"].includes(status);
       if (option.value === "review") return isOrderCompletedAndReviewable(order) && !hasOrderReview(order);
       if (option.value === "reviewed") return hasAnyOrderReview(order);
+      if (option.value === "repair") return isOrderStatusCompleted(order);
       if (option.value === "completed") return isOrderStatusCompleted(order);
       if (option.value === "cancel") return status === "cancelled";
       return false;
@@ -4748,7 +4857,7 @@ function CustomerDashboard() {
   const estimateHeight = Number(estimateForm.height) || 0;
   const estimateQuantity = Math.max(1, Number(estimateForm.quantity) || 1);
   const selectedUnitLabel = estimateForm.unit === 'in' ? 'in' : estimateForm.unit === 'ft' ? 'ft' : estimateForm.unit === 'cm' ? 'cm' : 'm';
-  const selectedAreaUnitLabel = estimateForm.unit === 'in' ? 'inÂ²' : estimateForm.unit === 'ft' ? 'ftÂ²' : estimateForm.unit === 'cm' ? 'cmÂ²' : 'mÂ²';
+  const selectedAreaUnitLabel = estimateForm.unit === 'in' ? 'in²' : estimateForm.unit === 'ft' ? 'ft²' : estimateForm.unit === 'cm' ? 'cm²' : 'm²';
   const estimateAreaSelectedUnit = estimateWidth && estimateHeight ? estimateWidth * estimateHeight : 0;
   const estimateTotalAreaSelectedUnit = estimateAreaSelectedUnit * estimateQuantity;
   
@@ -4766,7 +4875,7 @@ function CustomerDashboard() {
     overrideRate: getProductEstimateRate(cartDecisionProduct),
     customization: cartDecisionProduct.customization || false,
     customization_fee: cartDecisionProduct.customization_fee || 0,
-  }) : { estimated_area: 0, estimated_price: 0, rate: 0, areaDisplay: 'â€”', rateNote: '' };
+  }) : { estimated_area: 0, estimated_price: 0, rate: 0, areaDisplay: '—', rateNote: '' };
   const estimateResult = cartDecisionProduct
     ? {
         ...rawEstimateResult,
@@ -4928,13 +5037,13 @@ function CustomerDashboard() {
   const confirmWidth = deliveryConfirmMode === "orderNow"
     ? orderNowDimensions?.width
       ? `${orderNowDimensions.width} ${orderNowDimensions.unit || "in"}`
-      : "â€”"
-    : estimateWidth ? `${estimateWidth} ${selectedUnitLabel}` : "â€”";
+      : "—"
+    : estimateWidth ? `${estimateWidth} ${selectedUnitLabel}` : "—";
   const confirmHeight = deliveryConfirmMode === "orderNow"
     ? orderNowDimensions?.height
       ? `${orderNowDimensions.height} ${orderNowDimensions.unit || "in"}`
-      : "â€”"
-    : estimateHeight ? `${estimateHeight} ${selectedUnitLabel}` : "â€”";
+      : "—"
+    : estimateHeight ? `${estimateHeight} ${selectedUnitLabel}` : "—";
   const confirmPrice = deliveryConfirmMode === "orderNow" ? orderNowSubtotal : estimateTotalCost;
   const confirmSubtotal = deliveryConfirmMode === "orderNow" ? orderNowSubtotal : estimateSubtotal;
   const confirmAdditionalCharges = deliveryConfirmMode === "orderNow" ? orderNowAdditionalCharges : estimateCustomizationFee;
@@ -4990,11 +5099,11 @@ function CustomerDashboard() {
   const selectedProductImages = getProductImages(selectedProduct);
   const activeProductImage = selectedProductImages[Math.min(selectedProductImageIndex, selectedProductImages.length - 1)];
   const selectedProductDimensions = selectedProduct
-    ? selectedProduct.dimensions || selectedProduct.standard_size || (
+    ? formatProductDimensionLabel(selectedProduct.dimensions || selectedProduct.standard_size || (
       selectedProduct.width > 0 || selectedProduct.height > 0
         ? `${selectedProduct.width || 0}" x ${selectedProduct.height || 0}"`
         : "N/A"
-    )
+    ))
     : "N/A";
   const profileDisplayName = `${user?.first_name || ""} ${user?.last_name || ""}`.trim() || "Customer";
   const profileEmail = user?.email || "";
@@ -5219,6 +5328,13 @@ function CustomerDashboard() {
                               (status === "site_inspection" && contractStatus === "sent") ||
                               contractStatus === "sent";
                             const notificationDetails = () => {
+                              if (order.notificationType === "repair_request") {
+                                return {
+                                  title: order.title,
+                                  message: order.message,
+                                  color: "text-amber-600",
+                                };
+                              }
                               if (isSiteInspectionNotification) {
                                 return {
                                   title: order.title || "Site Inspection Scheduled for Today",
@@ -5916,7 +6032,7 @@ function CustomerDashboard() {
                               <span className="flex items-center gap-1 text-amber-400">{renderRatingStars(productReviewStats[product._id || product.id]?.averageRating || 0, 13)}</span>
                               <span className={`truncate ${darkMode ? "font-medium text-slate-200" : "font-medium text-slate-800"}`}>
                                 {productReviewStats[product._id || product.id]?.averageRating > 0
-                                  ? `${productReviewStats[product._id || product.id].averageRating.toFixed(1)} â€¢ ${productReviewStats[product._id || product.id].ratingsCount} reviews`
+                                  ? `${productReviewStats[product._id || product.id].averageRating.toFixed(1)} / ${productReviewStats[product._id || product.id].ratingsCount} reviews`
                                   : "No ratings yet"}
                               </span>
                             </div>
@@ -5933,17 +6049,17 @@ function CustomerDashboard() {
                             {product.dimensions ? (
                               <p className="flex items-center justify-between gap-2 text-[11px] max-md:text-[9px]">
                                 <span className={darkMode ? "text-slate-400" : "text-slate-500"}>Dimensions</span>
-                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.dimensions}</span>
+                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{formatProductDimensionLabel(product.dimensions)}</span>
                               </p>
                             ) : product.standard_size ? (
                               <p className="flex items-center justify-between gap-2 text-[11px] max-md:text-[9px]">
                                 <span className={darkMode ? "text-slate-400" : "text-slate-500"}>Dimensions</span>
-                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.standard_size}</span>
+                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{formatProductDimensionLabel(product.standard_size)}</span>
                               </p>
                             ) : product.width && product.height ? (
                               <p className="flex items-center justify-between gap-2 text-[11px]">
                                 <span className={darkMode ? "text-slate-400" : "text-slate-500"}>Dimensions</span>
-                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.width} Ã— {product.height}</span>
+                                <span className={`truncate font-semibold ${darkMode ? "text-slate-100" : "text-slate-700"}`}>{product.width}  x {product.height}</span>
                               </p>
                             ) : null}
 
@@ -6270,7 +6386,7 @@ function CustomerDashboard() {
                                 className={`h-9 w-full rounded-lg border px-2 text-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/15 ${darkMode ? "border-slate-600 bg-slate-800 text-white" : "border-slate-200 bg-white text-slate-900"}`}
                               />
                             </label>
-                            <span className={`mt-6 text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`} aria-hidden="true">Ã—</span>
+                            <span className={`mt-6 text-sm ${darkMode ? "text-slate-500" : "text-slate-400"}`} aria-hidden="true">×</span>
                             <label className="min-w-0">
                               <span className={`mb-1 block text-[9px] font-bold uppercase tracking-wider ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Height</span>
                               <input
@@ -6381,12 +6497,12 @@ function CustomerDashboard() {
                                   {isBladeEstimator
                                     ? `${estimatorBladeCount} blade(s)`
                                     : isMeterEstimator
-                                    ? productEstimatorResult?.areaDisplay || "â€”"
+                                    ? productEstimatorResult?.areaDisplay || "—"
                                     : isPieceEstimator
                                     ? productEstimatorResult?.areaDisplay || "1 piece"
                                     : Number(productEstimatorResult?.estimated_area) > 0
                                     ? `${Number(productEstimatorResult.estimated_area).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} sq ft`
-                                    : productEstimatorResult?.areaDisplay || "â€”"}
+                                    : productEstimatorResult?.areaDisplay || "—"}
                                 </span>
                               </div>
                               {(!isBladeEstimator || selectedProduct.show_price_per_blade !== false) && <div className="flex items-center justify-between gap-3">
@@ -6589,7 +6705,7 @@ function CustomerDashboard() {
                         <p className="text-red-100 mt-1">{cartDecisionStep === "choice" ? "Decide how to add this product to your cart" : "Enter measurements for a personalized estimate"}</p>
                       </div>
                       <button onClick={requestCloseCartDecisionModal} className="text-white hover:bg-red-800 p-2 rounded-full transition">
-                        <span className="text-3xl">Ã—</span>
+                        <X size={24} aria-hidden="true" />
                       </button>
                     </div>
                   </div>
@@ -6783,15 +6899,15 @@ function CustomerDashboard() {
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Width</span>
-                                  <span className="font-bold text-black-900">{estimateForm.width ? `${estimateForm.width} ${estimateForm.unit}` : 'â€”'}</span>
+                                  <span className="font-bold text-black-900">{estimateForm.width ? `${estimateForm.width} ${estimateForm.unit}` : '—'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Height</span>
-                                  <span className="font-bold text-black-900">{estimateForm.height ? `${estimateForm.height} ${estimateForm.unit}` : 'â€”'}</span>
+                                  <span className="font-bold text-black-900">{estimateForm.height ? `${estimateForm.height} ${estimateForm.unit}` : '—'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Area per unit</span>
-                                  <span className="font-bold text-black-900">{estimateAreaSelectedUnit ? `${estimateAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : 'â€”'}</span>
+                                  <span className="font-bold text-black-900">{estimateAreaSelectedUnit ? `${estimateAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : '—'}</span>
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-white rounded-lg">
                                   <span className="text-black-600">Total Quantity</span>
@@ -6799,7 +6915,7 @@ function CustomerDashboard() {
                                 </div>
                                 <div className="flex justify-between items-center p-3 bg-gradient-to-r from-yellow-400 to-yellow-500 text-yellow-900 font-bold rounded-lg">
                                   <span className="text-black font-semibold">Total Area</span>
-                                  <span className="font-bold text-black-900 text-lg">{estimateTotalAreaSelectedUnit ? `${estimateTotalAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : 'â€”'}</span>
+                                  <span className="font-bold text-black-900 text-lg">{estimateTotalAreaSelectedUnit ? `${estimateTotalAreaSelectedUnit.toFixed(2)} ${selectedAreaUnitLabel}` : '—'}</span>
                                 </div>
                               </div>
                             </div>
@@ -6819,7 +6935,7 @@ function CustomerDashboard() {
                                   <p className="text-xs text-black-500 mb-1">Calculation</p>
                                   <p className="text-sm font-semibold text-gray-900">
                                     {estimateWidth && estimateHeight
-                                      ? `₱${estimateUnitRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} Ã— ${estimateTotalArea.toFixed(2)} sq ft`
+                                      ? `₱${estimateUnitRate.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })} ${estimateTotalArea.toFixed(2)} sq ft`
                                       : "Fill measurements"}
                                   </p>
                                 </div>
@@ -6832,7 +6948,7 @@ function CustomerDashboard() {
                               <p className="text-4xl font-bold">
                                 {estimateWidth && estimateHeight
                                   ? `₱${estimateTotalCost.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
-                                  : "â€”"}
+                                  : "—"}
                               </p>
                               <p className="text-xs text-red-100 mt-2">*Final price may vary based on final specifications</p>
                             </div>
@@ -7039,7 +7155,7 @@ function CustomerDashboard() {
                                   </div>
                                   <div>
                                     <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Glass</p>
-                                    <p className={`mt-2 font-semibold ${darkMode ? "text-white" : "text-gray-900"}`}>{confirmGlassType?.name || confirmBladeSelections.blade_glass_type || "â€”"}</p>
+                                    <p className={`mt-2 font-semibold ${darkMode ? "text-white" : "text-gray-900"}`}>{confirmGlassType?.name || confirmBladeSelections.blade_glass_type || "—"}</p>
                                   </div>
                                   <div>
                                     <p className="text-xs uppercase tracking-[0.2em] text-gray-500">Frame</p>
@@ -7216,8 +7332,8 @@ function CustomerDashboard() {
                             <p className="text-xs uppercase tracking-[0.24em] text-gray-500">Dimensions</p>
                             <p className="mt-2 text-lg font-semibold text-gray-900">
                               {orderNowProduct.width && orderNowProduct.height
-                                ? `${orderNowProduct.width}" Ã— ${orderNowProduct.height}"`
-                                : orderNowProduct.dimensions || orderNowProduct.standard_size || orderNowProduct.size || "â€”"}
+                                ? `${orderNowProduct.width}" x ${orderNowProduct.height}"`
+                                : orderNowProduct.dimensions || orderNowProduct.standard_size || orderNowProduct.size || "—"}
                             </p>
                           </div>
                         </div>
@@ -7859,7 +7975,7 @@ function CustomerDashboard() {
 
         {activeTab === "orders" && (
           <>
-            <div className="mb-5 flex flex-col gap-4 border-b pb-4 sm:flex-row sm:items-center sm:justify-between">
+            <div className="mb-5 flex flex-col gap-4 border-b pb-4">
               <div>
                 <h2 className={`text-2xl font-black tracking-[-0.03em] ${darkMode ? "text-white" : "text-slate-900"}`}>My Orders</h2>
                 <p className={`mt-1 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Track progress, payments, and completed projects.</p>
@@ -7879,8 +7995,8 @@ function CustomerDashboard() {
                   ))}
                 </select>
               </div>
-              <div className="hidden max-w-full overflow-x-auto lg:block">
-                <div className="flex w-max items-center gap-1.5" role="tablist" aria-label="Filter orders">
+              <div className="hidden w-full lg:block">
+                <div className="flex flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter orders">
                 {orderFilterOptions.map((tab) => (
                   <button
                     key={tab.value}
@@ -7910,7 +8026,9 @@ function CustomerDashboard() {
               </div>
             )}
 
-            {ordersLoading ? (
+            {orderFilter === "repair" ? (
+              <CustomerRepairRequests darkMode={darkMode} projects={orders.filter((order) => String(order.status || "").toLowerCase() === "completed")} />
+            ) : ordersLoading ? (
               <div className="space-y-4">
                 {[...Array(2)].map((_, index) => (
                   <div key={index} className={`h-20 animate-pulse rounded-xl border ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`} />
@@ -7963,7 +8081,7 @@ function CustomerDashboard() {
                   const orderPreviewItem = isBatchOrder
                     ? orderItems.find((item) => getOrderItemImage(item) !== PRODUCT_IMAGE_PLACEHOLDER) || product
                     : product;
-                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
+                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
                   const orderStatusLabel = getOrderStatusLabel(order.status);
                   const hasContractBeenSent =
                     normalizeOrderStatusKey(order?.status) === "contract_sent" ||
@@ -8030,7 +8148,7 @@ function CustomerDashboard() {
                               </span>
                             </div>
                             <div className={`mt-1 flex flex-wrap items-center gap-x-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                              <span>{order.tracking || order._id || "â€”"}</span>
+                              <span>{order.tracking || order._id || "—"}</span>
                               <span aria-hidden="true">·</span>
                               <span>{orderDisplayQuantity}</span>
                             </div>
@@ -8061,8 +8179,10 @@ function CustomerDashboard() {
                               {canUploadFeedback && ["review", "completed"].includes(orderFilter) && isProjectFinished && isOrderCompletedAndReviewable(order) && isBatchOrder && !hasOrderReview(order) && (
                                 <button
                                   type="button"
+                                  disabled={!canShowRatings}
                                   onClick={() => openBatchOrderReviewModal(order)}
-                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none shadow-sm ${darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200" : "border-amber-500 bg-amber-400 text-slate-950"}`}
+                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none shadow-sm disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200" : "border-amber-500 bg-amber-400 text-slate-950"}`}
+                                  title={!canShowRatings ? "Product reviews are restricted for this account." : undefined}
                                 >
                                   <Star size={12} fill="currentColor" aria-hidden="true" />
                                   <span>Review products</span>
@@ -8090,7 +8210,7 @@ function CustomerDashboard() {
                                 {isBatchOrder ? "Batch order" : orderDisplayName}
                               </h4>
                               <p className={`mt-1 text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
-                                {order.tracking || order._id || "â€”"} · {orderDate}
+                                {order.tracking || order._id || "—"} · {orderDate}
                               </p>
                             </div>
                             <div className="flex flex-wrap items-center justify-start gap-2 sm:justify-end">
@@ -8392,7 +8512,7 @@ function CustomerDashboard() {
                             ) : latestPaymentProof.status === "pending" ? (
                               <div className={`rounded-xl border px-4 py-3 text-sm font-medium sm:col-span-2 ${darkMode ? "border-sky-800 bg-sky-950/50 text-sky-200" : "border-sky-200 bg-sky-50 text-sky-800"}`}>
                                 <p>
-                                  We've notified admin that you paid {formatCurrency(paymentProofSubmission?.amount ?? latestPaymentProof.submittedAmount ?? order.payment_proof_amount ?? 0)}. This is pending confirmation â€” we'll notify you here once it's verified.
+                                  We've notified admin that you paid {formatCurrency(paymentProofSubmission?.amount ?? latestPaymentProof.submittedAmount ?? order.payment_proof_amount ?? 0)}. This is pending confirmation — we'll notify you here once it's verified.
                                 </p>
                                 <p className="mt-2 text-xs">
                                   Current remaining balance: {formatCurrency(balanceAmount)}. You can submit another payment after this proof is confirmed.
@@ -8684,7 +8804,7 @@ function CustomerDashboard() {
                     </span>
                   </div>
                   <span className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                    {reviewDetailsOrder.review?.submittedAt ? formatDateToMMMDDYYYY(reviewDetailsOrder.review.submittedAt) : "â€”"}
+                    {reviewDetailsOrder.review?.submittedAt ? formatDateToMMMDDYYYY(reviewDetailsOrder.review.submittedAt) : "—"}
                   </span>
                 </div>
                 {reviewDetailsOrder.review?.title && <h3 className="text-base font-semibold">{reviewDetailsOrder.review.title}</h3>}
@@ -8771,7 +8891,7 @@ function CustomerDashboard() {
                   aria-label="Close review form"
                   className={`inline-flex h-9 w-9 items-center justify-center rounded-full border text-lg transition ${darkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-100"}`}
                 >
-                  Ã—
+                  <X size={20} aria-hidden="true" />
                 </button>
               </div>
               <div className="flex-1 space-y-4 overflow-y-auto p-5">
@@ -8831,7 +8951,7 @@ function CustomerDashboard() {
                       className={`mt-1.5 min-h-[160px] w-full resize-y rounded-xl border px-3 py-2.5 text-sm outline-none focus:border-red-500 ${darkMode ? "border-slate-700 bg-slate-800 text-white placeholder:text-slate-500" : "border-slate-200 bg-white text-slate-900 placeholder:text-slate-400"}`}
                     />
                     <p className={`mt-1 flex justify-between text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                      <span>Required. 10â€“500 characters.</span>
+                      <span>Required. 10–500 characters.</span>
                       <span>{orderReviewForm.comment.length}/500</span>
                     </p>
                   </div>
@@ -8873,7 +8993,7 @@ function CustomerDashboard() {
                               aria-label={`Remove photo ${index + 1}`}
                               className="absolute right-1 top-1 inline-flex h-7 w-7 items-center justify-center rounded-full bg-white text-slate-700 shadow"
                             >
-                              Ã—
+                              <X size={16} aria-hidden="true" />
                             </button>
                           </div>
                         ))}
@@ -9197,7 +9317,7 @@ function CustomerDashboard() {
                               <div className={`mt-1 flex flex-wrap items-center gap-3 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                                 <span>Qty: {item.quantity}</span>
                                 {item.is_estimate && item.width && item.height && (
-                                  <span>{item.width} {item.measurementUnit || item.unit || ""} Ã— {item.height} {item.measurementUnit || item.unit || ""}</span>
+                                  <span>{item.width} {item.measurementUnit || item.unit || ""} x {item.height} {item.measurementUnit || item.unit || ""}</span>
                                 )}
                               </div>
                             );
@@ -9375,6 +9495,7 @@ function CustomerDashboard() {
                       contractStatus === "accepted"
                     );
                     const notificationMessage = () => {
+                      if (order.notificationType === "repair_request") return order.message;
                       if (isSiteInspectionNotification) {
                         return order.message || `Your site inspection for order ${order.tracking} is scheduled for ${formatDateToMMMDDYYYY(order.inspection_date)}.`;
                       }
@@ -9482,8 +9603,8 @@ function CustomerDashboard() {
                                 <p className={`mt-1 text-xs leading-5 sm:text-sm ${isRead ? darkMode ? "text-slate-400" : "text-slate-500" : darkMode ? "text-slate-200" : "text-slate-700"}`}>{renderAdminContactMessage(notificationMessage())}</p>
                                 <p className={`mt-2 text-[10px] font-medium uppercase tracking-wide sm:text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>{order.tracking}</p>
                               </div>
-                              <span className={`inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-[10px] font-semibold sm:text-xs ${getOrderStatusClasses(isDelayNotification ? "Delayed" : order.status)}`}>
-                                {isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status)}
+                      <span className={`inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-[10px] font-semibold sm:text-xs ${getOrderStatusClasses(order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : order.status)}`}>
+                                {order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status)}
                               </span>
                             </div>
 
@@ -9495,7 +9616,7 @@ function CustomerDashboard() {
                                 onClick={() => openOrderDetailsFromNotification(order, order)}
                                 className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "text-red-300 hover:bg-red-950/40" : "text-red-700 hover:bg-red-50"}`}
                               >
-                                View Order
+                                {order.notificationType === "repair_request" ? "View Repair" : "View Order"}
                                 <ArrowUpRight size={14} aria-hidden="true" />
                               </button>
                             </div>
@@ -9646,7 +9767,7 @@ function CustomerDashboard() {
                     const orderPreviewItem = isBatchOrder
                       ? orderItems.find((item) => getOrderItemImage(item) !== PRODUCT_IMAGE_PLACEHOLDER) || product
                       : product;
-                    const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
+                    const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
 
                     return (
                       <div
@@ -9675,7 +9796,7 @@ function CustomerDashboard() {
                                 </span>
                               </div>
                               <div className={`mt-1 flex flex-wrap items-center gap-x-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                                <span>{order.tracking || order._id || "â€”"}</span>
+                                <span>{order.tracking || order._id || "—"}</span>
                                 <span aria-hidden="true">·</span>
                                 <span>{orderDisplayQuantity}</span>
                               </div>
@@ -10277,8 +10398,8 @@ function CustomerDashboard() {
                     <tbody>
                       {warrantiesInTab.map((order) => {
                         const product = order.items?.[0] || {};
-                        const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "â€”";
-                        const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "â€”";
+                        const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "—";
+                        const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "—";
                         const isActive = warrantyHistoryTab === "active";
                         const statusClass = isActive
                           ? "bg-emerald-100 text-emerald-700"
@@ -10287,11 +10408,11 @@ function CustomerDashboard() {
 
                         return (
                           <tr key={order.warranty_record_id || order._id || order.tracking} className={`border-t transition ${darkMode ? "border-slate-700 hover:bg-slate-700/60" : "border-red-100 hover:bg-red-50/70"}`}>
-                            <td className="px-6 py-5 align-middle text-sm font-black text-red-700 text-center">{order.tracking || order._id || "â€”"}</td>
+                            <td className="px-6 py-5 align-middle text-sm font-black text-red-700 text-center">{order.tracking || order._id || "—"}</td>
                             <td className={`px-6 py-5 align-middle text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
                               <span className={`font-black ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Product"}</span>
                             </td>
-                            <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{order.warranty_period || "â€”"}</td>
+                            <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{order.warranty_period || "—"}</td>
                             <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{warrantyStartDate}</td>
                             <td className={`px-6 py-5 align-middle text-sm font-medium text-center ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{warrantyExpiryDate}</td>
                             <td className="px-6 py-5 align-middle text-center">
@@ -10317,8 +10438,8 @@ function CustomerDashboard() {
                 <div className="space-y-3 md:hidden">
                   {warrantiesInTab.map((order) => {
                     const product = order.items?.[0] || {};
-                    const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "â€”";
-                    const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "â€”";
+                    const warrantyStartDate = formatDateToMMMDDYYYY(order.warranty_start_date) || "—";
+                    const warrantyExpiryDate = formatDateToMMMDDYYYY(order.warranty_expiry_date) || "—";
                     const isActive = warrantyHistoryTab === "active";
                     const statusClass = isActive
                       ? darkMode ? "bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700"
@@ -10329,14 +10450,14 @@ function CustomerDashboard() {
                         <div className="flex items-start justify-between gap-3">
                           <div className="min-w-0">
                             <h3 className={`break-words text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Product"}</h3>
-                            <p className="mt-1 break-all font-mono text-xs text-slate-500">{order.tracking || order._id || "â€”"}</p>
+                            <p className="mt-1 break-all font-mono text-xs text-slate-500">{order.tracking || order._id || "—"}</p>
                           </div>
                           <span className={`shrink-0 rounded-full px-2.5 py-1 text-[10px] font-bold ${statusClass}`}>{isActive ? "Active" : "Expired"}</span>
                         </div>
                         <dl className="mt-4 grid grid-cols-2 gap-x-3 gap-y-3">
                           <div className="min-w-0">
                             <dt className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Warranty</dt>
-                            <dd className={`mt-1 text-sm ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{order.warranty_period || "â€”"}</dd>
+                            <dd className={`mt-1 text-sm ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{order.warranty_period || "—"}</dd>
                           </div>
                           <div className="min-w-0">
                             <dt className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Start date</dt>
@@ -10377,7 +10498,7 @@ function CustomerDashboard() {
                     : darkMode
                       ? "border border-red-400/30 bg-red-500/15 text-red-300"
                       : "bg-red-100 text-red-700";
-                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "â€”";
+                  const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
 
                   return (
                     <article key={order._id || order.tracking} className={`overflow-hidden rounded-[20px] border shadow-[0_8px_18px_rgba(15,23,42,0.04)] transition hover:shadow-[0_10px_24px_rgba(15,23,42,0.08)] ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
@@ -10388,7 +10509,7 @@ function CustomerDashboard() {
                           </div>
                           <div className="min-w-0">
                             <p className={`truncate text-base font-black ${darkMode ? "text-white" : "text-slate-900"}`}>{product.name || product.product_name || "Project"}</p>
-                            <p className={`mt-1 text-xs font-semibold ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{order.tracking || order._id || "â€”"}</p>
+                            <p className={`mt-1 text-xs font-semibold ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{order.tracking || order._id || "—"}</p>
                           </div>
                         </div>
 
@@ -10493,7 +10614,7 @@ function CustomerDashboard() {
             </div>
 
             <div className="mt-7 border-t border-white/15 pt-4.5 text-center text-[13px] text-slate-300">
-              Â© 2026 ACGC Aluminum Services â€” All Rights Reserved.
+              © 2026 ACGC Aluminum Services — All Rights Reserved.
             </div>
           </div>
           </footer>

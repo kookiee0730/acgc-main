@@ -3,7 +3,7 @@ import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search,
   Plus,
-  Eye,
+  BookSearch,
   Pencil,
   FileText,
   Send,
@@ -19,6 +19,8 @@ import {
   X,
   Trash2,
   AlertTriangle,
+  Lock,
+  Unlock,
 } from "lucide-react";
 import toast, { Toaster } from 'react-hot-toast';
 import { toJpeg } from "html-to-image";
@@ -722,6 +724,7 @@ function SiteInspection() {
   const [requestedModalLocationKey, setRequestedModalLocationKey] = useState("");
   const [requestedRecordError, setRequestedRecordError] = useState(null);
   const [editInspection, setEditInspection] = useState(null);
+  const [manualOverrideLocked, setManualOverrideLocked] = useState(false);
   const [editInspectionStep, setEditInspectionStep] = useState(1);
   const [highCancellationConfirmation, setHighCancellationConfirmation] = useState(false);
   const [editMeasurementsEnabled, setEditMeasurementsEnabled] = useState(false);
@@ -743,6 +746,7 @@ function SiteInspection() {
   const [customerTypeFilter, setCustomerTypeFilter] = useState("all");
   const [priorityFilter, setPriorityFilter] = useState("all");
   const [newInspection, setNewInspection] = useState(getDefaultInspection());
+  const [newManualOverrideLocked, setNewManualOverrideLocked] = useState(true);
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
   const [products, setProducts] = useState([]);
@@ -882,8 +886,8 @@ function SiteInspection() {
     ? "min-h-11 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none transition placeholder:text-slate-400 focus:border-red-400 focus:ring-2 focus:ring-red-500/20"
     : "min-h-11 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none transition placeholder:text-slate-500 focus:border-red-500 focus:ring-2 focus:ring-red-100";
   const lockedFieldClass = darkMode
-    ? "w-full cursor-not-allowed rounded-xl border border-slate-600 bg-slate-800 px-3 py-3 text-sm text-slate-300 shadow-inner outline-none placeholder:text-slate-500"
-    : "w-full cursor-not-allowed rounded-xl border border-slate-300 bg-slate-200 px-3 py-3 text-sm text-slate-600 shadow-inner outline-none placeholder:text-slate-400";
+    ? "w-full cursor-not-allowed rounded-xl border border-gray-600 bg-gray-700 px-3 py-3 text-sm text-gray-200 shadow-inner outline-none placeholder:text-gray-400"
+    : "w-full cursor-not-allowed rounded-xl border border-gray-300 bg-gray-200 px-3 py-3 text-sm text-gray-600 shadow-inner outline-none placeholder:text-gray-500";
   const labelClass = darkMode ? "text-slate-200" : "text-slate-700";
   const mutedTextClass = darkMode ? "text-slate-400" : "text-slate-500";
   const statusBadgeClass = darkMode
@@ -939,7 +943,7 @@ function SiteInspection() {
     today.setHours(0, 0, 0, 0);
     return Number.isNaN(inputDate.getTime()) ? false : inputDate < today;
   };
-  const actionButtonClass = "inline-flex h-9 w-9 items-center justify-center rounded-lg border border-transparent transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70";
+  const actionButtonClass = "inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-xl border border-black/5 shadow-sm transition hover:-translate-y-0.5 active:translate-y-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 dark:border-white/10";
 
   useEffect(() => {
     setCurrentPage(1);
@@ -995,6 +999,7 @@ function SiteInspection() {
   const resetNewInspectionForm = () => {
     const initialInspection = getDefaultInspection();
     setNewInspection(initialInspection);
+    setNewManualOverrideLocked(true);
     setErrors({});
     setCustomerSearch("");
     setCustomerSuggestions([]);
@@ -2912,11 +2917,13 @@ function SiteInspection() {
         transaction_number: paymentProof.transactionNumber,
       };
       editInspectionBaselineRef.current = createUnsavedSnapshot(nextEditInspection);
+      setManualOverrideLocked(true);
       setEditInspection(nextEditInspection);
     } else {
       // fallback: open an empty editor
       const nextEditInspection = { id: orderId, inspection_date: "", is_rush_order: false, inspection_notes: "", issues_found: "", inspection_status: "pending" };
       editInspectionBaselineRef.current = createUnsavedSnapshot(nextEditInspection);
+      setManualOverrideLocked(true);
       setEditInspection(nextEditInspection);
     }
   };
@@ -3210,6 +3217,10 @@ function SiteInspection() {
       ?? sourceOrder?.customer_cancellation_count
       ?? sourceOrder?.cancellation_count,
     );
+    let cooldownUntil = editInspection.customer?.online_order_cooldown_until
+      ?? editInspection.online_order_cooldown_until
+      ?? sourceOrder?.customer?.online_order_cooldown_until
+      ?? sourceOrder?.online_order_cooldown_until;
 
     // The list response may omit the populated customer. Check the order detail
     // before saving so the warning also works when the count is only available there.
@@ -3223,20 +3234,26 @@ function SiteInspection() {
         ?? cancellationCount,
       );
       if (detailedOrder) {
+        cooldownUntil = detailedOrder.customer?.online_order_cooldown_until
+          ?? detailedOrder.online_order_cooldown_until
+          ?? null;
         setEditInspection((current) => current?.id === editInspection.id ? {
           ...current,
           customer: detailedOrder.customer,
           customer_cancellation_count: cancellationCount,
           online_order_cooldown_until: detailedOrder.customer?.online_order_cooldown_until
             ?? detailedOrder.online_order_cooldown_until
-            ?? current.online_order_cooldown_until,
+            ?? null,
         } : current);
       }
     } catch (error) {
       console.warn("Unable to refresh customer cancellation count before saving inspection:", error);
     }
 
-    if (cancellationCount >= 3) {
+    if (isRestrictedCustomerOrder({
+      customer_cancellation_count: cancellationCount,
+      online_order_cooldown_until: cooldownUntil,
+    }, Date.now())) {
       setHighCancellationConfirmation(true);
       return;
     }
@@ -3527,7 +3544,7 @@ function SiteInspection() {
           title="View inspection"
           aria-label="View inspection"
         >
-          <Eye size={18} strokeWidth={2.2} />
+          <BookSearch size={18} strokeWidth={2.2} />
         </button>
         {!isCancelledTab && (
           <>
@@ -3919,11 +3936,11 @@ function SiteInspection() {
 
             <div className="hidden md:block">
               <div className="overflow-x-auto">
-                <table className="w-full min-w-[1395px] table-fixed border-separate border-spacing-0">
+                <table className="w-full min-w-[1520px] table-fixed border-separate border-spacing-0">
                   <colgroup>
                     <col className="w-[190px]" />
                     <col className="w-[130px]" />
-                    <col className="w-[185px]" />
+                    <col className="w-[220px]" />
                     <col className="w-[125px]" />
                     <col className="w-[130px]" />
                     <col className="w-[130px]" />
@@ -3931,7 +3948,7 @@ function SiteInspection() {
                     <col className="w-[130px]" />
                     <col
                       style={{
-                        width: showInspectionActions ? "230px" : "56px",
+                        width: showInspectionActions ? "320px" : "56px",
                         transition: "width 500ms cubic-bezier(0.22, 1, 0.36, 1)",
                       }}
                     />
@@ -3946,7 +3963,7 @@ function SiteInspection() {
                       <th className={`px-2 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Est. Install Date</th>
                       <th className={`px-1 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Status</th>
                       <th className={`px-1 py-3 text-left text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>Est. Total</th>
-                      <th className={`${showInspectionActions ? "px-4" : "px-1"} py-3 text-center text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>
+                      <th style={{ width: showInspectionActions ? "320px" : "56px", minWidth: showInspectionActions ? "320px" : "56px" }} className={`${showInspectionActions ? "px-4" : "sticky right-0 z-20 bg-transparent px-1"} py-3 text-center text-[10px] font-black uppercase leading-tight tracking-[0.1em] ${darkMode ? "text-slate-300" : "text-black"}`}>
                         <div className="flex items-center justify-center gap-1.5">
                           <span className={`overflow-hidden whitespace-nowrap transition-[max-width,opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "max-w-16 translate-x-0 opacity-100" : "max-w-0 -translate-x-1 opacity-0"}`}>Actions</span>
                           <button
@@ -3988,21 +4005,21 @@ function SiteInspection() {
                         const isRestrictedCustomer = isRestrictedCustomerOrder(inspection, restrictionClock);
                         const isRushOrder = getRushSlotsForInspection(inspection) > 0;
                         const clientPriorityCellClass = isRushOrder
-                          ? darkMode ? "rounded-l-10xl border-l-[8px] border-l-red-500" : "rounded-l-2xl border-l-[8px] border-l-red-700"
+                          ? darkMode ? "rounded-l-xl border-l-[4px] border-l-red-500" : "rounded-l-xl border-l-[4px] border-l-red-700"
                           : isRestrictedCustomer
-                            ? darkMode ? "rounded-l-10xl border-l-[8px] border-l-amber-500" : "rounded-l-2xl border-l-[8px] border-l-amber-700"
-                            : darkMode ? "rounded-l-10xl border-l-[8px] border-l-slate-400" : "rounded-l-2xl border-l-[8px] border-l-slate-600";
+                            ? darkMode ? "rounded-l-xl border-l-[4px] border-l-amber-500" : "rounded-l-xl border-l-[4px] border-l-amber-700"
+                            : darkMode ? "rounded-l-xl border-l-[4px] border-l-slate-400" : "rounded-l-xl border-l-[4px] border-l-slate-600";
                         return (
                           <tr
                             key={inspection._id || inspection.id || index}
                             data-notification-record-id={String(inspection._id || inspection.id || "")}
                             data-notification-target="inspection"
-                            className={`border-t ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""} ${darkMode ? "border-slate-700 bg-slate-900/20 hover:bg-slate-800/50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
+                            className={`group border-t ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""} ${darkMode ? "border-slate-700 bg-slate-900/20 hover:bg-slate-800/50" : "border-slate-200 bg-white hover:bg-slate-50"}`}
                           >
                             <td className={`px-2 py-3 ${clientPriorityCellClass}`}>
-                              <div className="w-fit max-w-full rounded-lg px-2 py-1 leading-snug">
-                                <div className="truncate text-[12px] font-bold text-slate-800 dark:text-slate-100">{clientName}</div>
-                                <div className="mt-2 text-[12px] font-semibold text-slate-700 dark:text-slate-300">{phone}</div>
+                              <div className="w-full min-w-0 rounded-lg px-2 py-1 leading-snug">
+                                <div className="break-words text-[12px] font-bold text-slate-800 dark:text-slate-100">{clientName}</div>
+                                <div className="mt-2 break-words text-[12px] font-semibold text-slate-700 dark:text-slate-300">{phone}</div>
                               </div>
                             </td>
                             <td className="px-2 py-3 text-[13px] font-semibold text-slate-800 dark:text-slate-200">{customerTypeLabel}</td>
@@ -4012,8 +4029,8 @@ function SiteInspection() {
                             <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{installDate}</td>
                             <td className="px-1 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ${progressColor}`}>{statusDisplay === "Need to be Called" && <Phone size={12} aria-hidden="true" />}{statusDisplay}</span></td>
                             <td className="px-1 py-3 rounded-r-xl text-left text-[12px] font-bold text-slate-900 dark:text-slate-100">{formatCurrency(total)}</td>
-                            <td className="py-3 pl-1 pr-3 text-left">
-                              <div className={`ml-auto flex w-full justify-end gap-2.5 overflow-hidden transition-[max-width,opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "max-w-[220px] translate-x-0 opacity-100" : "max-w-0 translate-x-2 opacity-0 pointer-events-none"}`}>
+                            <td style={{ width: showInspectionActions ? "320px" : "56px", minWidth: showInspectionActions ? "320px" : "56px" }} className="py-3 pl-1 pr-3 text-left">
+                              <div className={`mr-auto flex w-full min-w-0 flex-nowrap items-center justify-start gap-1.5 overflow-hidden transition-[max-width,max-height,opacity,transform] duration-500 ease-[cubic-bezier(0.22,1,0.36,1)] motion-reduce:transition-none ${showInspectionActions ? "max-h-12 min-w-[280px] max-w-[280px] translate-x-0 opacity-100" : "max-h-0 max-w-0 translate-x-2 opacity-0 pointer-events-none"}`}>
                                 {rowActions}
                               </div>
                             </td>
@@ -4033,6 +4050,7 @@ function SiteInspection() {
                 <div className="rounded-2xl border border-dashed border-gray-200 p-6 text-center text-sm text-gray-500">{inspectionLoadError || "No records in this tab."}</div>
               ) : visibleInspections.map((inspection, index) => {
                 const clientName = inspection.customer ? `${inspection.customer.first_name || ""} ${inspection.customer.last_name || ""}`.trim() || inspection.customer.email || inspection.customer_name || "Customer" : inspection.customer_name || inspection.customer_email || "Customer";
+                const phone = inspection.customer?.phone || inspection.customer_phone || "—";
                 const inspectionDate = formatDateToMMMDDYYYY(inspection.inspection_date) || "—";
                 const installDateValue = getEstimatedInstallationDate(inspection);
                 const installDate = formatDateToMMMDDYYYY(installDateValue) || "—";
@@ -4050,11 +4068,12 @@ function SiteInspection() {
                     key={inspection._id || inspection.id || index}
                     data-notification-record-id={String(inspection._id || inspection.id || "")}
                     data-notification-target="inspection"
-                    className={`relative rounded-2xl border border-l-[8px] p-3 transition-colors ${darkMode ? "border-y-slate-700 border-r-slate-700 bg-slate-900/20" : "border-y-gray-200 border-r-gray-200 bg-gray-50"} ${mobilePriorityBorderClass} ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""}`}
+                    className={`relative rounded-2xl border border-l-[4px] p-3 transition-colors ${darkMode ? "border-y-slate-700 border-r-slate-700 bg-slate-900/20" : "border-y-gray-200 border-r-gray-200 bg-gray-50"} ${mobilePriorityBorderClass} ${highlightedNotificationRecordId === String(inspection._id || inspection.id || "") ? "notification-target-highlight" : ""}`}
                   >
                     <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <p className={`truncate text-sm font-bold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{clientName}</p>
+                      <div className="min-w-0 flex-1">
+                        <p className={`break-words text-sm font-bold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{clientName}</p>
+                        <p className={`mt-1 break-words text-xs font-medium ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{phone}</p>
                       </div>
                       <div className="flex flex-col items-end gap-1"><span className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10px] font-semibold ${getInspectionStatusTone(statusDisplay)}`}>{statusDisplay === "Need to be Called" && <Phone size={12} aria-hidden="true" />}{statusDisplay}</span></div>
                     </div>
@@ -4072,7 +4091,7 @@ function SiteInspection() {
                         <p className={`mt-1 font-semibold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{formatCurrency(total)}</p>
                       </div>
                     </div>
-                    <div className={`mt-3 flex justify-end gap-2.5 rounded-xl p-1.5 ${darkMode ? "bg-[#0b2338]" : "bg-white"}`}>
+                    <div className={`mt-3 flex flex-wrap justify-end gap-1.5 rounded-xl p-1.5 ${darkMode ? "bg-[#0b2338]" : "bg-white"}`}>
                       {getInspectionActionButtons(inspection)}
                     </div>
                   </div>
@@ -4717,13 +4736,39 @@ function SiteInspection() {
                       </div>
 
                       <div>
-                        <label className={`mb-2 block text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <label htmlFor="new-manual-price-override" className={`text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (newManualOverrideLocked) {
+                                setNewManualOverrideLocked(false);
+                                window.requestAnimationFrame(() => document.getElementById("new-manual-price-override")?.focus());
+                              } else {
+                                setNewManualOverrideLocked(true);
+                              }
+                            }}
+                            role="switch"
+                            aria-checked={!newManualOverrideLocked}
+                            aria-label={`Manual price override is ${newManualOverrideLocked ? "locked" : "unlocked"}`}
+                            className={`inline-flex min-h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 py-1 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            {newManualOverrideLocked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+                            <span>{newManualOverrideLocked ? "Locked" : "Unlocked"}</span>
+                            <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${newManualOverrideLocked ? "bg-amber-500" : "bg-emerald-600"}`} aria-hidden="true">
+                              <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${newManualOverrideLocked ? "translate-x-0.5" : "translate-x-[18px]"}`} />
+                            </span>
+                          </button>
+                        </div>
                         <input
+                          id="new-manual-price-override"
                           type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           placeholder="Enter adjusted total..."
-                          className={fieldClass}
+                          className={`${newManualOverrideLocked ? lockedFieldClass : fieldClass} manual-price-override-field`}
                           value={newInspection.manual_override}
+                          disabled={newManualOverrideLocked}
+                          onBlur={() => setNewManualOverrideLocked(true)}
                           onChange={(e) => handleInspectionFieldChange("manual_override", e.target.value)}
                         />
                       </div>
@@ -5301,7 +5346,7 @@ function SiteInspection() {
                     <X size={18} aria-hidden="true" />
                   </button>
                   </div>
-                  {Number(editInspection.customer_cancellation_count) >= 3 && (
+                  {isRestrictedCustomerOrder(editInspection, restrictionClock) && (
                     <div role="alert" className="flex items-start gap-3 rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-900">
                       <AlertTriangle size={16} className="mt-0.5 shrink-0 text-amber-600" aria-hidden="true" />
                       <div className="space-y-1">
@@ -5954,13 +5999,39 @@ function SiteInspection() {
                       </div>
 
                       <div>
-                        <label className={`mb-2 block text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
+                        <div className="mb-2 flex items-center justify-between gap-3">
+                          <label htmlFor="edit-manual-price-override" className={`text-[14px] font-bold ${labelClass}`}>Manual Price Override (optional)</label>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              if (manualOverrideLocked) {
+                                setManualOverrideLocked(false);
+                                window.requestAnimationFrame(() => document.getElementById("edit-manual-price-override")?.focus());
+                              } else {
+                                setManualOverrideLocked(true);
+                              }
+                            }}
+                            role="switch"
+                            aria-checked={!manualOverrideLocked}
+                            aria-label={`Manual price override is ${manualOverrideLocked ? "locked" : "unlocked"}`}
+                            className={`inline-flex min-h-8 shrink-0 items-center gap-2 rounded-lg border px-2.5 py-1 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-700 hover:bg-slate-50"}`}
+                          >
+                            {manualOverrideLocked ? <Lock size={14} aria-hidden="true" /> : <Unlock size={14} aria-hidden="true" />}
+                            <span>{manualOverrideLocked ? "Locked" : "Unlocked"}</span>
+                            <span className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${manualOverrideLocked ? "bg-amber-500" : "bg-emerald-600"}`} aria-hidden="true">
+                              <span className={`inline-block size-4 rounded-full bg-white shadow transition-transform ${manualOverrideLocked ? "translate-x-0.5" : "translate-x-[18px]"}`} />
+                            </span>
+                          </button>
+                        </div>
                         <input
+                          id="edit-manual-price-override"
                           type={hidePaymentAmounts ? "password" : "number"}
                           min="0"
                           placeholder="Enter adjusted total..."
-                          className={fieldClass}
+                          className={`${manualOverrideLocked ? lockedFieldClass : fieldClass} manual-price-override-field`}
                           value={editInspection.manual_override || ""}
+                          disabled={manualOverrideLocked}
+                          onBlur={() => setManualOverrideLocked(true)}
                           onChange={(e) => handleEditChange("manual_override", e.target.value)}
                         />
                       </div>

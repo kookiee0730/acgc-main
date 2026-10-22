@@ -1926,6 +1926,40 @@ export const deleteOrderReview = async (req, res) => {
   }
 };
 
+export const setOrderReviewVisibility = async (req, res) => {
+  try {
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const hiddenFromCustomers = req.body?.hiddenFromCustomers;
+    if (typeof hiddenFromCustomers !== "boolean") {
+      return res.status(400).json({ success: false, message: "Review visibility must be true or false." });
+    }
+
+    if (req.body?.itemIndex !== undefined && req.body?.itemIndex !== null) {
+      const itemIndex = Number(req.body.itemIndex);
+      if (!Number.isInteger(itemIndex) || itemIndex < 0 || itemIndex >= order.items.length) {
+        return res.status(400).json({ success: false, message: "A valid product index is required." });
+      }
+      const review = order.items[itemIndex]?.review;
+      if (!review?.submittedAt) return res.status(404).json({ success: false, message: "Product feedback not found." });
+      review.hiddenFromCustomers = hiddenFromCustomers;
+      order.markModified(`items.${itemIndex}.review`);
+    } else {
+      if (!order.review?.submittedAt && !order.review?.rating) {
+        return res.status(404).json({ success: false, message: "Customer feedback not found." });
+      }
+      order.review.hiddenFromCustomers = hiddenFromCustomers;
+      order.markModified("review");
+    }
+
+    await order.save();
+    return res.json({ success: true, order, hiddenFromCustomers });
+  } catch (error) {
+    console.error("Set order review visibility error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update review visibility." });
+  }
+};
+
 export const submitOrderReview = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2086,7 +2120,7 @@ export const getProductReviewSummary = async (req, res) => {
         if (String(item.product_id) !== String(productId)) continue;
         const review = item.review?.submittedAt ? item.review : order.review;
         const rating = Number(review?.rating);
-        if (!review?.submittedAt || !Number.isFinite(rating) || rating < 1 || rating > 5) continue;
+        if (!review?.submittedAt || review.hiddenFromCustomers === true || !Number.isFinite(rating) || rating < 1 || rating > 5) continue;
         counts[Math.round(rating)] += 1;
         ratingTotal += rating;
         total += 1;
@@ -2125,7 +2159,7 @@ export const getProductReviews = async (req, res) => {
           .flatMap((item, itemIndex) => {
             if (!item.product_id || String(item.product_id._id || item.product_id) !== String(productId)) return [];
             const review = item.review?.submittedAt ? item.review : order.review;
-            if (!review?.submittedAt) return [];
+            if (!review?.submittedAt || review.hiddenFromCustomers === true) return [];
             return [{
               orderId: order._id,
               tracking: order.tracking,

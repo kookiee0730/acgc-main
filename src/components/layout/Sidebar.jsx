@@ -14,6 +14,7 @@ import {
   Settings,
   LogOut,
   Pin,
+  Wrench,
 } from "lucide-react";
 
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
@@ -169,8 +170,8 @@ function Sidebar({ forceRender = false }) {
     canViewStaffModule("site_inspection") && { to: "/site-inspection", label: "Inspection", icon: <ClipboardCheck size={20} />, badge: badges.siteInspection, active: location.pathname === "/site-inspection" },
     canViewStaffModule("transactions") && { to: "/transactions", label: "Transactions", compactLabel: "Trans.", icon: <ReceiptText size={20} />, badge: badges.transactions, active: location.pathname === "/transactions" },
     canViewStaffModule("progress_monitoring") && { to: "/progress-monitor", label: "Monitor", icon: <ChartNoAxesCombined size={20} />, badge: badges.progressMonitor, active: location.pathname === "/progress-monitor" },
+    canViewStaffModule("transactions") && { to: "/repair-requests", label: "Repairs", icon: <Wrench size={20} />, active: location.pathname === "/repair-requests" },
     canViewStaffModule("product_management") && { to: "/product", label: "Products", icon: <Package size={20} />, active: location.pathname === "/product" },
-    canViewStaffModule("profile") && { to: "/profile", label: user?.role === "skilled_worker" ? "Profile" : "Profile", icon: <UserCog size={20} />, active: location.pathname === "/profile" },
     canViewStaffModule("settings") && { to: "/settings", label: "Settings", icon: <Settings size={20} />, active: location.pathname === "/settings" },
   ].filter(Boolean);
 
@@ -259,6 +260,16 @@ function Sidebar({ forceRender = false }) {
             active={location.pathname === "/transactions"}
             darkMode={darkMode}
             onIntent={() => prefetchAdminRoute("/transactions")}
+          />}
+
+          {["admin", "super_admin"].includes(user?.role) && <MenuItem
+            to="/repair-requests"
+            icon={<Wrench size={17} />}
+            label="Repair Management"
+            isOpen={isOpen}
+            active={location.pathname === "/repair-requests"}
+            darkMode={darkMode}
+            onIntent={() => prefetchAdminRoute("/repair-requests")}
           />}
 
           {canViewStaffModule("progress_monitoring") && <MenuItem
@@ -438,7 +449,7 @@ function MenuItem({
           : darkMode
             ? "text-slate-300 hover:bg-red-950/70 hover:text-red-200"
             : "text-gray-700 hover:bg-red-50 hover:text-red-700"
-      } ${isOpen ? "grid-cols-[20px_minmax(0,1fr)] gap-2.5" : "grid-cols-[1fr_0fr] gap-0"} ${nested ? "rounded-l-none rounded-r-xl" : ""}`}
+      } ${isOpen ? "grid-cols-[20px_minmax(0,1fr)] gap-2.5" : "grid-cols-[1fr_0fr] gap-0"} ${nested ? "ml-5 w-[calc(100%-1.25rem)] rounded-l-none rounded-r-xl border-l-2 border-slate-300/60 pl-3 dark:border-slate-700" : ""}`}
     >
       <span className={`relative shrink-0 justify-self-center transition-transform duration-200 ease-out motion-reduce:transition-none ${
         isOpen ? "" : "group-hover:-translate-y-0.5 group-hover:scale-110 motion-reduce:group-hover:translate-y-0 motion-reduce:group-hover:scale-100"

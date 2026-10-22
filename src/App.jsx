@@ -12,6 +12,7 @@ const TrackOrder = lazy(() => import("./pages/TrackOrder/TrackOrder"));
 const SiteInspection = lazy(() => import("./pages/SiteInspection/SiteInspection"));
 const Notifications = lazy(() => import("./pages/Notifications/Notifications"));
 const Transactions = lazy(() => import("./pages/Transactions/Transactions"));
+const RepairRequests = lazy(() => import("./pages/RepairRequests/RepairRequests"));
 const ProgressMonitor = lazy(() => import("./pages/ProgressMonitor/ProgressMonitor"));
 const Product = lazy(() => import("./pages/Product/Product"));
 const AdminProfile = lazy(() => import("./pages/AdminProfile/AdminProfile"));
@@ -35,6 +36,7 @@ const ADMIN_ROUTE_PATHS = new Set([
   "/site-inspection",
   "/notifications",
   "/transactions",
+  "/repair-requests",
   "/progress-monitor",
   "/product",
   "/profile",
@@ -125,7 +127,7 @@ function PublicPageRoutes() {
 
 function AdminLayout({ isSidebarOpen, onSidebarToggle }) {
   useEffect(() => {
-    ["/site-inspection", "/transactions", "/progress-monitor"].forEach((path) => {
+    ["/site-inspection", "/transactions", "/repair-requests", "/progress-monitor"].forEach((path) => {
       void prefetchAdminRoute(path);
     });
   }, []);
@@ -401,6 +403,14 @@ function AppRoutes() {
             element={
               <ProtectedRoute roles={["admin", "skilled_worker"]} requiredModule="transactions">
                 <Transactions />
+              </ProtectedRoute>
+            }
+          />
+          <Route
+            path="/repair-requests"
+            element={
+              <ProtectedRoute roles={["admin", "skilled_worker"]} requiredModule="transactions">
+                <RepairRequests />
               </ProtectedRoute>
             }
           />

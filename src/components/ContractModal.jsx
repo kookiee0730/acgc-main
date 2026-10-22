@@ -30,8 +30,6 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
   const noticeClass = darkMode ? "mb-4 rounded-xl border border-amber-400/40 bg-amber-500/15 px-4 py-3 text-sm text-amber-100" : "mb-4 rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800";
   const sectionLabelClass = "text-[10px] font-black uppercase tracking-[0.16em] text-[#68141b]";
   const tableTopClass = "bg-[#68141b] text-white";
-  const subtleTextClass = "text-slate-500";
-  const subtleTextDarkClass = "text-slate-600";
   const panelClass = "border-y border-slate-200 bg-slate-50 px-4 py-4 sm:px-6 sm:py-5";
   const minorPanelClass = "rounded-xl border border-emerald-200 bg-emerald-50 p-3 text-[10px] text-emerald-900";
   const footerClass = "mt-6 border-t border-slate-200 pt-4 text-center text-[9px] text-slate-500";
@@ -90,8 +88,6 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
   const inspectionDate = contractData.siteInspectionDate || formatDate(inspection.inspection_date, "TBD");
   const installationDate = formatDate(inspection.estimated_installation_date, "TBD");
   const customerName = contractData.customerName || inspection.customer_name || "Customer";
-  const customerEmail = contractData.customerEmail || inspection.customer_email || "N/A";
-  const customerPhone = contractData.customerPhone || inspection.customer_phone || "N/A";
   const siteAddress = contractData.projectLocation || inspection.shipping_address || "N/A";
   const paymentTerms = contractData.paymentTerms || inspection.payment_terms || (isFullPaymentMethod
     ? "Full payment is required before project commences."
@@ -170,6 +166,7 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
             <div><span className={infoLabelClass}>Generated Date</span><p className={infoValueClass}>{inspection.contractGeneratedAt ? formatDate(inspection.contractGeneratedAt) : contractData.contractDate || "N/A"}</p></div>
             <div><span className={infoLabelClass}>Customer</span><p className={infoValueClass}>{customerName}</p></div>
             <div><span className={infoLabelClass}>Order ID</span><p className={`${infoValueClass} break-all`}>{inspection.tracking || inspection._id || inspection.id || contractData.orderNumber || "N/A"}</p></div>
+            <div className="min-w-0"><span className={infoLabelClass}>Site Address</span><p className={`${infoValueClass} break-words leading-relaxed`}>{siteAddress}</p></div>
           </div>
 
           <section className="border-b border-slate-200 bg-rose-50/70 px-4 py-4 sm:px-6 sm:py-5">
@@ -181,23 +178,8 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
             </ol>
           </section>
 
-          <section className="grid grid-cols-1 gap-0 border-b border-slate-200 sm:grid-cols-2">
-            <div className="border-b border-slate-200 px-4 py-4 sm:border-b-0 sm:border-r sm:px-6 sm:py-5">
-              <h2 className={sectionLabelClass}>Service Provider</h2>
-              <p className="mt-2 font-bold text-[#9f1722]"> ACGC Glass &amp; Aluminum Services</p>
-              <p className={subtleTextDarkClass}>Olongapo City, Zambales</p>
-            </div>
-            <div className="px-4 py-4 sm:px-6 sm:py-5">
-              <h2 className={sectionLabelClass}>Client</h2>
-              <p className="mt-2 font-bold text-slate-900">{customerName}</p>
-              <p className={subtleTextDarkClass}>{customerEmail} | {customerPhone}</p>
-              <p className={subtleTextClass}>{siteAddress}</p>
-            </div>
-          </section>
-
           <section className="px-4 py-4 sm:px-6 sm:py-5">
             <h2 className={`${sectionLabelClass} border-b border-slate-200 pb-2`}>Scope of Work</h2>
-            <p className="mt-2 text-[10px]"><span className="font-bold">Site Address:</span> {siteAddress}</p>
             <p className={`mt-1 whitespace-pre-wrap text-[10px] ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{siteNotes}</p>
             <div className="mt-4 grid grid-cols-2 gap-3 border-y border-slate-200 bg-slate-50 px-3 py-3 text-[10px] sm:grid-cols-4">
               <p><span className="font-bold">Inspection Date:</span> {inspectionDate}</p>

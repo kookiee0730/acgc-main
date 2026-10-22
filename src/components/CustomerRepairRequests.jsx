@@ -1,0 +1,246 @@
+import { useCallback, useEffect, useMemo, useState } from "react";
+import { ArrowUpRight, CalendarDays, CheckCircle2, CircleCheck, Clock3, FileText, Image, ImagePlus, LoaderCircle, MapPin, Package, Plus, Receipt, ShieldCheck, Upload, Wrench, X, XCircle } from "lucide-react";
+import toast from "react-hot-toast";
+import RepairReceiptModal from "@/components/RepairReceiptModal";
+import { createCustomerRepairRequest, getCustomerRepairRequests, respondToRepairQuotation, submitRepairPaymentProof } from "@/api/repairs";
+import { uploadFiles } from "@/api/uploads";
+import { subscribeToRealtime } from "@/lib/realtimeEvents";
+
+const money = (amount) => `PHP ${Number(amount || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const warrantyFor = (order, item) => {
+  const period = String(item?.warranty_period || order?.warranty_period || "").trim().toLowerCase();
+  const noWarranty = String(item?.warranty_status || order?.warranty_status || "").toLowerCase() === "no_warranty" || period === "no warranty";
+  const expiryValue = item?.warranty_expiry_date || order?.warranty_expiry_date;
+  let expiry = expiryValue ? new Date(expiryValue) : null;
+  if (!expiry && !noWarranty && period) {
+    const customDays = Number(item?.custom_warranty_days || order?.custom_warranty_days);
+    const match = period.match(/^(\d+(?:\.\d+)?)\s*(days?|months?|years?)?$/);
+    const days = period === "custom" ? (customDays > 0 ? customDays : 90) : match ? Math.round(Number(match[1]) * ((match[2] || "days").startsWith("year") ? 365 : (match[2] || "days").startsWith("month") ? 30 : 1)) : 90;
+    const start = item?.warranty_start_date || order?.warranty_start_date || order?.createdAt;
+    if (start) { expiry = new Date(start); expiry.setUTCDate(expiry.getUTCDate() + days); }
+  }
+  const active = !noWarranty && (expiry ? expiry >= new Date() : String(item?.warranty_status || order?.warranty_status || "").toLowerCase() === "active");
+  return { active, expiry, noWarranty };
+};
+const statusLabels = {
+  pending_review: "Pending Review", quotation_pending_approval: "Quotation Pending Approval", customer_accepted: "Quotation Accepted",
+  admin_approved: "Warranty Approved", scheduled: "Scheduled", in_progress: "Repair in Progress", completed: "Completed", cancelled: "Cancelled / Quotation Rejected", rejected: "Repair Rejected",
+};
+const progressSteps = ["pending_review", "quotation_pending_approval", "scheduled", "in_progress", "completed"];
+export default function CustomerRepairRequests({ darkMode, projects = [] }) {
+  const [repairs, setRepairs] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+  const [busyId, setBusyId] = useState("");
+  const [requestOpen, setRequestOpen] = useState(false);
+  const [previewMedia, setPreviewMedia] = useState(null);
+  const [receiptRepair, setReceiptRepair] = useState(null);
+  const [rejectionDetails, setRejectionDetails] = useState(null);
+  const [selected, setSelected] = useState("");
+  const [issue, setIssue] = useState("");
+  const [media, setMedia] = useState([]);
+  const [paymentMethods, setPaymentMethods] = useState({});
+  const [paymentProofFiles, setPaymentProofFiles] = useState({});
+  const [paymentProofAmounts, setPaymentProofAmounts] = useState({});
+  const [paymentProofReferences, setPaymentProofReferences] = useState({});
+  const [proofBusyId, setProofBusyId] = useState("");
+  const [notes, setNotes] = useState({});
+  const [historyFilter, setHistoryFilter] = useState("all");
+  const completedOrders = useMemo(() => projects.filter((order) => String(order.status).toLowerCase() === "completed"), [projects]);
+  const activeCount = repairs.filter((repair) => ["admin_approved", "customer_accepted", "scheduled", "in_progress"].includes(repair.status)).length;
+  const needsActionCount = repairs.filter((repair) => ["pending_review", "quotation_pending_approval"].includes(repair.status)).length;
+  const visibleRepairs = historyFilter === "all" ? repairs : historyFilter === "cancelled"
+    ? repairs.filter((repair) => ["cancelled", "rejected"].includes(repair.status)) : historyFilter === "in_progress"
+    ? repairs.filter((repair) => ["admin_approved", "customer_accepted", "scheduled", "in_progress"].includes(repair.status))
+    : repairs.filter((repair) => repair.status === historyFilter);
+  const repairFilterCount = (value) => value === "all" ? repairs.length : value === "cancelled"
+    ? repairs.filter((repair) => ["cancelled", "rejected"].includes(repair.status)).length
+    : value === "in_progress" ? repairs.filter((repair) => ["admin_approved", "customer_accepted", "scheduled", "in_progress"].includes(repair.status)).length
+    : repairs.filter((repair) => repair.status === value).length;
+  const selectedParts = selected.split(":");
+  const selectedOrder = completedOrders.find((order) => String(order._id) === selectedParts[0]);
+  const selectedIndex = Number(selectedParts[1]);
+  const selectedItem = selectedOrder?.items?.[selectedIndex];
+  const selectedWarranty = warrantyFor(selectedOrder, selectedItem);
+  const panel = darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900";
+  const field = `mt-1 w-full rounded-lg border px-3 py-2.5 text-sm ${darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-800"}`;
+
+  const load = useCallback(async () => {
+    try { const response = await getCustomerRepairRequests(); setRepairs(response.repairs || []); }
+    catch (error) { toast.error(error?.data?.message || error.message || "Unable to load repair history."); }
+    finally { setLoading(false); }
+  }, []);
+  useEffect(() => { void load(); return subscribeToRealtime(["repairs"], () => { void load(); }); }, [load]);
+
+  const submit = async (event) => {
+    event.preventDefault();
+    if (!selectedOrder || !selectedItem || !issue.trim()) return toast.error("Choose an order product and describe the issue.");
+    if (!media.length || media.some((file) => !file.type.startsWith("image/"))) return toast.error("Upload at least one defect image. Videos are not accepted.");
+    let outOfWarrantyAcknowledged = false;
+    if (!selectedWarranty.active) {
+      const expiry = selectedWarranty.expiry ? ` Warranty expired ${selectedWarranty.expiry.toLocaleDateString("en-PH", { month: "long", year: "numeric" })}.` : "";
+      outOfWarrantyAcknowledged = window.confirm(`This item is out of warranty.${expiry} The repair requires inspection and a price quotation. You can accept or decline the quotation before scheduling. Continue?`);
+      if (!outOfWarrantyAcknowledged) return;
+    }
+    setSubmitting(true);
+    try {
+      const uploaded = await uploadFiles(media, undefined, { purpose: "repair-media" });
+      await createCustomerRepairRequest({ orderId: selectedOrder._id, productIndex: selectedIndex, issueDescription: issue.trim(), mediaUrls: (uploaded.files || []).map((file) => file.url), outOfWarrantyAcknowledged });
+      setSelected(""); setIssue(""); setMedia([]); setRequestOpen(false); await load();
+      toast.success("Repair request submitted.");
+    } catch (error) { toast.error(error?.data?.message || error.message || "Unable to submit repair request."); }
+    finally { setSubmitting(false); }
+  };
+  const respond = async (repair, action) => {
+    setBusyId(String(repair._id));
+    try {
+      await respondToRepairQuotation(repair._id, { action, paymentMethod: paymentMethods[repair._id] || "", notes: notes[repair._id] || "" });
+      await load(); toast.success(action === "accept" ? "Quotation accepted." : "Request cancelled.");
+    } catch (error) { toast.error(error?.data?.message || error.message || "Unable to submit quotation response."); }
+    finally { setBusyId(""); }
+  };
+  const submitPaymentProof = async (repair) => {
+    const file = paymentProofFiles[repair._id];
+    if (!file) return toast.error("Choose your payment proof file.");
+    if (file.size > 4 * 1024 * 1024) return toast.error("Payment proof must be 4 MB or smaller.");
+    const amount = Number(paymentProofAmounts[repair._id] || repair.quotation?.total || 0);
+    if (!Number.isFinite(amount) || amount < Number(repair.quotation?.total || 0)) return toast.error(`Enter an amount that covers the quotation of ${money(repair.quotation?.total)}.`);
+    setProofBusyId(String(repair._id));
+    try {
+      const uploaded = await uploadFiles([file], undefined, { purpose: "payment-proofs" });
+      const proof = uploaded.files?.[0];
+      if (!proof?.url) throw new Error("The payment proof upload did not return a file URL.");
+      await submitRepairPaymentProof(repair._id, {
+        proofUrl: proof.url,
+        proofFileName: proof.originalName || file.name,
+        amount,
+        transactionNumber: paymentProofReferences[repair._id] || "",
+      });
+      setPaymentProofFiles((current) => ({ ...current, [repair._id]: null }));
+      await load();
+      toast.success("Payment proof submitted for review.");
+    } catch (error) { toast.error(error?.data?.message || error.message || "Unable to submit payment proof."); }
+    finally { setProofBusyId(""); }
+  };
+  const addMediaFiles = (fileList) => {
+    const chosen = Array.from(fileList || []);
+    const images = chosen.filter((file) => file.type.startsWith("image/"));
+    if (images.length !== chosen.length) toast.error("Only image files can be attached.");
+    const seen = new Set(media.map((file) => `${file.name}-${file.size}-${file.lastModified}`));
+    const uniqueImages = images.filter((file) => {
+      const key = `${file.name}-${file.size}-${file.lastModified}`;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    });
+    if (media.length + uniqueImages.length > 6) toast.error("You can attach up to six images.");
+    setMedia([...media, ...uniqueImages].slice(0, 6));
+  };
+  const handleMediaSelection = (event) => {
+    addMediaFiles(event.target.files);
+    event.target.value = "";
+  };
+  const paymentProofPanel = (repair) => {
+    if (repair.workflowType !== "paid" || !repair.quotation?.issuedAt || ["pending_review", "quotation_pending_approval", "cancelled", "rejected", "completed"].includes(repair.status)) return null;
+    const payment = repair.payment || {};
+    const proofPending = payment.proofReviewStatus === "pending";
+    const proofApproved = payment.proofReviewStatus === "approved" || payment.status === "received";
+    const proofRejected = payment.proofReviewStatus === "rejected";
+    const file = paymentProofFiles[repair._id];
+    return <section className={`mt-3 rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-slate-900/70" : "border-sky-200 bg-sky-50/70"}`}>
+      <div className="flex items-start justify-between gap-3"><div><p className="text-xs font-bold">Payment proof</p><p className={`mt-1 text-[10px] leading-4 ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{proofPending ? "Your payment document is awaiting admin review." : proofApproved ? "Your payment has been verified." : proofRejected ? `Proof was rejected: ${payment.proofRejectionReason || "Please upload a corrected proof."}` : "Submit a receipt or transaction screenshot for your repair payment."}</p></div><span className={`shrink-0 rounded-full px-2 py-1 text-[9px] font-bold ${proofPending ? "bg-amber-100 text-amber-800" : proofApproved ? "bg-emerald-100 text-emerald-800" : proofRejected ? "bg-red-100 text-red-800" : "bg-slate-200 text-slate-700"}`}>{proofPending ? "Under review" : proofApproved ? "Verified" : proofRejected ? "Action needed" : "Not submitted"}</span></div>
+      {payment.proofUrl && <a href={payment.proofUrl} target="_blank" rel="noreferrer" className="mt-2 inline-flex text-[10px] font-semibold text-sky-700 underline">View submitted proof{payment.proofFileName ? `: ${payment.proofFileName}` : ""}</a>}
+      {!proofPending && !proofApproved && <div className="mt-3 grid gap-2 sm:grid-cols-2">
+        <label className={`block rounded-lg border border-dashed p-2.5 text-[10px] ${darkMode ? "border-slate-700" : "border-slate-300 bg-white"}`}><span className="mb-1 block font-semibold">Proof file (image or PDF, max 4 MB)</span><input type="file" accept="image/jpeg,image/png,image/webp,image/gif,application/pdf" onChange={(event) => { setPaymentProofFiles((current) => ({ ...current, [repair._id]: event.target.files?.[0] || null })); event.target.value = ""; }} className="block w-full text-[10px] file:mr-2 file:rounded-md file:border-0 file:bg-slate-100 file:px-2 file:py-1 file:text-[10px] file:font-semibold" />{file && <span className="mt-1 block truncate font-medium">{file.name}</span>}</label>
+        <div className="space-y-2"><label className="block text-[10px] font-semibold">Amount paid<input type="number" min={repair.quotation.total} step="0.01" value={paymentProofAmounts[repair._id] ?? String(repair.quotation.total)} onChange={(event) => setPaymentProofAmounts((current) => ({ ...current, [repair._id]: event.target.value }))} className={`mt-1 w-full rounded-lg border px-2.5 py-2 text-xs ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-white"}`} /></label><label className="block text-[10px] font-semibold">Transaction/reference number (optional)<input type="text" maxLength={180} value={paymentProofReferences[repair._id] || ""} onChange={(event) => setPaymentProofReferences((current) => ({ ...current, [repair._id]: event.target.value }))} className={`mt-1 w-full rounded-lg border px-2.5 py-2 text-xs ${darkMode ? "border-slate-700 bg-slate-950" : "border-slate-200 bg-white"}`} /></label></div>
+      </div>}
+      {!proofPending && !proofApproved && <button type="button" disabled={!file || proofBusyId === String(repair._id)} onClick={() => submitPaymentProof(repair)} className="mt-2 inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg bg-sky-700 px-3 py-2 text-[10px] font-bold text-white disabled:cursor-not-allowed disabled:opacity-50">{proofBusyId === String(repair._id) ? <LoaderCircle size={13} className="animate-spin" /> : <Upload size={13} />}{proofBusyId === String(repair._id) ? "Submitting..." : proofRejected ? "Resubmit payment proof" : "Submit payment proof"}</button>}
+    </section>;
+  };
+
+  return <section className={`mb-6 overflow-hidden rounded-[28px] border shadow-sm ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+    <div className={`relative overflow-hidden border-b p-5 sm:p-7 ${darkMode ? "border-slate-700 bg-gradient-to-br from-slate-900 via-slate-900 to-red-950/40" : "border-slate-100 bg-gradient-to-br from-rose-50 via-white to-slate-50"}`}>
+      <div aria-hidden="true" className="pointer-events-none absolute -right-12 -top-24 size-64 rounded-full border border-red-500/10" />
+      <div className="relative flex flex-col justify-between gap-5 md:flex-row md:items-center">
+        <div className="flex items-start gap-4">
+          <span className={`flex size-12 shrink-0 items-center justify-center rounded-2xl ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-100 text-red-700"}`}><Wrench size={22} /></span>
+          <div><p className={`text-[10px] font-black uppercase tracking-[0.22em] ${darkMode ? "text-red-300" : "text-red-700"}`}>Customer care</p><h2 className="mt-1 text-xl font-black tracking-tight sm:text-2xl">Warranty & Repair Service</h2><p className={`mt-2 max-w-2xl text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Get help with a completed order. Follow inspections, quotations, appointments, and repair progress in one place.</p></div>
+        </div>
+        <button type="button" onClick={() => setRequestOpen(true)} disabled={!completedOrders.length} className="inline-flex min-h-12 shrink-0 items-center justify-center gap-2 rounded-xl bg-red-700 px-5 py-3 text-sm font-bold text-white shadow-lg shadow-red-900/15 transition hover:-translate-y-0.5 hover:bg-red-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50"><Plus size={18} />Request service<ArrowUpRight size={16} /></button>
+      </div>
+    </div>
+
+    <div className="p-4 sm:p-6">
+      <div className="mb-5 -mx-1 overflow-x-auto px-1 pb-1">
+        {!loading && repairs.length > 0 && <div className="flex min-w-max flex-wrap items-center gap-1.5" role="tablist" aria-label="Filter service requests">{[{ value: "all", label: "All" }, { value: "pending_review", label: "Pending" }, { value: "quotation_pending_approval", label: "Quotation" }, { value: "in_progress", label: "In progress" }, { value: "completed", label: "Completed" }, { value: "cancelled", label: "Closed" }].map((filter) => <button key={filter.value} type="button" role="tab" aria-selected={historyFilter === filter.value} onClick={() => setHistoryFilter(filter.value)} className={`inline-flex min-h-10 shrink-0 items-center gap-2 rounded-xl border px-3.5 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 ${historyFilter === filter.value ? darkMode ? "border-red-700 bg-red-950/60 text-red-100 shadow-sm shadow-black/10" : "border-red-200 bg-red-50 text-red-950 shadow-sm" : darkMode ? "border-slate-700 bg-slate-800 text-slate-300 shadow-sm hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900"}`}><span className="whitespace-nowrap">{filter.label}</span><span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] tabular-nums ${historyFilter === filter.value ? darkMode ? "bg-red-800 text-red-50" : "bg-red-200 text-red-900" : darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-700"}`}>{repairFilterCount(filter.value)}</span></button>)}</div>}
+      </div>
+      {loading ? <div className={`flex items-center gap-3 rounded-2xl border p-6 text-sm ${darkMode ? "border-slate-700 bg-slate-950/50 text-slate-300" : "border-slate-200 bg-slate-50 text-slate-600"}`}><LoaderCircle size={18} className="animate-spin text-red-600" />Loading your repair history...</div> : repairs.length === 0 ? <div className={`rounded-2xl border border-dashed px-5 py-9 text-center ${darkMode ? "border-slate-700 bg-slate-950/40" : "border-slate-200 bg-slate-50"}`}><span className="mx-auto flex size-12 items-center justify-center rounded-2xl bg-red-700/10 text-red-700"><Package size={22} /></span><h4 className="mt-3 text-sm font-bold">No service requests yet</h4><p className={`mx-auto mt-1 max-w-sm text-xs leading-5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>If a completed product needs attention, submit a repair or warranty request to get started.</p>{completedOrders.length > 0 && <button type="button" onClick={() => setRequestOpen(true)} className="mt-4 rounded-xl bg-red-700 px-4 py-2.5 text-xs font-bold text-white">Start a request</button>}</div> : visibleRepairs.length === 0 ? <div className={`rounded-2xl border border-dashed px-5 py-8 text-center text-sm ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-200 text-slate-500"}`}>No requests in this status.</div> : <><div className={`hidden overflow-x-auto rounded-2xl border md:block ${darkMode ? "border-slate-700" : "border-slate-200"}`}><table className="w-full min-w-[1050px] border-collapse text-left"><thead className={darkMode ? "bg-slate-800/80" : "bg-slate-50"}><tr className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}><th className="px-4 py-3 font-bold">Product / Issue</th><th className="px-4 py-3 font-bold">Order</th><th className="px-4 py-3 font-bold">Service type</th><th className="px-4 py-3 font-bold">Status / Progress</th><th className="px-4 py-3 font-bold">Visit / Quote</th><th className="px-4 py-3 font-bold">Evidence / Actions</th></tr></thead><tbody className={darkMode ? "divide-y divide-slate-800" : "divide-y divide-slate-100"}>{visibleRepairs.map((repair) => {
+        const steps = repair.workflowType === "warranty" ? ["pending_review", "scheduled", "in_progress", "completed"] : progressSteps;
+        const stepForStatus = repair.status === "admin_approved" ? 1 : repair.status === "customer_accepted" ? 2 : steps.indexOf(repair.status);
+        const awaitingQuote = repair.status === "quotation_pending_approval";
+        const closed = ["cancelled", "rejected"].includes(repair.status);
+        const progress = repair.status === "completed" ? 100 : closed ? 0 : Math.max(8, ((stepForStatus + 1) / steps.length) * 100);
+        const statusStyle = repair.status === "completed" ? "bg-emerald-500/10 text-emerald-700" : closed ? "bg-red-500/10 text-red-700" : awaitingQuote ? "bg-amber-500/10 text-amber-700" : "bg-sky-500/10 text-sky-700";
+        return <tr key={repair._id} className={`align-top transition-colors ${darkMode ? "hover:bg-slate-800/40" : "hover:bg-slate-50"}`}>
+          <td className="max-w-[260px] px-4 py-4"><p className="font-bold">{repair.productName}</p><p className={`mt-1 line-clamp-2 text-xs leading-5 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{repair.issueDescription}</p></td>
+          <td className="px-4 py-4"><p className="text-sm font-semibold">{repair.orderTracking || "—"}</p><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Submitted {new Date(repair.requestedAt || repair.createdAt).toLocaleDateString("en-PH")}</p></td>
+          <td className="px-4 py-4"><span className={`inline-flex whitespace-nowrap rounded-full px-2.5 py-1 text-[10px] font-bold ${repair.workflowType === "warranty" ? "bg-emerald-500/10 text-emerald-700" : "bg-amber-500/10 text-amber-700"}`}>{repair.workflowType === "warranty" ? "Warranty claim" : "Paid repair"}</span><p className={`mt-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{repair.workflowType === "warranty" ? `Coverage ${repair.warranty?.status || "unknown"}` : repair.quotation?.issuedAt ? `Quotation ${money(repair.quotation.total)}` : "Estimate pending"}</p></td>
+          <td className="min-w-[190px] px-4 py-4"><span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-bold ${statusStyle}`}>{statusLabels[repair.status] || "Repair update"}</span><div className={`mt-2 h-1.5 overflow-hidden rounded-full ${darkMode ? "bg-slate-700" : "bg-slate-100"}`}><div className={`h-full rounded-full ${closed ? "bg-red-500" : repair.status === "completed" ? "bg-emerald-500" : "bg-red-600"}`} style={{ width: `${progress}%` }} /></div><p className={`mt-1 text-[10px] ${darkMode ? "text-slate-500" : "text-slate-400"}`}>{closed ? repair.status === "rejected" ? "Claim rejected" : "Request closed" : `${Math.round(progress)}% complete`}</p></td>
+          <td className="px-4 py-4">{repair.schedule?.date ? <><p className="text-xs font-semibold">{new Date(repair.schedule.date).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })}</p><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{repair.schedule.technician}</p></> : repair.quotation?.issuedAt ? <p className="text-xs font-semibold">{money(repair.quotation.total)}</p> : <span className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Awaiting review</span>}</td>
+          <td className="min-w-[205px] px-4 py-4"><div className="flex items-center gap-1.5">{repair.mediaUrls?.length ? repair.mediaUrls.slice(0, 3).map((url, index) => <button key={url} type="button" onClick={() => setPreviewMedia(url)} aria-label={`Preview repair evidence ${index + 1}`} className="size-9 overflow-hidden rounded-lg border border-slate-200 bg-slate-100">{/\.(mp4|webm|mov)(\?|$)/i.test(url) ? <video src={url} className="h-full w-full object-cover" /> : <img src={url} alt="Repair evidence" className="h-full w-full object-cover" />}</button>) : <span className={`text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>No photos</span>}{repair.mediaUrls?.length > 3 && <span className="text-[10px]">+{repair.mediaUrls.length - 3}</span>}{repair.status === "rejected" && <button type="button" onClick={() => setRejectionDetails(repair)} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-2.5 py-2 text-[10px] font-bold text-red-700 hover:bg-red-100" aria-label="View repair rejection details"><FileText size={13} />View rejection</button>}{repair.completion?.notes && <button type="button" onClick={() => setReceiptRepair(repair)} title="Print or save repair receipt" className="ml-auto inline-flex items-center gap-1 rounded-lg bg-emerald-700 px-2.5 py-2 text-[10px] font-bold text-white"><FileText size={13} />Receipt</button>}</div>
+            {awaitingQuote && <div className="mt-2 flex flex-wrap items-center gap-1.5"><select aria-label="Payment preference" value={paymentMethods[repair._id] || ""} onChange={(event) => setPaymentMethods((current) => ({ ...current, [repair._id]: event.target.value }))} className={`min-w-0 rounded-lg border px-2 py-1.5 text-[10px] ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}><option value="">Payment method</option><option value="online_downpayment">Online</option><option value="cash_on_site">Cash on site</option></select><button type="button" disabled={busyId === String(repair._id) || !paymentMethods[repair._id]} onClick={() => respond(repair, "accept")} className="rounded-lg bg-emerald-700 px-2.5 py-2 text-[10px] font-bold text-white disabled:opacity-50">Accept</button><button type="button" disabled={busyId === String(repair._id)} onClick={() => respond(repair, "decline")} className="rounded-lg border border-red-300 px-2.5 py-2 text-[10px] font-bold text-red-700 disabled:opacity-50">Decline</button></div>}
+            {paymentProofPanel(repair)}
+          </td>
+        </tr>;
+      })}</tbody></table></div><div className="space-y-4 md:hidden">{visibleRepairs.map((repair) => {
+        const steps = repair.workflowType === "warranty" ? ["pending_review", "scheduled", "in_progress", "completed"] : progressSteps;
+        const stepForStatus = repair.status === "admin_approved" ? 1 : repair.status === "customer_accepted" ? 2 : steps.indexOf(repair.status);
+        const awaitingQuote = repair.status === "quotation_pending_approval";
+        const cancelled = ["cancelled", "rejected"].includes(repair.status);
+        const statusStyle = repair.status === "completed" ? "bg-emerald-500/10 text-emerald-700 ring-emerald-600/15" : cancelled ? "bg-red-500/10 text-red-700 ring-red-600/15" : repair.status === "in_progress" ? "bg-violet-500/10 text-violet-700 ring-violet-600/15" : awaitingQuote ? "bg-amber-500/10 text-amber-700 ring-amber-600/15" : "bg-sky-500/10 text-sky-700 ring-sky-600/15";
+        return <article key={repair._id} className={`overflow-hidden rounded-2xl border shadow-sm transition-all hover:-translate-y-0.5 hover:shadow-lg ${darkMode ? "border-slate-700 bg-slate-950/50" : "border-slate-200 bg-white"}`}>
+          <div className={`border-b p-4 sm:px-6 sm:py-5 ${darkMode ? "border-slate-800 bg-slate-900/60" : "border-slate-100 bg-slate-50/70"}`}>
+            <div className="flex flex-wrap items-start justify-between gap-3">
+              <div className="flex min-w-0 items-start gap-3">
+                <span className={`mt-0.5 flex size-10 shrink-0 items-center justify-center rounded-xl ${repair.workflowType === "warranty" ? "bg-emerald-500/10 text-emerald-700" : "bg-amber-500/10 text-amber-700"}`}><Wrench size={18} /></span>
+                <div className="min-w-0"><h4 className="truncate text-base font-extrabold">{repair.productName}</h4><div className={`mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}><span>Order {repair.orderTracking || "—"}</span><span aria-hidden="true">·</span><span>{repair.workflowType === "warranty" ? "Warranty claim" : "Paid repair"}</span></div></div>
+              </div>
+              <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-[11px] font-bold ring-1 ring-inset ${statusStyle}`}>{repair.status === "completed" ? <CircleCheck size={14} /> : cancelled ? <XCircle size={14} /> : repair.status === "scheduled" ? <CalendarDays size={14} /> : repair.status === "in_progress" ? <Wrench size={14} /> : <Clock3 size={14} />}{statusLabels[repair.status]}</span>
+            </div>
+          </div>
+          <div className="p-4 sm:p-6">
+
+            <div className={`rounded-xl border-l-2 border-red-600 px-3.5 py-3 text-sm leading-6 ${darkMode ? "bg-slate-900 text-slate-300" : "bg-slate-50 text-slate-700"}`}><span className={`mb-1 block text-[10px] font-bold uppercase tracking-wider ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Reported issue</span>{repair.issueDescription}</div>
+
+            {repair.status === "rejected" && <button type="button" onClick={() => setRejectionDetails(repair)} className="mt-3 inline-flex min-h-10 items-center gap-2 rounded-xl border border-red-200 bg-red-50 px-4 py-2 text-xs font-bold text-red-700 hover:bg-red-100 dark:border-red-900/70 dark:bg-red-950/40 dark:text-red-300 dark:hover:bg-red-950/70"><FileText size={15} />View rejection details</button>}
+
+            <div className={`mt-5 rounded-2xl border p-4 ${darkMode ? "border-slate-800 bg-slate-900/50" : "border-slate-100 bg-white"}`}><div className="mb-3 flex items-center justify-between gap-3"><p className={`text-[10px] font-black uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Progress tracker</p><span className="text-[10px] font-bold text-red-700">{cancelled ? "Request closed" : statusLabels[repair.status] || "In progress"}</span></div><ol className="grid grid-cols-2 gap-2 sm:grid-cols-5" aria-label="Repair progress">{steps.map((step, index) => {
+              const current = index === stepForStatus && !cancelled;
+              const complete = index < stepForStatus && !cancelled || repair.status === "completed";
+              const title = ({ pending_review: "Review", quotation_pending_approval: "Quotation", scheduled: "Scheduled", in_progress: "In progress", completed: "Completed" })[step];
+              return <li key={step} className={`flex min-h-10 items-center gap-2 rounded-xl px-2.5 py-2 text-xs font-semibold ${complete ? "bg-emerald-600 text-white" : current ? "bg-red-700 text-white shadow-sm" : darkMode ? "bg-slate-800 text-slate-400" : "bg-slate-100 text-slate-500"}`}><span className={`flex size-5 shrink-0 items-center justify-center rounded-full text-[10px] ${complete || current ? "bg-white/20" : darkMode ? "bg-slate-700" : "bg-white"}`}>{complete ? <CheckCircle2 size={12} /> : index + 1}</span><span className="leading-tight">{title}</span></li>;
+            })}</ol></div>
+
+            {repair.mediaUrls?.length > 0 && <div className="mt-5"><p className={`mb-2 flex items-center gap-1.5 text-xs font-bold ${darkMode ? "text-slate-300" : "text-slate-600"}`}><Image size={14} />Submitted photos and videos</p><div className="flex flex-wrap gap-2">{repair.mediaUrls.map((url, index) => <button key={url} type="button" onClick={() => setPreviewMedia(url)} aria-label={`Preview submitted defect media ${index + 1}`} className="group relative size-[76px] overflow-hidden rounded-xl border border-slate-200 bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500">{/\.(mp4|webm|mov)(\?|$)/i.test(url) ? <video src={url} className="h-full w-full object-cover" /> : <img src={url} alt={`Reported defect ${index + 1}`} className="h-full w-full object-cover transition group-hover:scale-105" />}</button>)}</div></div>}
+
+            <div className="mt-5 flex flex-wrap gap-2">{repair.workflowType === "warranty" ? <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ${darkMode ? "bg-emerald-950/50 text-emerald-300" : "bg-emerald-50 text-emerald-800"}`}><ShieldCheck size={14} />Warranty {repair.warranty?.status || "—"}{repair.warranty?.expiresAt ? ` · through ${new Date(repair.warranty.expiresAt).toLocaleDateString("en-PH")}` : ""} · PHP 0.00</span> : repair.quotation?.issuedAt && <span className={`inline-flex items-center gap-1.5 rounded-full px-3 py-1.5 text-xs font-semibold ${darkMode ? "bg-amber-950/50 text-amber-300" : "bg-amber-50 text-amber-800"}`}><Receipt size={14} />Quotation {money(repair.quotation.total)}</span>}</div>
+
+            {repair.workflowType === "paid" && repair.quotation?.issuedAt && <section className={`mt-4 rounded-2xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/70" : "border-slate-200 bg-slate-50"}`}><div className="flex items-center justify-between gap-3"><h5 className="text-sm font-bold">Quotation breakdown</h5><span className="text-sm font-extrabold text-red-700">{money(repair.quotation.total)}</span></div>{repair.inspection?.notes && <p className={`mt-2 text-xs leading-5 ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{repair.inspection.notes}</p>}<dl className="mt-3 space-y-2 text-xs">{(repair.quotation.parts || []).map((part, index) => <div key={`${part.description}-${index}`} className="flex justify-between gap-4"><dt className={darkMode ? "text-slate-300" : "text-slate-600"}>{part.description}</dt><dd className="font-semibold">{money(part.cost)}</dd></div>)}<div className="flex justify-between gap-4 border-t border-dashed pt-2"><dt className={darkMode ? "text-slate-300" : "text-slate-600"}>Service fee</dt><dd className="font-semibold">{money(repair.quotation.laborCost)}</dd></div></dl>{repair.quotation.notes && <p className={`mt-3 border-t pt-3 text-xs ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-200 text-slate-500"}`}>{repair.quotation.notes}</p>}</section>}
+
+            {awaitingQuote && <section className={`mt-4 rounded-2xl border p-4 ${darkMode ? "border-amber-800/60 bg-amber-950/20" : "border-amber-200 bg-amber-50/80"}`}><div className="mb-3"><h5 className="text-sm font-bold">Review your quotation</h5><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-600"}`}>Choose a payment preference to accept and schedule this repair.</p></div><div className="grid gap-3 sm:grid-cols-2"><label className="block text-xs font-semibold">Payment preference<select required value={paymentMethods[repair._id] || ""} onChange={(event) => setPaymentMethods((current) => ({ ...current, [repair._id]: event.target.value }))} className={field}><option value="">Choose payment option</option><option value="online_downpayment">Pay online downpayment</option><option value="cash_on_site">Cash after service</option></select></label><label className="block text-xs font-semibold">Note (optional)<textarea rows={1} value={notes[repair._id] || ""} onChange={(event) => setNotes((current) => ({ ...current, [repair._id]: event.target.value }))} className={field} placeholder="Add a note for our team" /></label></div><div className="mt-3 flex flex-wrap gap-2"><button type="button" disabled={busyId === String(repair._id) || !paymentMethods[repair._id]} onClick={() => respond(repair, "accept")} className="inline-flex min-h-10 items-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-bold text-white disabled:cursor-not-allowed disabled:opacity-50"><CheckCircle2 size={15} />Accept quotation</button><button type="button" disabled={busyId === String(repair._id)} onClick={() => respond(repair, "decline")} className="inline-flex min-h-10 items-center gap-2 rounded-xl border border-red-300 px-4 py-2.5 text-xs font-bold text-red-700 disabled:opacity-50"><XCircle size={15} />Decline request</button></div></section>}
+
+            {repair.schedule?.date && <div className={`mt-4 grid gap-3 rounded-2xl border p-4 sm:grid-cols-2 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-white"}`}><div className="flex items-start gap-2.5"><CalendarDays size={16} className="mt-0.5 shrink-0 text-indigo-600" /><div><p className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Service visit</p><p className="mt-1 text-xs font-semibold">{new Date(repair.schedule.date).toLocaleString("en-PH", { dateStyle: "medium", timeStyle: "short" })}</p></div></div><div className="flex items-start gap-2.5"><MapPin size={16} className="mt-0.5 shrink-0 text-indigo-600" /><div><p className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-slate-400"}`}>Assigned technician</p><p className="mt-1 text-xs font-semibold">{repair.schedule.technician || "To be assigned"}{repair.schedule.notes ? ` · ${repair.schedule.notes}` : ""}</p></div></div></div>}
+
+            {repair.completion?.notes && <div className={`mt-4 flex flex-col gap-3 rounded-2xl border p-4 sm:flex-row sm:items-center sm:justify-between ${darkMode ? "border-emerald-800/60 bg-emerald-950/20" : "border-emerald-200 bg-emerald-50/70"}`}><div><p className="flex items-center gap-1.5 text-sm font-bold text-emerald-800 dark:text-emerald-300"><CircleCheck size={16} />Repair completed</p><p className={`mt-1 text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{repair.completion.notes}</p><p className={`mt-1 text-xs font-semibold ${darkMode ? "text-slate-300" : "text-slate-700"}`}>Amount paid: {money(repair.completion.amountPaid)}</p></div><button type="button" onClick={() => setReceiptRepair(repair)} className="inline-flex min-h-10 shrink-0 items-center justify-center gap-2 rounded-xl bg-emerald-700 px-4 py-2.5 text-xs font-bold text-white"><FileText size={15} />Print / Save receipt</button></div>}
+            {paymentProofPanel(repair)}
+          </div>
+        </article>;
+      })}</div></>}
+    </div>
+
+    {requestOpen && <div className="fixed inset-0 z-[120] flex items-center justify-center bg-slate-950/70 p-0 sm:p-3" onMouseDown={(event) => { if (event.target === event.currentTarget && !submitting) setRequestOpen(false); }}><section role="dialog" aria-modal="true" aria-labelledby="repair-request-title" className={`h-[100dvh] max-h-[100dvh] w-full overflow-y-auto border p-5 shadow-2xl sm:h-auto sm:max-h-[90dvh] sm:max-w-xl sm:rounded-2xl ${panel}`}><header className="mb-4 flex items-start justify-between"><div><h3 id="repair-request-title" className="font-bold">Request Repair / Warranty Claim</h3><p className="mt-1 text-xs opacity-70">Choose the product from a completed order.</p></div><button type="button" onClick={() => setRequestOpen(false)} aria-label="Close request form"><X size={18} /></button></header><form onSubmit={submit} className="space-y-4"><label className="block text-xs font-semibold">Order product<select required value={selected} onChange={(event) => setSelected(event.target.value)} className={field}><option value="">Select product</option>{completedOrders.flatMap((order) => (order.items || []).map((item, index) => { const coverage = warrantyFor(order, item); const label = coverage.active ? `Warranty Active${coverage.expiry ? ` until ${coverage.expiry.toLocaleDateString("en-PH", { month: "long", year: "numeric" })}` : ""}` : `Warranty Expired${coverage.expiry ? ` ${coverage.expiry.toLocaleDateString("en-PH", { month: "long", year: "numeric" })}` : ""}`; return <option key={`${order._id}:${index}`} value={`${order._id}:${index}`}>{item.name || "Ordered product"} · {order.tracking} · {label}</option>; }))}</select></label>{selectedItem && <div className={`flex items-center gap-2 rounded-lg p-3 text-xs ${selectedWarranty.active ? "bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "bg-slate-500/10 text-slate-600 dark:text-slate-300"}`}><ShieldCheck size={15} />{selectedWarranty.active ? `Warranty Active${selectedWarranty.expiry ? ` · Valid until ${selectedWarranty.expiry.toLocaleDateString("en-PH", { month: "long", year: "numeric" })}` : ""}` : `Warranty Expired${selectedWarranty.expiry ? ` · Expired ${selectedWarranty.expiry.toLocaleDateString("en-PH", { month: "long", year: "numeric" })}` : " · coverage not active"}`}</div>}<label className="block text-xs font-semibold">Describe the problem<textarea required maxLength={4000} rows={4} value={issue} onChange={(event) => setIssue(event.target.value)} className={field} /></label><div><div className="mb-2 flex items-center justify-between gap-3"><span className="text-xs font-semibold">Defect photos <span className="ml-1 rounded-full bg-red-100 px-2 py-0.5 text-[9px] font-bold uppercase tracking-wide text-red-700">Required</span></span><span className="text-[10px] font-medium text-slate-500">{media.length} / 6</span></div><label onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); addMediaFiles(event.dataTransfer.files); }} className={`relative flex min-h-[112px] cursor-pointer items-center justify-between gap-3 rounded-2xl border-2 border-dashed px-4 py-4 transition focus-within:ring-2 focus-within:ring-red-500/30 ${darkMode ? "border-slate-700 bg-slate-950/50 hover:border-red-500/70 hover:bg-slate-900" : "border-slate-300 bg-slate-50/80 hover:border-red-400 hover:bg-red-50/50"}`}><input type="file" accept="image/*" multiple required={media.length === 0} disabled={media.length >= 6} onChange={handleMediaSelection} className="absolute inset-0 h-full w-full cursor-pointer opacity-0 disabled:cursor-not-allowed" aria-label="Choose defect images" /><span className={`flex size-11 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/10 text-red-300" : "bg-red-100 text-red-700"}`}><ImagePlus size={21} /></span><span className="min-w-0 flex-1"><span className="block text-xs font-bold">{media.length ? "Add more photos" : "Choose defect photos"}</span><span className={`mt-1 block text-[10px] leading-4 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Drag and drop or browse · JPG, PNG, WEBP · up to 6 images</span></span><span className={`inline-flex shrink-0 items-center gap-1.5 rounded-lg border px-3 py-2 text-[10px] font-bold ${darkMode ? "border-slate-700 bg-slate-800 text-slate-200" : "border-slate-200 bg-white text-slate-700"}`}><Upload size={13} />Browse</span></label><p className="mt-1.5 text-[10px] text-slate-500">Upload clear photos showing the damaged area from different angles.</p>{media.length > 0 && <ul className="mt-2 grid gap-2 sm:grid-cols-2">{media.map((file, index) => <li key={`${file.name}-${file.lastModified}-${index}`} className={`flex min-w-0 items-center gap-2 rounded-xl border px-2.5 py-2 ${darkMode ? "border-slate-700 bg-slate-950/60" : "border-slate-200 bg-white"}`}><span className="flex size-8 shrink-0 items-center justify-center rounded-lg bg-emerald-500/10 text-emerald-700"><Image size={15} /></span><span className="min-w-0 flex-1"><span className="block truncate text-[10px] font-semibold" title={file.name}>{file.name}</span><span className="block text-[9px] text-slate-500">{(file.size / (1024 * 1024)).toFixed(2)} MB</span></span><button type="button" onClick={() => setMedia((current) => current.filter((_, itemIndex) => itemIndex !== index))} aria-label={`Remove ${file.name}`} className="flex size-7 shrink-0 items-center justify-center rounded-lg text-slate-500 hover:bg-red-50 hover:text-red-700"><X size={14} /></button></li>)}</ul>}</div>{selectedItem && !selectedWarranty.active && <p className="rounded-lg bg-amber-500/10 p-3 text-xs text-amber-800 dark:text-amber-200">This item is out of warranty. Filing requires inspection and a quotation. You can accept the price and choose payment, or decline and close the request.</p>}<div className="flex justify-end gap-2"><button type="button" onClick={() => setRequestOpen(false)} className="rounded-lg border px-4 py-2 text-xs">Cancel</button><button type="submit" disabled={submitting || !selectedItem} className="rounded-lg bg-red-700 px-4 py-2 text-xs font-bold text-white disabled:opacity-50">{submitting ? "Submitting..." : "Submit request"}</button></div></form></section></div>}
+    <RepairReceiptModal repair={receiptRepair} darkMode={darkMode} onClose={() => setReceiptRepair(null)} />
+    {rejectionDetails && <div className="fixed inset-0 z-[145] flex items-center justify-center bg-slate-950/70 p-0 sm:p-4" onMouseDown={(event) => { if (event.target === event.currentTarget) setRejectionDetails(null); }}><section role="dialog" aria-modal="true" aria-labelledby="repair-rejection-title" className={`h-[100dvh] w-full overflow-y-auto p-5 shadow-2xl sm:h-auto sm:max-h-[85dvh] sm:max-w-xl sm:rounded-2xl ${panel}`}><header className="mb-5 flex items-start justify-between gap-4"><div><span className="inline-flex rounded-full bg-red-500/10 px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide text-red-700 dark:text-red-300">Repair rejected</span><h3 id="repair-rejection-title" className="mt-2 text-lg font-extrabold">Rejection details</h3><p className="mt-1 text-xs opacity-70">{rejectionDetails.productName} · Order {rejectionDetails.orderTracking || "—"}</p></div><button type="button" onClick={() => setRejectionDetails(null)} aria-label="Close rejection details" className="rounded-lg p-2 hover:bg-slate-500/10"><X size={18} /></button></header><div className="space-y-3"><div className={`rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-slate-50"}`}><h4 className="text-[10px] font-bold uppercase tracking-wider opacity-60">Reported issue</h4><p className="mt-2 whitespace-pre-wrap text-sm leading-6">{rejectionDetails.issueDescription || "No issue description was provided."}</p></div><div className="rounded-xl border border-red-200 bg-red-50/70 p-4 dark:border-red-900/60 dark:bg-red-950/20"><h4 className="text-[10px] font-bold uppercase tracking-wider text-red-800 dark:text-red-300">Reason for rejection</h4><p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-slate-700 dark:text-slate-200">{rejectionDetails.warranty?.decisionReason || "No rejection reason was provided."}</p></div>{rejectionDetails.inspection?.notes && <div className={`rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-white"}`}><h4 className="text-[10px] font-bold uppercase tracking-wider opacity-60">Inspection findings</h4><p className="mt-2 whitespace-pre-wrap text-sm leading-6">{rejectionDetails.inspection.notes}</p></div>}{rejectionDetails.mediaUrls?.length > 0 && <div className={`rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-white"}`}><h4 className="mb-3 text-[10px] font-bold uppercase tracking-wider opacity-60">Submitted photos</h4><div className="flex flex-wrap gap-2">{rejectionDetails.mediaUrls.map((url, index) => <button key={url} type="button" onClick={() => setPreviewMedia(url)} aria-label={`View submitted photo ${index + 1}`} className="size-16 overflow-hidden rounded-lg border border-slate-200"><img src={url} alt={`Submitted repair evidence ${index + 1}`} className="h-full w-full object-cover" /></button>)}</div></div>}</div><footer className="mt-5 flex justify-end"><button type="button" onClick={() => setRejectionDetails(null)} className="rounded-xl bg-slate-900 px-4 py-2.5 text-xs font-bold text-white dark:bg-slate-700">Close</button></footer></section></div>}
+    {previewMedia && <div role="dialog" aria-modal="true" aria-label="Repair media preview" className="fixed inset-0 z-[150] flex items-center justify-center bg-black/85 p-4" onClick={() => setPreviewMedia(null)}><button type="button" onClick={() => setPreviewMedia(null)} aria-label="Close media preview" className="absolute right-4 top-4 rounded-full bg-white/20 p-2 text-white"><X size={22} /></button>{/\.(mp4|webm|mov)(\?|$)/i.test(previewMedia) ? <video src={previewMedia} controls autoPlay onClick={(event) => event.stopPropagation()} className="max-h-[90vh] max-w-[95vw] rounded-lg" /> : <img src={previewMedia} alt="Reported defect enlarged" onClick={(event) => event.stopPropagation()} className="max-h-[90vh] max-w-[95vw] rounded-lg object-contain" />}</div>}
+  </section>;
+}

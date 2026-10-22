@@ -684,6 +684,20 @@ body:has(.mobile-fullscreen-overlay) .customer-mobile-navigation {
   background-color: #faf9f6;
 }
 
+.admin-theme-light input.manual-price-override-field:disabled {
+  background-color: #e5e7eb !important;
+  border-color: #cbd5e1 !important;
+  color: #4b5563 !important;
+  opacity: 1;
+}
+
+.admin-theme-dark input.manual-price-override-field:disabled {
+  background-color: #374151 !important;
+  border-color: #4b5563 !important;
+  color: #e5e7eb !important;
+  opacity: 1;
+}
+
 .admin-theme-dark main,
 .admin-theme-dark section,
 .admin-theme-dark article {

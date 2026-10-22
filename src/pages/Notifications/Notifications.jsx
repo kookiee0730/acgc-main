@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { getAdminOrders } from "@/api/orders";
+import { getRepairRequests } from "@/api/repairs";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
-import { Bell, CheckCheck, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, Send, ShoppingCart, XCircle } from "lucide-react";
+import { Bell, CheckCheck, CheckCircle2, ChevronLeft, ChevronRight, ClipboardCheck, CreditCard, Send, ShoppingCart, Wrench, XCircle } from "lucide-react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { ArrowLeft } from "lucide-react";
 import { formatDateTimeToMMDDYYYY, formatTimeAgo } from "@/lib/dateUtils";
@@ -33,6 +34,7 @@ export default function Notifications() {
     ["declined", "Declined"],
     ["sent", "Sent"],
     ["payments", "Payments"],
+    ["repairs", "Repairs"],
   ];
   const filteredNotifications = notifications.filter((notification) => (
     notificationFilter === "all" || notification.category === notificationFilter
@@ -63,7 +65,7 @@ export default function Notifications() {
         const fetchModuleOrders = (params, moduleKey) => canReadModule(moduleKey)
           ? getAdminOrders({ ...params, module: moduleKey, view: "notifications", limit: 100 })
           : Promise.resolve({ orders: [] });
-        const [newOrdersResp, inspectionsResp, acceptedResp, declinedResp, sentResp, paymentResp, cancelledResp] = await Promise.all([
+        const [newOrdersResp, inspectionsResp, acceptedResp, declinedResp, sentResp, paymentResp, cancelledResp, repairResp] = await Promise.all([
           fetchModuleOrders({ status: "order_submitted" }, "dashboard"),
           fetchModuleOrders({ status: "site_inspection" }, "site_inspection"),
           fetchModuleOrders({ contract_status: "accepted" }, "site_inspection"),
@@ -71,6 +73,7 @@ export default function Notifications() {
           fetchModuleOrders({ contract_status: "sent" }, "site_inspection"),
           fetchModuleOrders({ payment_proof_submitted: "true" }, "transactions"),
           fetchModuleOrders({ status: "cancelled" }, "site_inspection"),
+          user?.role === "skilled_worker" ? Promise.resolve({ repairs: [] }) : getRepairRequests(),
         ]);
         const isLegacyUnscheduledOnlineOrder = (order) => (
           String(order.order_type || "").toLowerCase() === "online_order"
@@ -178,6 +181,36 @@ export default function Notifications() {
               message: `${customerName} says they paid ₱${amount} for order ${orderNumber}. Please confirm.`,
             };
           }),
+          ...(repairResp.repairs || []).flatMap((repair) => {
+            const titles = {
+              pending_review: "New repair request",
+              admin_approved: "Warranty claim approved",
+              rejected: "Warranty claim rejected",
+              quotation_issued: "Repair quotation issued",
+              customer_accepted: "Customer accepted quotation",
+              payment_proof_submitted: "Repair payment proof submitted",
+              payment_proof_approved: "Repair payment verified",
+              payment_proof_rejected: "Repair payment proof rejected",
+              cancelled: "Repair quotation declined",
+              scheduled: "Repair visit scheduled",
+              in_progress: "Repair work started",
+              completed: "Repair completed",
+            };
+            const history = repair.history?.length ? repair.history : [{ event: repair.status || "pending_review", detail: "Repair request updated.", createdAt: repair.updatedAt || repair.createdAt }];
+            return history.map((entry, index) => ({
+              ...repair,
+              id: `repair-${repair._id}-${entry.event}-${entry.createdAt ? new Date(entry.createdAt).getTime() : index}-${index}`,
+              recordId: String(repair._id),
+              tracking: repair.orderTracking || "Repair request",
+              updatedAt: entry.createdAt || repair.updatedAt || repair.createdAt,
+              notificationType: "repair-request",
+              category: "repairs",
+              title: titles[entry.event] || "Repair request updated",
+              message: entry.detail || `${repair.productName || "Product repair"} status updated to ${String(repair.status || "updated").replaceAll("_", " ")}.`,
+              icon: Wrench,
+              date: entry.createdAt || repair.updatedAt || repair.createdAt,
+            }));
+          }),
         ].sort(sortAdminNotificationsNewestFirst);
         const readNotificationIds = getAdminReadNotificationIds();
         if (active) {
@@ -207,7 +240,7 @@ export default function Notifications() {
         if (document.visibilityState === "visible") fetch();
       }, 80);
     };
-    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews"], scheduleRefresh);
+    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews", "repairs"], scheduleRefresh);
     window.addEventListener("focus", scheduleRefresh);
     const refreshReadState = (event) => {
       if (event.key === ADMIN_READ_NOTIFICATIONS_KEY) scheduleRefresh();
@@ -295,7 +328,9 @@ export default function Notifications() {
                     markAdminNotificationRead(n.id);
                     setNotifications((current) => current.map((item) => item.id === n.id ? { ...item, read: true } : item));
                     const recordId = String(n._id || n.id || n.tracking);
-                    const destination = n.notificationType === "pending-inspection-order"
+                    const destination = n.notificationType === "repair-request"
+                      ? "/progress-monitor"
+                      : n.notificationType === "pending-inspection-order"
                       ? `/site-inspection?view=${recordId}`
                       : n.notificationType === "cancelled"
                       ? "/site-inspection"
@@ -304,7 +339,9 @@ export default function Notifications() {
                       : n.category === "orders"
                         ? "/dashboard"
                         : `/site-inspection?view=${recordId}`;
-                    const recordType = n.notificationType === "pending-inspection-order"
+                    const recordType = n.notificationType === "repair-request"
+                      ? "repair"
+                      : n.notificationType === "pending-inspection-order"
                       ? "inspection"
                       : n.notificationType === "cancelled"
                       ? "inspection"
@@ -317,6 +354,7 @@ export default function Notifications() {
                           : "order";
                     navigate(destination, {
                       state: {
+                        ...(n.notificationType === "repair-request" ? { statusFilter: "Product Repair" } : {}),
                         ...(n.notificationType === "cancelled" ? { activeTab: "cancelled" } : {}),
                         ...(n.notificationType === "sent" || n.category === "sent" ? { openContract: true } : {}),
                         notificationHighlight: { recordId, recordType },
@@ -326,7 +364,9 @@ export default function Notifications() {
                   className={`flex w-full gap-3 border-l-[3px] p-3 text-left transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-sky-500 sm:gap-4 sm:p-4 ${n.read ? darkMode ? "border-l-transparent bg-slate-900 hover:bg-slate-800" : "border-l-transparent bg-white hover:bg-slate-50" : darkMode ? "border-l-sky-400 bg-sky-950/20 hover:bg-sky-950/35" : "border-l-sky-500 bg-sky-50/70 hover:bg-sky-50"}`}
                 >
                   <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-slate-800" : "bg-slate-100"}`}>
-                    {n.notificationType === "payment" ? (
+                    {n.notificationType === "repair-request" ? (
+                      <Wrench size={18} className="text-amber-600" />
+                    ) : n.notificationType === "payment" ? (
                       <CreditCard size={18} className="text-emerald-600" />
                     ) : n.notificationType === "sent" ? (
                       <Send size={18} className="text-sky-600" />
