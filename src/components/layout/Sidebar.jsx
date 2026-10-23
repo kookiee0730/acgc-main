@@ -358,27 +358,29 @@ function Sidebar({ forceRender = false }) {
             onPointerEnter={() => prefetchAdminRoute(to)}
             onPointerDown={() => prefetchAdminRoute(to)}
             onFocus={() => prefetchAdminRoute(to)}
-          className={`group relative flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-0.5 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${active ? darkMode ? "text-white" : "text-slate-900" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
+          className={`group relative flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${active ? darkMode ? "text-white" : "text-slate-900" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
           >
-            <span
-              className={[
-                "relative z-10 flex items-center justify-center transition-[transform,width,height,border-radius,background-color,border-color,color,box-shadow] duration-[220ms] ease-out group-hover:scale-105 group-active:scale-90 motion-reduce:transition-none",
-                active ? "-translate-y-6 size-10 rounded-full border-2 ring-4 shadow-lg" : "size-7 rounded-lg",
-                active
-                  ? darkMode
-                    ? "border-slate-900 bg-gradient-to-br from-brand-dark-fill via-brand to-red-700 text-white ring-red-300/30 shadow-black/50"
-                    : "border-white bg-gradient-to-br from-brand via-red-800 to-red-600 text-white ring-red-400/35 shadow-red-900/35"
-                  : darkMode
-                    ? "text-slate-300 group-hover:bg-white/[0.06]"
-                    : "text-slate-600 group-hover:bg-black/[0.04]",
-              ].join(" ")}
-              aria-hidden="true"
-            >
-              {icon}
-              {badge > 0 && <span className="absolute -right-1.5 -top-1.5 inline-flex min-w-4 items-center justify-center rounded-full bg-red-600 px-1 text-[9px] font-bold leading-4 text-white ring-2 ring-white" aria-label={`${badge} unread notifications`}>{badge > 99 ? "99+" : badge}</span>}
+            <span className="relative inline-flex">
+              <span
+                className={[
+                  "relative z-10 flex items-center justify-center transition-[transform,width,height,border-radius,background-color,border-color,color,box-shadow] duration-[220ms] ease-out group-hover:scale-105 group-active:scale-90 motion-reduce:transition-none",
+                  active ? "-translate-y-6 size-10 rounded-full border-2 ring-4 shadow-lg" : "size-7 rounded-lg",
+                  active
+                    ? darkMode
+                      ? "border-slate-900 bg-gradient-to-br from-brand-dark-fill via-brand to-red-700 text-white ring-red-300/30 shadow-black/50"
+                      : "border-white bg-gradient-to-br from-brand via-red-800 to-red-600 text-white ring-red-400/35 shadow-red-900/35"
+                    : darkMode
+                      ? "text-slate-300 group-hover:bg-white/[0.06]"
+                      : "text-slate-600 group-hover:bg-black/[0.04]",
+                ].join(" ")}
+                aria-hidden="true"
+              >
+                {icon}
+              </span>
+              {badge > 0 && <span className={`absolute -right-2 -top-1 z-20 inline-flex h-4 min-w-4 items-center justify-center rounded-full border px-1 text-[9px] font-bold leading-none ${darkMode ? "border-slate-900 bg-red-500 text-white" : "border-white bg-red-600 text-white"}`} aria-label={`${badge} unread notifications`}>{badge > 99 ? "99+" : badge}</span>}
             </span>
-            <span className={`mt-0.5 max-w-full truncate leading-[10px] transition-opacity duration-150 motion-reduce:transition-none ${active ? "text-[9px] font-bold opacity-100 max-[360px]:text-[8px]" : "text-[8px] font-medium opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 max-[360px]:text-[7px]"} ${compactLabel ? "max-[360px]:hidden" : ""}`} aria-hidden="true">{label}</span>
-            {compactLabel && <span className={`mt-0.5 hidden max-w-full truncate leading-[10px] transition-opacity duration-150 motion-reduce:transition-none max-[360px]:inline ${active ? "text-[9px] font-bold opacity-100 max-[360px]:text-[8px]" : "text-[8px] font-medium opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100 max-[360px]:text-[7px]"}`} aria-hidden="true">{compactLabel}</span>}
+            <span className={`mt-0.5 max-w-full truncate leading-[12px] transition-opacity duration-150 motion-reduce:transition-none ${active ? "text-[11px] font-bold opacity-100" : "text-[10px] font-medium opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100"} ${compactLabel ? "max-[360px]:hidden" : ""}`} aria-hidden="true">{label}</span>
+            {compactLabel && <span className={`mt-0.5 hidden max-w-full truncate leading-[12px] transition-opacity duration-150 motion-reduce:transition-none max-[360px]:inline ${active ? "text-[11px] font-bold opacity-100" : "text-[10px] font-medium opacity-0 group-hover:opacity-100 group-focus-visible:opacity-100"}`} aria-hidden="true">{compactLabel}</span>}
           </Link>
         ))}
       </nav>

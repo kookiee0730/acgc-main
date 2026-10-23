@@ -5648,7 +5648,7 @@ function CustomerDashboard() {
               aria-label={tab === "cart" && cartQuantity > 0 ? `Cart, ${cartQuantity} ${cartQuantity === 1 ? "item" : "items"}` : label}
               aria-current={isActive ? "page" : undefined}
               title={label}
-              className={`group flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${isActive ? darkMode ? "bg-slate-800 text-white" : "border border-slate-200 bg-slate-100 text-red-600 shadow-sm" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
+              className={`group flex h-[58px] min-w-0 flex-1 flex-col items-center justify-center rounded-lg px-1 text-center transition-[transform,background-color,color] duration-200 ease-out hover:-translate-y-0.5 active:translate-y-0 active:scale-[0.94] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand motion-reduce:transform-none motion-reduce:transition-none ${isActive ? darkMode ? "text-white" : "text-slate-900" : darkMode ? "text-slate-400 hover:bg-slate-800 hover:text-slate-100" : "text-slate-500 hover:bg-slate-100 hover:text-slate-900"}`}
             >
               <span className="relative inline-flex">
                 <span
@@ -5658,7 +5658,7 @@ function CustomerDashboard() {
                     isActive
                       ? darkMode
                         ? "border-slate-900 bg-gradient-to-br from-brand-dark-fill via-brand to-red-700 text-white ring-red-300/30 shadow-black/50"
-                        : "border-slate-200 bg-slate-100 text-red-600 ring-slate-200 shadow-slate-400/20"
+                        : "border-white bg-gradient-to-br from-brand via-red-800 to-red-600 text-white ring-red-400/35 shadow-red-900/35"
                       : darkMode
                         ? "text-slate-300 group-hover:bg-white/[0.06]"
                         : "text-slate-600 group-hover:bg-black/[0.04]",
@@ -9837,7 +9837,7 @@ function CustomerDashboard() {
           <div className="customer-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-[90] overflow-y-auto bg-slate-950/55 px-0 py-0 backdrop-blur-sm sm:px-6 sm:py-8">
           <div role="dialog" aria-modal="true" aria-labelledby="customer-profile-settings-title" className="mobile-fullscreen-dialog mx-auto w-full max-w-5xl overflow-y-auto overscroll-contain sm:max-h-[calc(100dvh-4rem)] sm:rounded-2xl lg:h-[min(90dvh,56rem)] lg:max-h-[calc(100dvh-4rem)] lg:overflow-hidden">
           <div className="grid grid-cols-1 gap-3 p-3 sm:gap-4 sm:p-4 lg:h-full lg:min-h-0 lg:grid-cols-[minmax(230px,0.78fr)_minmax(0,1.65fr)]">
-            <div className={`relative min-w-0 rounded-2xl border p-4 shadow-sm sm:p-5 ${darkMode ? "border-slate-700 bg-slate-800 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
+            <div className={`relative hidden min-w-0 rounded-2xl border p-4 shadow-sm sm:p-5 lg:block ${darkMode ? "border-slate-700 bg-slate-800 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
               <button
                 type="button"
                 data-close-modal
@@ -9887,7 +9887,7 @@ function CustomerDashboard() {
                 <button
                   type="button"
                   onClick={closeProfileEditor}
-                  className={`ml-auto hidden rounded-lg border px-3 py-2 text-xs font-semibold lg:inline-flex ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-700" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}
+                  className={`ml-auto inline-flex rounded-lg border px-3 py-2 text-xs font-semibold ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-700" : "border-slate-200 text-slate-700 hover:bg-slate-50"}`}
                 >
                   Back to profile
                 </button>
@@ -10086,7 +10086,7 @@ function CustomerDashboard() {
                 </div>
               </div>
 
-              <div className={`sticky bottom-0 z-10 -mx-4 -mb-4 mt-3 flex shrink-0 flex-col-reverse justify-end gap-2 border-t px-4 py-3 shadow-[0_-8px_20px_rgba(15,23,42,0.08)] sm:-mx-5 sm:-mb-5 sm:px-5 sm:flex-row lg:static lg:shadow-none ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
+              <div className={`relative -mx-4 -mb-4 mt-3 flex shrink-0 flex-col-reverse justify-end gap-2 border-t px-4 py-3 sm:-mx-5 sm:-mb-5 sm:px-5 sm:flex-row ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
                 {profileHasChanges() && (
                   <button
                     type="button"

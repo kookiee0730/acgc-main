@@ -585,7 +585,7 @@ function AdminProfile() {
           />
 
           <div className="mx-auto mt-5 grid w-full max-w-[1440px] min-w-0 grid-cols-1 gap-4 sm:mt-6 sm:gap-6 xl:grid-cols-[minmax(250px,0.8fr)_minmax(0,1.8fr)]">
-            <div className="min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:rounded-3xl sm:p-7">
+            <div className="hidden min-w-0 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm sm:rounded-3xl sm:p-7 xl:block">
               <div className="flex flex-col items-center">
                 <ProfileAvatar
                   name={`${user?.first_name || ""} ${user?.last_name || ""}`}
