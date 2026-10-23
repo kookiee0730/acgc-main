@@ -139,6 +139,10 @@ const getOrderWarrantyRecords = (order) => {
 
 function Dashboard() {
   const { user } = useAuth();
+  const canViewRepairManagement = user?.role !== "skilled_worker" || (
+    user?.staff_access?.modules?.repair_management?.enabled === true
+    && user?.staff_access?.modules?.repair_management?.actions?.view === true
+  );
   const hidePaymentAmounts = user?.role === "skilled_worker" && user?.staff_access?.hide_payment_amounts === true;
   const { darkMode } = useAdminTheme();
   const location = useLocation();
@@ -270,6 +274,10 @@ function Dashboard() {
   }, [isSidebarOpen]);
 
   useEffect(() => {
+    if (!canViewRepairManagement) {
+      setPendingRepairCount(0);
+      return undefined;
+    }
     let active = true;
     const loadPendingRepairs = async () => {
       try {
@@ -282,7 +290,7 @@ function Dashboard() {
     void loadPendingRepairs();
     const unsubscribe = subscribeToRealtime(["repairs"], loadPendingRepairs);
     return () => { active = false; unsubscribe(); };
-  }, []);
+  }, [canViewRepairManagement]);
 
   useEffect(() => {
     let animationFrame;
@@ -718,15 +726,15 @@ function Dashboard() {
               </p>
             </button>
 
-            <button
+            {canViewRepairManagement && <button
               type="button"
-              onClick={() => navigate("/progress-monitor", { state: { statusFilter: "Product Repair" } })}
+              onClick={() => navigate("/repair-requests")}
               className="group rounded-3xl bg-white p-6 text-left shadow transition duration-200 hover:-translate-y-1 hover:shadow-lg focus:outline-none focus:ring-2 focus:ring-amber-500"
             >
               <p className="text-gray-500">Pending Repair</p>
               <h2 className="mt-2 text-4xl font-bold text-gray-900">{pendingRepairCount}</h2>
               <p className="mt-2 text-sm text-amber-500 transition group-hover:text-amber-700">View repairs →</p>
-            </button>
+            </button>}
 
           </div>
 

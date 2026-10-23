@@ -170,7 +170,7 @@ function Sidebar({ forceRender = false }) {
     canViewStaffModule("site_inspection") && { to: "/site-inspection", label: "Inspection", icon: <ClipboardCheck size={20} />, badge: badges.siteInspection, active: location.pathname === "/site-inspection" },
     canViewStaffModule("transactions") && { to: "/transactions", label: "Transactions", compactLabel: "Trans.", icon: <ReceiptText size={20} />, badge: badges.transactions, active: location.pathname === "/transactions" },
     canViewStaffModule("progress_monitoring") && { to: "/progress-monitor", label: "Monitor", icon: <ChartNoAxesCombined size={20} />, badge: badges.progressMonitor, active: location.pathname === "/progress-monitor" },
-    canViewStaffModule("transactions") && { to: "/repair-requests", label: "Repairs", icon: <Wrench size={20} />, active: location.pathname === "/repair-requests" },
+    canViewStaffModule("repair_management") && { to: "/repair-requests", label: "Repairs", icon: <Wrench size={20} />, active: location.pathname === "/repair-requests" },
     canViewStaffModule("product_management") && { to: "/product", label: "Products", icon: <Package size={20} />, active: location.pathname === "/product" },
     canViewStaffModule("settings") && { to: "/settings", label: "Settings", icon: <Settings size={20} />, active: location.pathname === "/settings" },
   ].filter(Boolean);
@@ -262,7 +262,7 @@ function Sidebar({ forceRender = false }) {
             onIntent={() => prefetchAdminRoute("/transactions")}
           />}
 
-          {["admin", "super_admin"].includes(user?.role) && <MenuItem
+          {canViewStaffModule("repair_management") && <MenuItem
             to="/repair-requests"
             icon={<Wrench size={17} />}
             label="Repair Management"

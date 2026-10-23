@@ -329,7 +329,7 @@ export default function Notifications() {
                     setNotifications((current) => current.map((item) => item.id === n.id ? { ...item, read: true } : item));
                     const recordId = String(n._id || n.id || n.tracking);
                     const destination = n.notificationType === "repair-request"
-                      ? "/progress-monitor"
+                      ? "/repair-requests"
                       : n.notificationType === "pending-inspection-order"
                       ? `/site-inspection?view=${recordId}`
                       : n.notificationType === "cancelled"
@@ -354,7 +354,6 @@ export default function Notifications() {
                           : "order";
                     navigate(destination, {
                       state: {
-                        ...(n.notificationType === "repair-request" ? { statusFilter: "Product Repair" } : {}),
                         ...(n.notificationType === "cancelled" ? { activeTab: "cancelled" } : {}),
                         ...(n.notificationType === "sent" || n.category === "sent" ? { openContract: true } : {}),
                         notificationHighlight: { recordId, recordType },

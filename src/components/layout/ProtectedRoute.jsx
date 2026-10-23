@@ -6,6 +6,7 @@ const STAFF_MODULE_PATHS = [
   ["dashboard", "/dashboard"],
   ["product_management", "/product"],
   ["site_inspection", "/site-inspection"],
+  ["repair_management", "/repair-requests"],
   ["progress_monitoring", "/progress-monitor"],
   ["transactions", "/transactions"],
   ["settings", "/settings"],

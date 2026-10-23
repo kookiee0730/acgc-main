@@ -409,7 +409,7 @@ function AppRoutes() {
           <Route
             path="/repair-requests"
             element={
-              <ProtectedRoute roles={["admin", "skilled_worker"]} requiredModule="transactions">
+              <ProtectedRoute roles={["admin", "super_admin", "skilled_worker"]} requiredModule="repair_management">
                 <RepairRequests />
               </ProtectedRoute>
             }

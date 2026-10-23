@@ -16,7 +16,7 @@ const event = (repair, name, detail, actor) => repair.history.push({ event: name
 const publicCustomer = (repair) => ({
   _id: repair._id, order: repair.order, orderTracking: repair.orderTracking, productName: repair.productName,
   customerName: repair.customerName, customerEmail: repair.customerEmail, customerPhone: repair.customerPhone,
-  issueDescription: repair.issueDescription, mediaUrls: repair.mediaUrls, workflowType: repair.workflowType,
+  issueDescription: repair.issueDescription, mediaUrls: repair.mediaUrls, installationDate: repair.installationDate, workflowType: repair.workflowType,
   warranty: repair.warranty, status: repair.status, inspection: repair.inspection, quotation: repair.quotation,
   payment: repair.payment, schedule: repair.schedule, completion: repair.completion, invoiceNumber: repair.invoiceNumber,
   history: repair.history, requestedAt: repair.createdAt, updatedAt: repair.updatedAt,
@@ -66,6 +66,67 @@ export const listRepairRequests = async (req, res) => {
   res.json({ success: true, repairs });
 };
 
+export const getAdminCustomerRepairProducts = async (req, res) => {
+  const customerId = String(req.params.customerId || "");
+  if (!mongoose.Types.ObjectId.isValid(customerId)) return res.status(400).json({ success: false, message: "Choose a valid customer account." });
+  const customer = await User.findOne({ _id: customerId, role: "customer" }).select("first_name last_name email phone").lean();
+  if (!customer) return res.status(404).json({ success: false, message: "Customer account not found." });
+  const orders = await Order.find({ customer: customer._id, status: "completed" })
+    .select("tracking items createdAt updatedAt estimated_installation_date warranty_period custom_warranty_days warranty_status warranty_start_date warranty_expiry_date")
+    .sort({ updatedAt: -1 }).limit(500).lean();
+  const products = orders.flatMap((order) => (order.items || []).map((item, productIndex) => ({
+    orderId: order._id,
+    productIndex,
+    orderTracking: order.tracking || "",
+    productName: text(item.name, 200) || "Ordered product",
+    installationDate: order.estimated_installation_date || item.warranty_start_date || order.warranty_start_date || null,
+    completedAt: order.updatedAt || order.createdAt || null,
+    warranty: warrantyForItem(order, item),
+  })));
+  res.json({ success: true, customer: { _id: customer._id, customerName: [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim(), customerEmail: customer.email || "", customerPhone: customer.phone || "" }, products });
+};
+
+export const createAdminRepairRequest = async (req, res) => {
+  const requestedCustomerId = String(req.body?.customerId || "");
+  let customer = null;
+  if (requestedCustomerId) {
+    if (!mongoose.Types.ObjectId.isValid(requestedCustomerId)) return res.status(400).json({ success: false, message: "Choose a valid customer account." });
+    customer = await User.findOne({ _id: requestedCustomerId, role: "customer" }).select("first_name last_name email phone").lean();
+    if (!customer) return res.status(404).json({ success: false, message: "Customer account not found." });
+  }
+  const orderId = String(req.body?.orderId || "");
+  const productIndex = Number(req.body?.productIndex);
+  let order = null;
+  let orderItem = null;
+  if (orderId || (req.body?.productIndex !== undefined && req.body?.productIndex !== "")) {
+    if (!customer || !mongoose.Types.ObjectId.isValid(orderId) || req.body?.productIndex === undefined || req.body?.productIndex === "" || !Number.isInteger(productIndex) || productIndex < 0) return res.status(400).json({ success: false, message: "Choose a valid product from the selected customer account." });
+    order = await Order.findOne({ _id: orderId, customer: customer._id, status: "completed" }).lean();
+    orderItem = order?.items?.[productIndex];
+    if (!order || !orderItem) return res.status(404).json({ success: false, message: "The selected product is not part of a completed order for this customer." });
+  }
+  const customerName = customer ? [customer.first_name, customer.last_name].filter(Boolean).join(" ").trim() : text(req.body?.customerName, 180);
+  const customerEmail = customer ? String(customer.email || "").trim().toLowerCase() : text(req.body?.customerEmail, 180).toLowerCase();
+  const customerPhone = customer ? customer.phone || "" : text(req.body?.customerPhone, 80);
+  const productName = orderItem ? text(orderItem.name, 200) || "Ordered product" : text(req.body?.productName, 200);
+  const issueDescription = text(req.body?.issueDescription);
+  const warranty = order && orderItem ? warrantyForItem(order, orderItem) : { status: req.body?.workflowType === "warranty" ? "unknown" : "no_warranty" };
+  const workflowType = order && orderItem ? warranty.status === "active" ? "warranty" : "paid" : req.body?.workflowType === "warranty" ? "warranty" : "paid";
+  if (!customerName || !productName || !issueDescription) return res.status(400).json({ success: false, message: "Enter the customer name, product or service, and repair issue." });
+  const repair = await RepairRequest.create({
+    customerName, customerEmail, customerPhone, productName, issueDescription,
+    installationDate: order ? order.estimated_installation_date || orderItem.warranty_start_date || order.warranty_start_date || null : null,
+    customer: customer?._id || null,
+    order: order?._id || null,
+    productIndex: order ? productIndex : 0,
+    orderTracking: order ? order.tracking || "" : text(req.body?.orderTracking, 100) || "Admin entry",
+    workflowType, createdByAdmin: true, status: "pending_review",
+    warranty,
+    mediaUrls: Array.isArray(req.body?.mediaUrls) ? req.body.mediaUrls.slice(0, 6).map((url) => text(url, 1200)).filter((url) => /^https:\/\//i.test(url)) : [],
+    history: [{ event: "pending_review", detail: "Repair ticket created manually by an administrator.", actor: req.user.id, actorRole: req.user.role || "admin" }],
+  });
+  res.status(201).json({ success: true, repair: publicAdmin(repair) });
+};
+
 export const listCustomerRepairRequests = async (req, res) => {
   const repairs = await RepairRequest.find({ customer: req.user.id, workflowVersion: 2 }).sort({ updatedAt: -1 }).lean();
   res.json({ success: true, repairs: repairs.map(publicCustomer) });
@@ -103,8 +164,8 @@ export const reviewWarrantyClaim = async (req, res) => {
   const repair = await getRepair(req.params.repairId);
   if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
   if (repair.workflowType !== "warranty" || repair.status !== "pending_review") return res.status(409).json({ success: false, message: "Only a pending warranty claim can be approved here." });
-  const order = await Order.findById(repair.order).lean();
-  const currentWarranty = order?.items?.[repair.productIndex] ? warrantyForItem(order, order.items[repair.productIndex]) : { status: "unknown" };
+  const order = repair.createdByAdmin ? null : await Order.findById(repair.order).lean();
+  const currentWarranty = repair.createdByAdmin ? { status: "active" } : order?.items?.[repair.productIndex] ? warrantyForItem(order, order.items[repair.productIndex]) : { status: "unknown" };
   if (currentWarranty.status !== "active") {
     repair.workflowType = "paid";
     repair.warranty.status = currentWarranty.status;
@@ -117,6 +178,7 @@ export const reviewWarrantyClaim = async (req, res) => {
   if (!notes || !reason) return res.status(400).json({ success: false, message: "Add inspection findings and a coverage decision reason." });
   repair.inspection = { notes, inspectedAt: new Date() };
   repair.warranty.decisionReason = reason;
+  if (repair.createdByAdmin) repair.warranty.status = "active";
   repair.status = "admin_approved";
   repair.payment.status = "not_required";
   event(repair, "admin_approved", `Warranty claim approved at no charge. ${reason}`, req.user);
@@ -164,9 +226,9 @@ export const issueRepairQuotation = async (req, res) => {
   repair.warranty.active = false;
   repair.inspection = { notes, inspectedAt: new Date() };
   repair.quotation = { parts, laborCost, total, notes: text(req.body?.quotationNotes, 2000), issuedAt: new Date(), expiresAt: new Date(Date.now() + 14 * 86400000), customerDecisionAt: null };
-  repair.status = "quotation_pending_approval";
+  repair.status = repair.createdByAdmin ? "customer_accepted" : "quotation_pending_approval";
   repair.payment = { method: "", status: "pending", receivedAt: null };
-  event(repair, "quotation_issued", `Quotation issued for PHP ${total.toFixed(2)}. Parts: ${parts.map((part) => `${part.description} PHP ${part.cost.toFixed(2)}`).join(", ") || "none"}; labor PHP ${laborCost.toFixed(2)}.${override ? ` Warranty voided: ${decisionReason}` : ""}`, req.user);
+  event(repair, "quotation_issued", `Quotation issued for PHP ${total.toFixed(2)}. Parts: ${parts.map((part) => `${part.description} PHP ${part.cost.toFixed(2)}`).join(", ") || "none"}; labor PHP ${laborCost.toFixed(2)}.${override ? ` Warranty voided: ${decisionReason}` : ""}${repair.createdByAdmin ? " Manually created ticket is ready to schedule." : ""}`, req.user);
   await repair.save();
   void quoteCustomer(repair, `Repair quotation ready: ${repair.productName}`, `ACGC has completed an inspection and posted your repair quotation of PHP ${total.toFixed(2)}. Review and accept or decline it in your customer dashboard.`);
   res.json({ success: true, repair: publicAdmin(repair) });
@@ -183,12 +245,9 @@ export const respondToQuotation = async (req, res) => {
     repair.quotation.customerDecisionAt = new Date();
     event(repair, "cancelled", "Customer declined the quotation; the repair request is closed.", req.user);
   } else if (action === "accept") {
-    const method = req.body?.paymentMethod;
-    if (!["online_downpayment", "cash_on_site"].includes(method)) return res.status(400).json({ success: false, message: "Choose a payment preference to accept the quotation." });
     repair.status = "customer_accepted";
     repair.quotation.customerDecisionAt = new Date();
-    repair.payment.method = method;
-    event(repair, "customer_accepted", `Customer accepted PHP ${repair.quotation.total.toFixed(2)} and selected ${method}.`, req.user);
+    event(repair, "customer_accepted", `Customer accepted the repair quotation of PHP ${repair.quotation.total.toFixed(2)}.`, req.user);
   } else return res.status(400).json({ success: false, message: "Choose accept or decline." });
   await repair.save();
   void quoteCustomer(repair, `Quotation ${action === "accept" ? "accepted" : "declined"}: ${repair.productName}`, `${repair.customerName} ${action === "accept" ? "accepted" : "declined"} the repair quotation for ${repair.productName}.`);
@@ -198,7 +257,7 @@ export const respondToQuotation = async (req, res) => {
 export const submitRepairPaymentProof = async (req, res) => {
   const repair = await getRepair(req.params.repairId);
   if (!repair || String(repair.customer) !== String(req.user.id)) return res.status(404).json({ success: false, message: "Repair request not found." });
-  if (repair.workflowType !== "paid" || !["customer_accepted", "scheduled", "in_progress"].includes(repair.status)) {
+  if (repair.workflowType !== "paid" || !["customer_accepted", "scheduled", "in_progress", "completed"].includes(repair.status)) {
     return res.status(409).json({ success: false, message: "Accept the repair quotation before submitting payment proof." });
   }
   if (repair.payment.proofReviewStatus === "pending") return res.status(409).json({ success: false, message: "Your payment proof is awaiting review." });
@@ -271,14 +330,16 @@ export const scheduleRepair = async (req, res) => {
   const repair = await getRepair(req.params.repairId);
   if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
   if (!["customer_accepted", "admin_approved", "scheduled"].includes(repair.status)) return res.status(409).json({ success: false, message: "Approve the warranty claim or receive quotation acceptance before scheduling." });
-  const date = new Date(req.body?.date);
-  const technician = text(req.body?.technician, 180);
-  if (Number.isNaN(date.getTime()) || !technician) return res.status(400).json({ success: false, message: "Choose a valid service date and assign a technician." });
-  repair.schedule = { date, technician, notes: text(req.body?.notes, 1200) };
+  const startValue = text(req.body?.startDate || req.body?.date, 10);
+  const finishValue = text(req.body?.finishDate || req.body?.startDate || req.body?.date, 10);
+  const startDate = /^\d{4}-\d{2}-\d{2}$/.test(startValue) ? new Date(`${startValue}T12:00:00.000Z`) : new Date(NaN);
+  const finishDate = /^\d{4}-\d{2}-\d{2}$/.test(finishValue) ? new Date(`${finishValue}T12:00:00.000Z`) : new Date(NaN);
+  if (Number.isNaN(startDate.getTime()) || Number.isNaN(finishDate.getTime()) || startDate.toISOString().slice(0, 10) !== startValue || finishDate.toISOString().slice(0, 10) !== finishValue || finishDate < startDate) return res.status(400).json({ success: false, message: "Choose valid start and finish dates. Finish date cannot be before start date." });
+  repair.schedule = { date: startDate, startDate, finishDate, notes: text(req.body?.notes, 1200) };
   repair.status = "scheduled";
-  event(repair, "scheduled", `Service visit scheduled for ${date.toLocaleString("en-PH")} with ${technician}.${repair.schedule.notes ? ` ${repair.schedule.notes}` : ""}`, req.user);
+  event(repair, "scheduled", `Repair scheduled from ${startDate.toLocaleDateString("en-PH")} through ${finishDate.toLocaleDateString("en-PH")}.${repair.schedule.notes ? ` ${repair.schedule.notes}` : ""}`, req.user);
   await repair.save();
-  void quoteCustomer(repair, `Repair visit scheduled: ${repair.productName}`, `Your technician ${technician} is scheduled to visit on ${date.toLocaleString("en-PH")}.`);
+  void quoteCustomer(repair, `Repair scheduled: ${repair.productName}`, `Your repair is scheduled from ${startDate.toLocaleDateString("en-PH")} through ${finishDate.toLocaleDateString("en-PH")}.`);
   res.json({ success: true, repair: publicAdmin(repair) });
 };
 
@@ -287,7 +348,7 @@ export const startRepair = async (req, res) => {
   if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
   if (repair.status !== "scheduled") return res.status(409).json({ success: false, message: "Only a scheduled repair can be started." });
   repair.status = "in_progress";
-  event(repair, "in_progress", `Repair work started by ${repair.schedule.technician || "the assigned technician"}.`, req.user);
+  event(repair, "in_progress", "Repair work started.", req.user);
   await repair.save();
   res.json({ success: true, repair: publicAdmin(repair) });
 };
@@ -298,19 +359,17 @@ export const completeRepair = async (req, res) => {
   if (repair.status !== "in_progress") return res.status(409).json({ success: false, message: "Only an in-progress repair can be completed." });
   const notes = text(req.body?.notes);
   if (!notes) return res.status(400).json({ success: false, message: "Add completion notes." });
-  if (repair.workflowType === "paid" && repair.payment.proofReviewStatus === "pending") return res.status(409).json({ success: false, message: "Review the customer's pending payment proof before completing this repair." });
-  const amountPaid = repair.workflowType === "warranty" ? 0 : repair.payment.proofReviewStatus === "approved"
-    ? Number(repair.payment.proofAmount || 0)
-    : money(req.body?.amountPaid ?? repair.quotation.total, "Paid amount");
-  if (repair.workflowType === "paid" && ((repair.payment.proofReviewStatus !== "approved" && req.body?.paymentReceived !== true) || amountPaid < repair.quotation.total)) return res.status(409).json({ success: false, message: "Verify the customer's payment proof or confirm receipt of the full quoted amount before completing this paid repair." });
+  const amountPaid = repair.workflowType === "warranty" ? 0 : repair.payment.proofReviewStatus === "approved" ? Number(repair.payment.proofAmount || 0) : null;
   const evidenceUrls = Array.isArray(req.body?.evidenceUrls) ? req.body.evidenceUrls.slice(0, 10).map((url) => text(url, 1200)).filter((url) => /^https:\/\//i.test(url)) : [];
   repair.completion = { notes, amountPaid, evidenceUrls, completedAt: new Date() };
-  repair.payment.status = repair.workflowType === "warranty" ? "not_required" : "received";
-  repair.payment.receivedAt = repair.workflowType === "warranty" ? null : new Date();
+  if (repair.workflowType === "warranty") {
+    repair.payment.status = "not_required";
+    repair.payment.receivedAt = null;
+  }
   repair.invoiceNumber = `ACGC-R-${String(repair._id).slice(-8).toUpperCase()}`;
   repair.status = "completed";
   event(repair, "completed", notes, req.user);
   await repair.save();
-  void quoteCustomer(repair, `Repair completed: ${repair.productName}`, `Your repair is complete. Invoice ${repair.invoiceNumber}. Total: PHP ${amountPaid.toFixed(2)}. Download or print it from your service history.`);
+  void quoteCustomer(repair, `Repair completed: ${repair.productName}`, `Your repair is complete. Invoice ${repair.invoiceNumber}. Quoted total: PHP ${Number(repair.quotation?.total || 0).toFixed(2)}.`);
   res.json({ success: true, repair: publicAdmin(repair) });
 };

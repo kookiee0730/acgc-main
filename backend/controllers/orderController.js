@@ -1112,7 +1112,7 @@ export const getAdminOrders = async (req, res) => {
     const pageValue = Math.max(Number(req.query.page) || 1, 1);
     const skipValue = limitValue ? (pageValue - 1) * limitValue : 0;
     const baseFields = [
-      "customer customer_name customer_email customer_phone has_account_on_website shipping_address items total_amount estimated_cost final_project_cost",
+      "customer customer_name customer_email customer_phone has_account_on_website shipping_address items total_amount estimated_cost final_project_cost manual_override",
       "payment_terms downpayment_amount required_downpayment_amount amount_paid payment_status payment_records payment_proof_amount payment_proof_submitted_at payment_proof_confirmed_at payment_proof_file_name payment_proof_file_url payment_method transaction_number",
       "status cancellation_reason customer_cancellation_count_at_cancel is_rush_order order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
       "tracking inspection_status inspection_completed_at inspection_date estimated_installation_date inspection_notes issues_found",
@@ -1120,7 +1120,7 @@ export const getAdminOrders = async (req, res) => {
     ].join(" ");
     const moduleFields = {
       dashboard: [
-        "customer customer_name customer_email customer_phone items total_amount estimated_cost final_project_cost",
+        "customer customer_name customer_email customer_phone items total_amount estimated_cost final_project_cost manual_override",
         "status is_rush_order contract_status contractStatus contractSentAt contractDeclineReason acceptedByCustomer acceptedAt transactionCreated tracking createdAt updatedAt",
       ].join(" "),
       notifications: [

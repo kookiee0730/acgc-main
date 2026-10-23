@@ -76,11 +76,12 @@ const recordBackupOperation = async (req, action, outcome, backup, details = "")
   }
 };
 
-const STAFF_MODULE_KEYS = ["dashboard", "product_management", "site_inspection", "progress_monitoring", "transactions", "settings", "profile"];
+const STAFF_MODULE_KEYS = ["dashboard", "product_management", "site_inspection", "repair_management", "progress_monitoring", "transactions", "settings", "profile"];
 const STAFF_MODULE_ACTIONS = {
   dashboard: ["view"],
   product_management: ["view", "add", "edit", "delete"],
   site_inspection: ["view", "view_details", "edit", "cancel", "generate_contract", "send_email", "download_contract", "manual_approve"],
+  repair_management: ["view", "create", "manage"],
   progress_monitoring: ["view", "view_details", "edit", "delete_proof"],
   transactions: ["view", "view_details", "edit", "view_contract", "download_contract", "send_email"],
   settings: ["view", "manage_access", "back_up"],
@@ -90,6 +91,7 @@ const STAFF_DEFAULT_ENABLED_ACTIONS = {
   dashboard: ["view"],
   product_management: ["view"],
   site_inspection: [],
+  repair_management: ["view"],
   progress_monitoring: ["view", "view_details"],
   transactions: ["view", "view_details"],
   settings: ["view", "manage_access", "back_up"],
@@ -101,7 +103,7 @@ const createDefaultStaffAccess = () => ({
   subrole: "Helper",
   custom_subroles: [],
   modules: Object.fromEntries(STAFF_MODULE_KEYS.map((moduleKey) => [moduleKey, {
-    enabled: moduleKey !== "site_inspection",
+    enabled: moduleKey !== "site_inspection" && moduleKey !== "repair_management",
     actions: Object.fromEntries(STAFF_MODULE_ACTIONS[moduleKey].map((actionKey) => [
       actionKey,
       STAFF_DEFAULT_ENABLED_ACTIONS[moduleKey].includes(actionKey),
@@ -1908,8 +1910,19 @@ router.get("/admin-status", async (req, res) => {
   }
 });
 
-router.get("/customers", authMiddleware, roleMiddleware("admin"), async (req, res) => {
+router.get("/customers", authMiddleware, roleMiddleware(["admin", "super_admin", "skilled_worker"]), async (req, res) => {
   try {
+    if (req.user.role === "skilled_worker") {
+      const account = await User.findById(req.user.id).select("staff_access").lean();
+      const modules = account?.staff_access?.modules || {};
+      const canSearchForRepair = modules.repair_management?.enabled === true
+        && modules.repair_management.actions?.create === true;
+      const canSearchForInspection = modules.site_inspection?.enabled === true
+        && modules.site_inspection.actions?.edit === true;
+      if (!canSearchForRepair && !canSearchForInspection) {
+        return res.status(403).json({ success: false, message: "Customer search is disabled for your staff account." });
+      }
+    }
     const { search } = req.query;
     if (!search || !search.trim()) {
       return res.json({ success: true, customers: [] });

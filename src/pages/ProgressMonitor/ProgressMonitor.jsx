@@ -16,7 +16,6 @@ import toast, { Toaster } from "react-hot-toast";
 import { uploadFiles } from "@/api/uploads";
 import ProgressViewModal from "../../components/ProgressViewModal";
 import ProgressEditModal from "../../components/ProgressEditModal";
-import RepairManagement from "../../components/RepairManagement";
 import ProfileAvatar from "../../components/ui/ProfileAvatar";
 import { useIsMobile } from "@/hooks/useIsMobile";
 
@@ -349,7 +348,6 @@ function ProgressMonitor() {
     "Completed",
     "Delayed",
     "Added stages",
-    "Product Repair",
   ];
   const getProjectStatusCount = (status) => status === "Added stages"
     ? projectList.filter((project) => hasAddedStages(project.stages)).length
@@ -807,7 +805,7 @@ function ProgressMonitor() {
 
           <div className={`mt-6 rounded-3xl border p-6 shadow ${darkMode ? "border-slate-700 bg-[#10243a]" : "border-slate-200 bg-white"}`}>
 
-            {statusFilter !== "Product Repair" && <div className="relative">
+            <div className="relative">
               <Search
                 size={18}
                 className={`absolute left-4 top-4 ${darkMode ? "text-slate-400" : "text-gray-400"}`}
@@ -823,7 +821,7 @@ function ProgressMonitor() {
                 }}
                 className={`w-full rounded-xl border py-3 pl-12 pr-4 outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 ${darkMode ? "border-slate-600 bg-[#172d45] text-slate-100 placeholder:text-slate-400" : "border-slate-200 bg-white text-slate-900 placeholder:text-slate-400"}`}
               />
-            </div>}
+            </div>
 
             <div className="mt-4 md:hidden">
               <select
@@ -836,7 +834,7 @@ function ProgressMonitor() {
                 className={`w-full rounded-xl border px-4 py-3 text-sm font-semibold shadow-sm outline-none focus:border-red-500 focus:ring-2 focus:ring-red-500/20 ${darkMode ? "border-slate-600 bg-[#172d45] text-slate-100" : "border-gray-200 bg-white text-gray-700"}`}
               >
                 {projectStatusOptions.map((status) => (
-                <option key={status} value={status}>{status}{status === "Product Repair" ? "" : ` (${getProjectStatusCount(status)})`}</option>
+                <option key={status} value={status}>{status} ({getProjectStatusCount(status)})</option>
                 ))}
               </select>
             </div>
@@ -855,9 +853,9 @@ function ProgressMonitor() {
                   className={`inline-flex min-h-10 items-center gap-2 rounded-xl border px-3.5 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 focus-visible:ring-offset-2 ${statusFilter === status ? (darkMode ? "border-red-700 bg-red-950/60 text-red-100 shadow-sm" : "border-red-200 bg-red-50 text-red-950 shadow-sm") : (darkMode ? "border-slate-600 bg-[#172d45] text-slate-300 shadow-sm hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 shadow-sm hover:bg-slate-50 hover:text-slate-900")}`}
                 >
                   {status}
-                  {status !== "Product Repair" && <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] tabular-nums ${statusFilter === status ? (darkMode ? "bg-red-800 text-red-50" : "bg-red-200 text-red-900") : (darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-700")}`}>
+                  <span className={`inline-flex h-5 min-w-5 items-center justify-center rounded-full px-1.5 text-[10px] tabular-nums ${statusFilter === status ? (darkMode ? "bg-red-800 text-red-50" : "bg-red-200 text-red-900") : (darkMode ? "bg-slate-700 text-slate-300" : "bg-slate-200 text-slate-700")}`}>
                     {getProjectStatusCount(status)}
-                  </span>}
+                  </span>
                 </button>
               ))}
             </div>
@@ -866,7 +864,7 @@ function ProgressMonitor() {
 
           {/* TABLE */}
 
-          {statusFilter === "Product Repair" ? <RepairManagement darkMode={darkMode} hideOverview /> : <div className={`mt-6 overflow-hidden rounded-3xl border shadow ${darkMode ? "border-slate-700 bg-[#0d2033]" : "border-slate-200 bg-white"}`}>
+          <div className={`mt-6 overflow-hidden rounded-3xl border shadow ${darkMode ? "border-slate-700 bg-[#0d2033]" : "border-slate-200 bg-white"}`}>
             <div className="hidden md:block">
               <div className="overflow-x-auto">
                 <table className="w-full">
@@ -1050,7 +1048,7 @@ function ProgressMonitor() {
 
             </div>
 
-          </div>}
+          </div>
 
           {showViewModal && selectedProject && (
             <ProgressViewModal
