@@ -5315,7 +5315,7 @@ function CustomerDashboard() {
                             const isRead = readNotificationIds.has(order.notificationId);
                             const status = normalizeOrderStatusKey(order?.status);
                             const contractStatus = normalizeOrderStatusKey(order?.contract_status);
-                            const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved"].includes(order.notificationType);
+                            const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
                             const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                             const isDelayNotification = order.notificationType === "delay";
                             const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
@@ -5347,6 +5347,13 @@ function CustomerDashboard() {
                                   title: order.title || (isCancellationCooldownNotification ? "7-Day Online Ordering Restriction" : "Cancellation Policy Reminder"),
                                   message: withAdminContactPhone(order.message || "Reaching 3 cancellations will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction."),
                                   color: isCancellationCooldownNotification ? "text-red-600" : "text-amber-600",
+                                };
+                              }
+                              if (["overdue_payment", "installation_payment_reminder"].includes(order.notificationType)) {
+                                return {
+                                  title: order.title,
+                                  message: order.message,
+                                  color: order.notificationType === "overdue_payment" ? "text-red-600" : "text-amber-600",
                                 };
                               }
                               if (order.notificationType === "installation_up_next") {
@@ -9476,7 +9483,7 @@ function CustomerDashboard() {
                     const isRead = readNotificationIds.has(order.notificationId);
                     const status = normalizeOrderStatusKey(order?.status);
                     const contractStatus = normalizeOrderStatusKey(order?.contract_status);
-                      const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved"].includes(order.notificationType);
+                    const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
                       const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                     const isDelayNotification = order.notificationType === "delay";
                       const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
@@ -9500,6 +9507,7 @@ function CustomerDashboard() {
                         return order.message || `Your site inspection for order ${order.tracking} is scheduled for ${formatDateToMMMDDYYYY(order.inspection_date)}.`;
                       }
                       if (isCancellationPolicyNotification) return withAdminContactPhone(order.message || "Reaching 3 cancellations will restrict online ordering for 7 days. Please visit our shop or contact us by phone during any restriction.");
+                      if (["overdue_payment", "installation_payment_reminder"].includes(order.notificationType)) return order.message;
                       if (order.notificationType === "installation_up_next") {
                         return order.message || "Your ACGC order is up next for installation. Our team will begin the installation stage soon. Please stay tuned for updates.";
                       }
@@ -9558,12 +9566,16 @@ function CustomerDashboard() {
                       installation_up_next: "Installation Coming Up",
                       installation_completed: "Installation Completed",
                       site_inspection_today: "Site Inspection Scheduled for Today",
+                      overdue_payment: "Outstanding Project Balance",
+                      installation_payment_reminder: "Upcoming Payment Reminder",
                       order_cancellation_warning: "Cancellation Policy Reminder",
                       order_cancellation_cooldown: "7-Day Online Ordering Restriction",
                     }[order.notificationType];
 
                     const notificationIcon = () => {
                       if (order.notificationType === "payment_rejected" || isCancellationCooldownNotification) return "text-red-600";
+                      if (order.notificationType === "overdue_payment") return "text-red-600";
+                      if (order.notificationType === "installation_payment_reminder") return "text-amber-600";
                       if (isCancellationWarningNotification) return "text-amber-600";
                       if (order.notificationType === "payment_amount_updated") return "text-amber-600";
                       if (order.notificationType === "payment_discrepancy") return "text-amber-600";

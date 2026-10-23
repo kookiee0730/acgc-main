@@ -1,7 +1,9 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { XCircle } from "lucide-react";
 import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
+import { getOrderRepairHistory } from "@/api/repairs";
+import { subscribeToRealtime } from "@/lib/realtimeEvents";
 
 const getInstallationCompletionDate = (order, item = null) => {
   const stages = item?.progress_stages?.length
@@ -44,9 +46,44 @@ const computeWarrantyExpiryDate = (start, periodValue) => {
   return expiry;
 };
 
-function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarranty = false, darkMode = false, hidePaymentAmounts = false }) {
+function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarranty = false, darkMode = false, hidePaymentAmounts = false, includeRepairHistory = false }) {
   const contentRef = useRef(null);
   const warrantyHeadingRef = useRef(null);
+  const [repairHistory, setRepairHistory] = useState([]);
+  const [repairHistoryLoading, setRepairHistoryLoading] = useState(false);
+  const [repairHistoryError, setRepairHistoryError] = useState("");
+  const [expandedRepairId, setExpandedRepairId] = useState("");
+
+  useEffect(() => {
+    if (!order?._id || !includeRepairHistory) return undefined;
+    let active = true;
+    let requestInProgress = false;
+    const refreshRepairHistory = async () => {
+      if (requestInProgress) return;
+      requestInProgress = true;
+      setRepairHistoryLoading(true);
+      try {
+        const response = await getOrderRepairHistory(order._id);
+        if (active) {
+          setRepairHistory(response.repairs || []);
+          setRepairHistoryError("");
+        }
+      } catch (error) {
+        if (active) setRepairHistoryError(error?.data?.message || error?.message || "Unable to load repair history.");
+      } finally {
+        requestInProgress = false;
+        if (active) setRepairHistoryLoading(false);
+      }
+    };
+    setRepairHistory([]);
+    setExpandedRepairId("");
+    void refreshRepairHistory();
+    const unsubscribe = subscribeToRealtime("repairs", refreshRepairHistory);
+    return () => {
+      active = false;
+      unsubscribe();
+    };
+  }, [order?._id, includeRepairHistory]);
 
   useEffect(() => {
     if (!order || !scrollToWarranty) return undefined;
@@ -159,6 +196,17 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
     || "Customer";
   const projectStatus = String(order.status || "pending").replace(/_/g, " ");
   const orderType = order.order_type === "walk_in_customer" ? "Walk-in Order" : "Website Order";
+  const projectRevenue = Number(paymentSummary.totalAmount) || 0;
+  const projectCosts = order.project_costs || order.projectCosts || null;
+  const projectCostFields = [projectCosts?.materials, projectCosts?.labor, projectCosts?.other];
+  const hasRecordedProjectCost = projectCostFields.every((value) => value !== undefined && value !== null && value !== "" && Number.isFinite(Number(value)));
+  const recordedProjectCost = hasRecordedProjectCost ? projectCostFields.reduce((sum, value) => sum + Number(value), 0) : null;
+  const targetProfitMargin = 0.3333;
+  const targetNetProfit = projectRevenue * targetProfitMargin;
+  const estimatedProfit = hasRecordedProjectCost ? projectRevenue - recordedProjectCost : targetNetProfit;
+  const estimatedMargin = hasRecordedProjectCost
+    ? estimatedProfit !== null && projectRevenue > 0 ? (estimatedProfit / projectRevenue) * 100 : null
+    : targetProfitMargin * 100;
 
   return (
     <div className="mobile-fullscreen-overlay fixed inset-0 z-50 flex items-start justify-center overflow-y-auto overscroll-contain bg-black/40 px-3 py-[max(0.75rem,env(safe-area-inset-top))] pb-[max(0.75rem,env(safe-area-inset-bottom))] sm:items-center sm:p-5">
@@ -264,6 +312,82 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
               </div>
             </div>
           </section>
+
+          {includeRepairHistory && (
+            <>
+              <section className="mt-3 rounded-md border border-slate-200 bg-white p-3">
+                <div className="mb-3 flex flex-wrap items-start justify-between gap-2 border-b border-slate-200 pb-2">
+                  <div>
+                    <h3 className="text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">PROJECT REVENUE &amp; PROFIT PREVIEW</h3>
+                    <p className="mt-1 text-[10px] text-slate-500">Original project financials only; later repair charges are separate.</p>
+                  </div>
+                  {!hasRecordedProjectCost && <span className="rounded-full bg-amber-50 px-2 py-1 text-[10px] font-semibold text-amber-800">Cost data unavailable</span>}
+                </div>
+                <div className="grid gap-2 sm:grid-cols-2">
+                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Project Revenue</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : `₱${projectRevenue.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p></div>
+                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total Project Costs</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : hasRecordedProjectCost ? `₱${recordedProjectCost.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not recorded"}</p></div>
+                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{hasRecordedProjectCost ? "Estimated Net Profit" : "Target Net Profit at 33.33%"}</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : estimatedProfit === null ? "Unavailable" : `₱${estimatedProfit.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p></div>
+                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{hasRecordedProjectCost ? "Net Profit Margin" : "Target Profit Margin"}</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : estimatedMargin === null ? "Unavailable" : `${estimatedMargin.toFixed(2)}%${hasRecordedProjectCost ? "" : " target"}`}</p></div>
+                </div>
+                {!hasRecordedProjectCost && <p className="mt-2 text-[11px] leading-5 text-slate-500">Target estimate only. Actual project costs, profit, and margin remain unavailable until material, labor, and other expenses are recorded.</p>}
+              </section>
+
+              <section className="mt-3 rounded-md border border-slate-200 bg-white p-3">
+                <h3 className="mb-3 border-b border-slate-200 pb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">REPAIR HISTORY</h3>
+                {repairHistoryLoading && <p className="text-sm text-slate-500">Loading repair history…</p>}
+                {!repairHistoryLoading && repairHistoryError && <p role="alert" className="text-sm text-red-600">{repairHistoryError}</p>}
+                {!repairHistoryLoading && !repairHistoryError && repairHistory.length === 0 && <p className="text-sm text-slate-600">No repair history found for this project.</p>}
+                {!repairHistoryLoading && !repairHistoryError && repairHistory.length > 0 && (
+                  <div className="space-y-2">
+                    {repairHistory.map((repair) => {
+                      const repairId = String(repair._id || repair.id);
+                      const repairCost = repair.quotation?.total;
+                      const paidAmount = repair.completion?.amountPaid;
+                      const isExpanded = expandedRepairId === repairId;
+                      return (
+                        <article key={repairId} className="rounded-md border border-slate-200 bg-slate-50 p-3">
+                          <div className="flex flex-wrap items-start justify-between gap-2">
+                            <div className="min-w-0">
+                              <h4 className="break-words text-sm font-bold text-slate-900">{repair.productName || "Product repair"}</h4>
+                              <p className="mt-1 break-all text-[11px] text-slate-500">Ticket: {repair.ticketNumber || repairId}</p>
+                            </div>
+                            <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-semibold capitalize text-blue-700">{String(repair.status || "unknown").replaceAll("_", " ")}</span>
+                          </div>
+                          <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+                            <p><span className="text-slate-500">Requested: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.createdAt || repair.requestedAt) || "—"}</span></p>
+                            <p><span className="text-slate-500">Repair cost: </span><span className="font-medium text-slate-800">{repairCost === undefined || repairCost === null ? "Not set" : `₱${Number(repairCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></p>
+                            <p><span className="text-slate-500">Payment: </span><span className="font-medium capitalize text-slate-800">{String(repair.payment?.status || "pending").replaceAll("_", " ")}</span></p>
+                            <p><span className="text-slate-500">Completed: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.completion?.completedAt) || "—"}</span></p>
+                          </div>
+                          <button type="button" onClick={() => setExpandedRepairId(isExpanded ? "" : repairId)} aria-expanded={isExpanded} className="mt-3 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
+                            {isExpanded ? "Hide full details" : "View full repair details"}
+                          </button>
+                          {isExpanded && (
+                            <div className="mt-3 space-y-3 border-t border-slate-200 pt-3 text-xs text-slate-700">
+                              <div className="grid gap-2 sm:grid-cols-2">
+                                <p><span className="text-slate-500">Repair type: </span><span className="font-medium capitalize">{repair.workflowType || "—"}</span></p>
+                                <p><span className="text-slate-500">Linked product number: </span><span className="font-medium">{Number.isInteger(repair.productIndex) ? repair.productIndex + 1 : "—"}</span></p>
+                                <p><span className="text-slate-500">Warranty: </span><span className="font-medium capitalize">{String(repair.warranty?.status || "unknown").replaceAll("_", " ")}</span></p>
+                                <p><span className="text-slate-500">Warranty dates: </span><span className="font-medium">{formatDateToMMMDDYYYY(repair.warranty?.startsAt) || "—"} – {formatDateToMMMDDYYYY(repair.warranty?.expiresAt) || "—"}</span></p>
+                                <p><span className="text-slate-500">Repair schedule: </span><span className="font-medium">{formatDateToMMMDDYYYY(repair.schedule?.startDate || repair.schedule?.date) || "—"} – {formatDateToMMMDDYYYY(repair.schedule?.finishDate || repair.schedule?.date) || "—"}</span></p>
+                                <p><span className="text-slate-500">Invoice: </span><span className="font-medium">{repair.invoiceNumber || "—"}</span></p>
+                              </div>
+                              <div><p className="font-semibold text-slate-500">Repair description</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.issueDescription || "No description recorded."}</p></div>
+                              {repair.inspection?.notes && <div><p className="font-semibold text-slate-500">Inspection notes</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.inspection.notes}</p></div>}
+                              {repair.quotation && <div><p className="font-semibold text-slate-500">Quotation</p><p className="mt-1">Labor: {repair.quotation.laborCost == null ? "Not set" : `₱${Number(repair.quotation.laborCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} · Payment received: {paidAmount == null ? "Not recorded" : `₱${Number(paidAmount).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p>{repair.quotation.notes && <p className="mt-1 whitespace-pre-wrap">{repair.quotation.notes}</p>}{repair.quotation.parts?.length > 0 && <ul className="mt-1 list-inside list-disc">{repair.quotation.parts.map((part, index) => <li key={`${repairId}-part-${index}`}>{part.description}: ₱{Number(part.cost || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</li>)}</ul>}</div>}
+                              {repair.completion?.notes && <div><p className="font-semibold text-slate-500">Completion notes</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.completion.notes}</p></div>}
+                              {repair.mediaUrls?.length > 0 && <div><p className="font-semibold text-slate-500">Request photos</p><div className="mt-1 flex flex-wrap gap-2">{repair.mediaUrls.map((url, index) => <a key={`${repairId}-media-${index}`} href={url} target="_blank" rel="noreferrer" className="text-blue-700 underline">Photo {index + 1}</a>)}</div></div>}
+                              {repair.history?.length > 0 && <div><p className="font-semibold text-slate-500">Ticket history</p><ul className="mt-1 space-y-1">{[...repair.history].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).map((entry, index) => <li key={`${repairId}-event-${index}`}>{formatDateToMMMDDYYYY(entry.createdAt) || "—"} · {String(entry.event || "Update").replaceAll("_", " ")}{entry.detail ? ` — ${entry.detail}` : ""}</li>)}</ul></div>}
+                            </div>
+                          )}
+                        </article>
+                      );
+                    })}
+                  </div>
+                )}
+              </section>
+            </>
+          )}
         </div>
 
         <div className="flex shrink-0 flex-col-reverse gap-2 border-t border-slate-200 bg-white px-4 py-3 sm:flex-row sm:justify-end">

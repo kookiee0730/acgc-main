@@ -9,6 +9,7 @@ export const getRepairRequests = (filters = {}) => {
   const query = new URLSearchParams(Object.entries(filters).filter(([, value]) => value));
   return apiFetch(`/repairs/admin/requests${query.size ? `?${query}` : ""}`, { cache: "no-store" });
 };
+export const getOrderRepairHistory = (orderId) => apiFetch(`/repairs/admin/orders/${encodeURIComponent(orderId)}/repair-history`, { cache: "no-store" });
 export const createAdminRepairRequest = (payload) => apiFetch("/repairs/admin/requests", { method: "POST", body: JSON.stringify(payload) });
 export const getAdminCustomerRepairProducts = (customerId) => apiFetch(`/repairs/admin/customers/${encodeURIComponent(customerId)}/products`, { cache: "no-store" });
 export const approveWarrantyClaim = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/approve-warranty`, { method: "POST", body: JSON.stringify(payload) });

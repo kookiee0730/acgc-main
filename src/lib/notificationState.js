@@ -53,6 +53,10 @@ export const getAdminNotificationId = (type, order) => {
       const date = order?.payment_proof_submitted_at;
       return `${orderId}-payment-submitted-${new Date(date || 0).getTime()}`;
     }
+    case "repair": {
+      const date = order?.updatedAt || order?.createdAt;
+      return `${orderId}-repair-${String(order?.status || "update")}-${new Date(date || 0).getTime()}`;
+    }
     default:
       return `${orderId}-${type || "update"}`;
   }

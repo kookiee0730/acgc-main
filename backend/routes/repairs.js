@@ -5,6 +5,7 @@ import {
   createCustomerRepairRequest,
   createAdminRepairRequest,
   getAdminCustomerRepairProducts,
+  getAdminOrderRepairHistory,
   issueRepairQuotation,
   listCompletedRepairProjects,
   listCustomerRepairRequests,
@@ -28,6 +29,7 @@ router.post("/customer/requests", ...customer, createCustomerRepairRequest);
 router.post("/customer/:repairId/quotation-response", ...customer, respondToQuotation);
 router.post("/customer/:repairId/payment-proof", ...customer, submitRepairPaymentProof);
 router.get("/admin/requests", ...staffRepairAccess("view"), listRepairRequests);
+router.get("/admin/orders/:orderId/repair-history", authMiddleware, roleMiddleware(["admin", "super_admin", "skilled_worker"]), staffModulePermission("transactions", "view"), getAdminOrderRepairHistory);
 router.get("/admin/customers/:customerId/products", ...staffRepairAccess("view"), getAdminCustomerRepairProducts);
 router.post("/admin/requests", ...staffRepairAccess("create"), createAdminRepairRequest);
 router.post("/admin/requests/:repairId/approve-warranty", ...staffRepairAccess("manage"), reviewWarrantyClaim);

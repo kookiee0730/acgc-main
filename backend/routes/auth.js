@@ -43,6 +43,7 @@ import {
 import { buildFrontendUrl } from "../services/frontendUrl.js";
 import { buildCustomerEmailTemplate } from "../services/customerEmailTemplate.js";
 import { runSiteInspectionReminderCheck } from "../services/siteInspectionReminders.js";
+import { runPaymentReminderCheck } from "../services/paymentReminders.js";
 import { isPasswordPolicySatisfied, PASSWORD_POLICY_MESSAGE } from "../services/passwordPolicy.js";
 
 const backupImportUpload = multer({
@@ -1193,6 +1194,23 @@ router.get("/system-settings/cron-site-inspection-reminders", async (req, res) =
   } catch (error) {
     console.error("Scheduled site inspection reminder check failed:", error);
     return res.status(500).json({ success: false, message: "Scheduled site inspection reminder check failed." });
+  }
+});
+
+router.get("/system-settings/cron-payment-reminders", async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  const expectedAuthorization = secret ? Buffer.from(`Bearer ${secret}`) : Buffer.alloc(0);
+  const providedAuthorization = Buffer.from(req.get("authorization") || "");
+  if (!secret || expectedAuthorization.length !== providedAuthorization.length || !timingSafeEqual(expectedAuthorization, providedAuthorization)) {
+    return res.status(secret ? 401 : 503).json({ success: false, message: "Scheduled reminder authorization is not configured." });
+  }
+
+  try {
+    const result = await runPaymentReminderCheck({ realtime: req.app.get("realtime") });
+    return res.json({ success: true, ...result });
+  } catch (error) {
+    console.error("Scheduled payment reminder check failed:", error);
+    return res.status(500).json({ success: false, message: "Scheduled payment reminder check failed." });
   }
 });
 

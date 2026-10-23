@@ -16,6 +16,7 @@ import repairRoutes from "./routes/repairs.js";
 import { connectMongo, getLastMongoError, hasMongoUri } from "./config/db.js";
 import { startSystemBackupScheduler } from "./services/backupService.js";
 import { startSiteInspectionReminderScheduler } from "./services/siteInspectionReminders.js";
+import { startPaymentReminderScheduler } from "./services/paymentReminders.js";
 import { createRealtimeServer, realtimeResponseMiddleware } from "./services/realtime.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -176,6 +177,7 @@ const connectWithRetry = async (attempt = 1) => {
     if (process.env.VERCEL !== "1") {
       startSystemBackupScheduler();
       startSiteInspectionReminderScheduler(realtimeServer);
+      startPaymentReminderScheduler(realtimeServer);
     }
   } catch {
     const delayMs = Math.min(30000, 2000 * attempt);

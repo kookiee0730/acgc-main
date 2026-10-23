@@ -338,6 +338,39 @@ const getEventContent = (event, order, audience, extra) => {
         ["Questions or concerns", process.env.SUPPORT_EMAIL || "acgc.services00@gmail.com"],
       ],
     },
+    overdue_payment: {
+      title: "Outstanding project balance",
+      summary: "Installation is complete and your project has an outstanding balance. Please settle the remaining amount when convenient.",
+      subject: `Outstanding project balance - ${orderIdOf(order)}`,
+      status: "Payment reminder",
+      action: "View payment details",
+      path: "customer-dashboard?tab=orders",
+      next: "If you have already paid, please contact us so we can review and update your payment record.",
+      fields: [
+        ["Installation completed", dateOnly(extra.completedAt)],
+        ["Total project cost", money(total)],
+        ["Verified payments", money(paid)],
+        ["Outstanding balance", money(extra.balance ?? balance)],
+      ],
+    },
+    installation_payment_reminder: {
+      title: "Upcoming payment reminder",
+      summary: extra.paymentDueDate
+        ? "Your agreed payment date is approaching. Please review the payment terms and any remaining downpayment."
+        : "Your scheduled installation is approaching. Please review the payment terms and any remaining downpayment before the scheduled date.",
+      subject: `Upcoming payment reminder - ${orderIdOf(order)}`,
+      status: "Payment due soon",
+      action: "View payment details",
+      path: "customer-dashboard?tab=orders",
+      next: "This is a scheduled reminder, not an overdue payment notice. Contact us if you have already submitted a payment that is awaiting verification.",
+      fields: [
+        ...(extra.paymentDueDate ? [["Agreed payment date", dateOnly(extra.paymentDueDate)]] : []),
+        ["Installation date", dateOnly(extra.installationDate)],
+        ["Required downpayment", money(required)],
+        ["Verified payments", money(paid)],
+        ["Downpayment remaining", money(Math.max(required - paid, 0))],
+      ],
+    },
     installation_up_next: {
       title: "Installation coming up",
       summary: extra.productName
@@ -416,14 +449,17 @@ export const sendOrderNotification = async (event, order, options = {}) => {
   if (["order_submitted", "payment_proof_submitted", "contract_accepted"].includes(event) && adminEmail && options.audience !== "customer") {
     recipients.push({ to: adminEmail, audience: "admin" });
   }
-  await Promise.all(recipients.map(async ({ to, audience }) => {
+  const results = await Promise.all(recipients.map(async ({ to, audience }) => {
     try {
       const email = buildOrderEmail(event, order, { ...options, audience });
       await sendMail({ from: process.env.EMAIL_FROM || "ACGC Glass & Aluminum Services <no-reply@acgc.com>", to, ...email });
+      return { audience, sent: true };
     } catch (error) {
       console.error(`Order ${event} email failed for ${audience}:`, error);
+      return { audience, sent: false, error };
     }
   }));
+  return { sent: results.some((result) => result.sent), failed: results.some((result) => !result.sent), results };
 };
 
 export const getOrderEmailPaymentTotals = paymentTotals;

@@ -66,6 +66,23 @@ export const listRepairRequests = async (req, res) => {
   res.json({ success: true, repairs });
 };
 
+export const getAdminOrderRepairHistory = async (req, res) => {
+  const orderId = String(req.params.orderId || "");
+  if (!mongoose.Types.ObjectId.isValid(orderId)) return res.status(400).json({ success: false, message: "A valid project is required." });
+  const order = await Order.findById(orderId).select("_id customer tracking").lean();
+  if (!order) return res.status(404).json({ success: false, message: "Project not found." });
+
+  const repairFilter = {
+    workflowVersion: 2,
+    $or: [
+      { order: order._id },
+      ...(order.tracking && order.customer ? [{ orderTracking: order.tracking, customer: order.customer }] : []),
+    ],
+  };
+  const repairs = await RepairRequest.find(repairFilter).sort({ createdAt: -1, _id: -1 }).lean();
+  return res.json({ success: true, repairs });
+};
+
 export const getAdminCustomerRepairProducts = async (req, res) => {
   const customerId = String(req.params.customerId || "");
   if (!mongoose.Types.ObjectId.isValid(customerId)) return res.status(400).json({ success: false, message: "Choose a valid customer account." });

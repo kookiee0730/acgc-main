@@ -20,6 +20,7 @@ function AdminPageHeader({ title, description, stats = [], className = "", stats
               <div key={stat.label} className={`min-w-0 rounded-2xl border text-center shadow-lg backdrop-blur-sm ${compactStats ? "px-2.5 py-3 sm:px-3" : "px-3 py-4 sm:px-5"} ${darkMode ? "border-slate-600/80 bg-slate-950/70" : "border-slate-300/80 bg-white/75"}`}>
                 <p className={`${compactStats ? "whitespace-nowrap text-sm sm:text-lg" : "break-words text-base sm:text-xl"} font-black tabular-nums leading-tight ${darkMode ? (stat.color || "text-white") : "text-slate-900"}`}>{stat.value}</p>
                 <p className={`mt-1 text-[10px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-600"}`}>{stat.label}</p>
+                {stat.detail && <p className={`mt-1 text-[9px] font-semibold normal-case tracking-normal ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{stat.detail}</p>}
               </div>
             ))}
           </div>

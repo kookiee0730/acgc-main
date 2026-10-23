@@ -17,7 +17,7 @@ const getAccountForToken = async (decoded) => {
 
 const realtimeModulesByArea = {
   orders: ["dashboard", "site_inspection", "transactions", "progress_monitoring"],
-  repairs: ["repair_management"],
+  repairs: ["repair_management", "transactions"],
   products: ["product_management"],
   catalog: ["product_management"],
   reviews: ["transactions"],

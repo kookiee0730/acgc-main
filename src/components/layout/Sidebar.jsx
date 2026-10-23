@@ -21,6 +21,7 @@ import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import AdminNavigationContext from "@/contexts/AdminNavigationContext";
 import { prefetchAdminRoute } from "@/lib/adminRoutePrefetch";
 import { getAdminOrders } from "@/api/orders";
+import { getRepairRequests } from "@/api/repairs";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { getAdminNotificationId, getAdminReadNotificationIds, markAdminNotificationsRead, ADMIN_READ_NOTIFICATIONS_KEY } from "@/lib/notificationState";
 
@@ -64,7 +65,7 @@ function Sidebar({ forceRender = false }) {
   const navigate = useNavigate();
   const { logout, user } = useAuth();
   const { darkMode } = useAdminTheme();
-  const [badges, setBadges] = useState({ dashboard: 0, siteInspection: 0, transactions: 0, progressMonitor: 0 });
+  const [badges, setBadges] = useState({ dashboard: 0, siteInspection: 0, transactions: 0, progressMonitor: 0, repairManagement: 0 });
   const canViewStaffModule = (moduleKey) => user?.role !== "skilled_worker" || (
     user.staff_access?.modules?.[moduleKey]?.enabled === true &&
     user.staff_access?.modules?.[moduleKey]?.actions?.view === true
@@ -90,7 +91,7 @@ function Sidebar({ forceRender = false }) {
         return allOrders;
       };
       try {
-        const [newOrders, inspections, accepted, declined, sent, payments, progressOrders] = await Promise.all([
+        const [newOrders, inspections, accepted, declined, sent, payments, progressOrders, repairs] = await Promise.all([
           fetchOrders({ status: "order_submitted" }, "dashboard"),
           fetchOrders({ status: "site_inspection" }, "site_inspection"),
           fetchOrders({ contract_status: "accepted" }, "site_inspection"),
@@ -98,6 +99,9 @@ function Sidebar({ forceRender = false }) {
           fetchOrders({ contract_status: "sent" }, "site_inspection"),
           fetchOrders({ payment_proof_submitted: "true" }, "transactions"),
           fetchOrders({}, "progress_monitoring", "progress_monitoring"),
+          canRead("repair_management")
+            ? getRepairRequests().then((response) => response.repairs || [])
+            : Promise.resolve([]),
         ]);
         const read = getAdminReadNotificationIds();
         const pendingInspections = inspections.filter((order) => !["sent", "declined"].includes(String(order.contract_status || "").toLowerCase()));
@@ -106,6 +110,10 @@ function Sidebar({ forceRender = false }) {
           const subStageDelayed = (stage.subStages || []).some((subStage) => !subStage.completed && String(subStage.status || "").toLowerCase().replace(/[ _]/g, "-") === "delayed");
           return stageDelayed || subStageDelayed;
         }));
+        const actionableRepairs = repairs.filter((repair) => (
+          ["pending_review", "quotation_pending_approval", "customer_accepted", "admin_approved"].includes(String(repair.status || "").toLowerCase())
+          || repair.payment?.proofReviewStatus === "pending"
+        ));
         const visitedPath = location.pathname;
         const visitedIds = visitedPath === "/dashboard"
           ? newOrders.map((order) => getAdminNotificationId("new-order", order))
@@ -120,6 +128,8 @@ function Sidebar({ forceRender = false }) {
               ? payments.map((order) => getAdminNotificationId("payment", order))
               : visitedPath === "/progress-monitor"
                 ? delayedProgressOrders.map((order) => getAdminNotificationId("progress-delay", order))
+                : visitedPath === "/repair-requests"
+                  ? actionableRepairs.map((repair) => getAdminNotificationId("repair", repair))
                 : [];
         if (markVisitedPageRead && visitedIds.length) markAdminNotificationsRead(visitedIds);
         const readIds = markVisitedPageRead ? new Set([...read, ...visitedIds]) : read;
@@ -129,6 +139,7 @@ function Sidebar({ forceRender = false }) {
           siteInspection: countUnread(pendingInspections, "inspection") + countUnread(accepted, "accepted") + countUnread(declined, "declined") + countUnread(sent, "sent"),
           transactions: countUnread(payments, "payment"),
           progressMonitor: countUnread(delayedProgressOrders, "progress-delay"),
+          repairManagement: countUnread(actionableRepairs, "repair"),
         });
       } catch (error) {
         console.error("Failed to refresh admin sidebar badges:", error);
@@ -139,7 +150,7 @@ function Sidebar({ forceRender = false }) {
       timeout = window.setTimeout(refresh, 100);
     };
     refresh(true);
-    const unsubscribe = subscribeToRealtime(["orders", "reviews"], scheduleRefresh);
+    const unsubscribe = subscribeToRealtime(["orders", "reviews", "repairs"], scheduleRefresh);
     window.addEventListener("focus", scheduleRefresh);
     window.addEventListener("admin-notifications-updated", scheduleRefresh);
     const onStorage = (event) => { if (event.key === ADMIN_READ_NOTIFICATIONS_KEY) scheduleRefresh(); };
@@ -170,7 +181,7 @@ function Sidebar({ forceRender = false }) {
     canViewStaffModule("site_inspection") && { to: "/site-inspection", label: "Inspection", icon: <ClipboardCheck size={20} />, badge: badges.siteInspection, active: location.pathname === "/site-inspection" },
     canViewStaffModule("transactions") && { to: "/transactions", label: "Transactions", compactLabel: "Trans.", icon: <ReceiptText size={20} />, badge: badges.transactions, active: location.pathname === "/transactions" },
     canViewStaffModule("progress_monitoring") && { to: "/progress-monitor", label: "Monitor", icon: <ChartNoAxesCombined size={20} />, badge: badges.progressMonitor, active: location.pathname === "/progress-monitor" },
-    canViewStaffModule("repair_management") && { to: "/repair-requests", label: "Repairs", icon: <Wrench size={20} />, active: location.pathname === "/repair-requests" },
+    canViewStaffModule("repair_management") && { to: "/repair-requests", label: "Repairs", icon: <Wrench size={20} />, badge: badges.repairManagement, active: location.pathname === "/repair-requests" },
     canViewStaffModule("product_management") && { to: "/product", label: "Products", icon: <Package size={20} />, active: location.pathname === "/product" },
     canViewStaffModule("settings") && { to: "/settings", label: "Settings", icon: <Settings size={20} />, active: location.pathname === "/settings" },
   ].filter(Boolean);
@@ -266,6 +277,7 @@ function Sidebar({ forceRender = false }) {
             to="/repair-requests"
             icon={<Wrench size={17} />}
             label="Repair Management"
+            badge={badges.repairManagement}
             isOpen={isOpen}
             active={location.pathname === "/repair-requests"}
             darkMode={darkMode}

@@ -1197,6 +1197,12 @@ function Transactions() {
             const latest = res.orders.find((order) => String(order._id || order.id || "") === currentId);
             return latest ? { ...current, ...latest } : current;
           });
+          setContractPreviewOrder((current) => {
+            if (!current) return current;
+            const currentId = String(current._id || current.id || "");
+            const latest = res.orders.find((order) => String(order._id || order.id || "") === currentId);
+            return latest ? { ...current, ...latest } : current;
+          });
         }
       } catch (err) {
         console.error("Failed to fetch orders", err);
@@ -1211,7 +1217,7 @@ function Transactions() {
     const refreshOrders = () => {
       if (document.visibilityState === "visible") fetchOrders(false);
     };
-    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews"], refreshOrders);
+    const unsubscribeRealtime = subscribeToRealtime(["orders", "reviews", "repairs"], refreshOrders);
     window.addEventListener("focus", refreshOrders);
     document.addEventListener("visibilitychange", refreshOrders);
 
@@ -1278,7 +1284,7 @@ function Transactions() {
     : 0;
   const formatCurrency = (amount) => hidePaymentAmounts ? "••••••" : `₱${amount.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
   const summaryMetrics = [
-    { label: "Total Revenue", value: formatCurrency(financialTotals.revenue), color: "text-rose-300" },
+    { label: "Total Revenue", value: formatCurrency(financialTotals.revenue), detail: "33.33% target profit margin", color: "text-rose-300" },
     { label: "Total Collected", value: formatCurrency(financialTotals.collected), color: "text-emerald-300" },
     { label: "Pending Balance", value: formatCurrency(financialTotals.pending), color: "text-amber-200" },
     { label: "Completed Projects", value: completedProjects.length.toLocaleString(), color: "text-indigo-300" },
@@ -2229,6 +2235,7 @@ function Transactions() {
                       <tr>
                         <th className="p-4 text-left">Client</th>
                         <th className="p-4 text-left">Product / Project</th>
+                        <th className="p-4 text-left">Est. Profit (33.33%)</th>
                         <th className="p-4 text-left">Paid / Total</th>
                         <th className="p-4 text-left">Method</th>
                         <th className="p-4 text-left">Customer Type</th>
@@ -2338,6 +2345,7 @@ function Transactions() {
                             <>
                               <td className="p-4">{renderClientCell(order, customerName)}</td>
                               <td className="p-4"><div className="font-semibold text-slate-900">{inspectionLabel}</div><div className="text-xs text-slate-500">Order ID: {order.tracking || order._id || order.id || "—"}</div></td>
+                              <td className="p-4 font-bold text-slate-900">{formatCurrency((Number(amountVal) || 0) * 0.3333)}</td>
                               <td className="p-4"><div className="font-bold text-emerald-600">{hidePaymentAmounts ? "••••••" : `₱${paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</div><div className="text-xs text-slate-500">of {amount}</div></td>
                               <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${paymentMethod === "Online" ? (darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-50 text-rose-700") : (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-50 text-emerald-700")}`}>{paymentMethod}</span></td>
                               <td className="p-4"><span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">{orderType}</span></td>
@@ -2426,8 +2434,8 @@ function Transactions() {
                         <p className="mt-1 font-medium text-slate-700">{paymentMethod}</p>
                       </div>
                       <div>
-                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Amount</p>
-                        <p className="mt-1 font-semibold text-slate-900">₱{Number(amountVal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>
+                        <p className="text-[10px] uppercase tracking-wide text-slate-400">Est. Profit (33.33%)</p>
+                        <p className="mt-1 font-semibold text-slate-900">{formatCurrency((Number(amountVal) || 0) * 0.3333)}</p>
                       </div>
                     </div>
                     {activeTable === "receipts" && (
@@ -2659,6 +2667,7 @@ function Transactions() {
               onClose={closeContractModal}
               onViewContract={openFullContractModal}
               hidePaymentAmounts={hidePaymentAmounts}
+              includeRepairHistory
             />
           )}
 
