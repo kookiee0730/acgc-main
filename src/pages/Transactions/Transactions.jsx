@@ -19,6 +19,7 @@ import {
   TriangleAlert,
   Paperclip,
   LoaderCircle,
+  MessageSquare,
 } from "lucide-react";
 import { toPng } from "html-to-image";
 import jsPDF from "jspdf";
@@ -29,13 +30,14 @@ import Navbar from "../../components/layout/Navbar";
 import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import ContractModal from "../../components/ContractModal";
 import TransactionDetailsModal from "../../components/TransactionDetailsModal";
-import { getAdminOrders, acceptContract, declineContract, updateOrderStatus, deleteOrderReview, setOrderReviewVisibility, downloadTransactionReport } from "@/api/orders";
+import { getAdminOrders, acceptContract, declineContract, updateOrderStatus, deleteOrderReview, setOrderReviewVisibility, respondToCustomerReview, downloadTransactionReport } from "@/api/orders";
 import { formatDateToMMDDYYYY, formatDateTimeToMMDDYYYY, formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { useAuth } from "@/contexts/AuthContext";
 import { recordActivity } from "@/lib/activityLog";
 import ProfileAvatar from "../../components/ui/ProfileAvatar";
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import { getCustomerPaymentProof, getPaymentSummary, getSavedPaymentTermsLabel, getUnresolvedPaymentProofRecords, isPaymentProofConfirmed, validateCustomerPaymentAmount } from "./paymentProofUtils";
+import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { uploadAdminPaymentDocument, uploadFiles } from "@/api/uploads";
 import { API_BASE } from "@/api/client";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
@@ -51,6 +53,24 @@ const TRANSACTION_REPORT_OPTIONS = [
   { value: "customer_feedback", label: "Customer Feedback" },
   { value: "payment_records", label: "Payment Records" },
   { value: "warranty_records", label: "Warranty Records" },
+];
+
+const ADMIN_FEEDBACK_RESPONSE_TEMPLATES = [
+  {
+    value: "thanks",
+    label: "Thank the customer",
+    response: "Thank you for taking the time to share your feedback. We appreciate your support and hope to serve you again.",
+  },
+  {
+    value: "positive",
+    label: "Respond to a positive review",
+    response: "Thank you for your kind feedback. We’re glad you had a positive experience with our team.",
+  },
+  {
+    value: "concern",
+    label: "Respond to a concern",
+    response: "Thank you for bringing this to our attention. We’re sorry your experience did not meet expectations. Please contact our team so we can assist you.",
+  },
 ];
 
 function Transactions() {
@@ -128,6 +148,10 @@ function Transactions() {
   const [feedbackDeleteOrder, setFeedbackDeleteOrder] = useState(null);
   const [feedbackDeleting, setFeedbackDeleting] = useState(false);
   const [feedbackVisibilityUpdating, setFeedbackVisibilityUpdating] = useState(false);
+  const [feedbackReplyOrder, setFeedbackReplyOrder] = useState(null);
+  const [feedbackReplyText, setFeedbackReplyText] = useState("");
+  const [feedbackReplyTemplate, setFeedbackReplyTemplate] = useState("");
+  const [feedbackReplySaving, setFeedbackReplySaving] = useState(false);
   const [selectedFeedbackKeys, setSelectedFeedbackKeys] = useState(() => new Set());
   const [showContractModal, setShowContractModal] = useState(false);
   const [showFullContractModal, setShowFullContractModal] = useState(false);
@@ -594,6 +618,35 @@ function Transactions() {
       toast.error(error?.data?.message || error?.message || "Unable to update review visibility.");
     } finally {
       setFeedbackVisibilityUpdating(false);
+    }
+  };
+
+  const openFeedbackReply = (feedback) => {
+    setFeedbackReplyOrder(feedback);
+    setFeedbackReplyText(feedback?.review?.adminResponse || "");
+    setFeedbackReplyTemplate("");
+  };
+
+  const handleSaveFeedbackReply = async (event) => {
+    event.preventDefault();
+    if (!feedbackReplyOrder || feedbackReplySaving || !feedbackReplyText.trim()) return;
+    const orderId = feedbackReplyOrder._id || feedbackReplyOrder.id;
+    setFeedbackReplySaving(true);
+    try {
+      const response = await respondToCustomerReview(orderId, {
+        itemIndex: feedbackReplyOrder.reviewItemIndex,
+        response: feedbackReplyText.trim(),
+      });
+      const savedOrder = response.order;
+      setOrders((previous) => previous.map((order) =>
+        String(order._id || order.id) === String(orderId) && savedOrder ? savedOrder : order
+      ));
+      setFeedbackReplyOrder(null);
+      toast.success("Admin response saved.");
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to save admin response.");
+    } finally {
+      setFeedbackReplySaving(false);
     }
   };
 
@@ -2058,7 +2111,7 @@ function Transactions() {
                 return (
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className={darkMode ? "font-medium text-slate-300" : "font-medium text-slate-600"}>Payment Status Preview</span>
-                <span className={darkMode ? "inline-flex items-center rounded-full border border-amber-400/40 bg-[#2f2a18] px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-amber-300" : "inline-flex items-center rounded-full border border-amber-200 bg-amber-50 px-2.5 py-1 text-[10px] font-bold uppercase tracking-[0.12em] text-amber-700"}>{preview.status.label}</span>
+                <span className={`${statusBadgeBaseClassName} ${getPaymentStatusBadgeClassName(preview.status.key, darkMode)}`}>{getPaymentStatusLabel(preview.status)}</span>
               </div>
                 );
               })()}
@@ -2279,7 +2332,7 @@ function Transactions() {
                       const paymentMethod = order.payment_method || (order.acceptance_method === "online" ? "Online" : "Cash");
                       const installDate = order.estimated_installation_date ? formatDateToMMDDYYYY(order.estimated_installation_date) : "—";
                       const projectCategory = isCompletedProject(order) ? "Completed" : "In Progress";
-                      const statusLabel = paymentSummary.status.label;
+                      const statusLabel = getPaymentStatusLabel(paymentSummary.status);
                       const isFullyPaid = paymentSummary.status.key === "paid";
                       const showNeedsConfirmation = (order.payment_records || []).length > 0
                         ? getUnresolvedPaymentProofRecords(order).length > 0
@@ -2328,10 +2381,13 @@ function Transactions() {
                                 className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
                                 style={{ width: showTransactionActions ? "204px" : "56px" }}
                               >
-                                <div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "128px" : "0px" }}>
+                                <div className={`mx-auto flex flex-nowrap justify-center gap-2 overflow-hidden transition-[width,opacity,transform] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none ${showTransactionActions ? "translate-x-0 opacity-100" : "translate-x-2 opacity-0 pointer-events-none"}`} style={{ width: showTransactionActions ? "168px" : "0px" }}>
                                   <button type="button" onClick={() => setFeedbackPreviewOrder(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${darkMode ? "bg-blue-500/15 text-blue-300 hover:bg-blue-500/25" : "bg-blue-100 text-blue-600 hover:bg-blue-200"}`} aria-label={`View feedback for ${order.reviewProductName || "order"} from ${customerName}`} title="View feedback">
                                     <BookSearch size={17} aria-hidden="true" />
                                   </button>
+                                  {canManageFeedbackVisibility && <button type="button" onClick={() => openFeedbackReply(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 ${darkMode ? "bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25" : "bg-emerald-100 text-emerald-700 hover:bg-emerald-200"}`} aria-label={`${order.review?.adminResponse ? "Edit" : "Reply to"} feedback for ${order.reviewProductName || "order"} from ${customerName}`} title={order.review?.adminResponse ? "Edit Admin Response" : "Reply to Feedback"}>
+                                    <MessageSquare size={17} aria-hidden="true" />
+                                  </button>}
                                   {canManageFeedbackVisibility && <button type="button" disabled={feedbackVisibilityUpdating} onClick={() => handleToggleFeedbackVisibility(order)} className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 disabled:opacity-50 ${darkMode ? "bg-amber-500/15 text-amber-300 hover:bg-amber-500/25" : "bg-amber-100 text-amber-700 hover:bg-amber-200"}`} aria-label={`${order.review?.hiddenFromCustomers === true ? "Show" : "Hide"} review from customers`} title={order.review?.hiddenFromCustomers === true ? "Show review to customers" : "Hide review from customers"}>
                                     {order.review?.hiddenFromCustomers === true ? <Eye size={17} aria-hidden="true" /> : <EyeClosed size={17} aria-hidden="true" />}
                                   </button>}
@@ -2352,7 +2408,7 @@ function Transactions() {
                               <td className="p-4 text-sm text-slate-600">{installDate}</td>
                               <td className="p-4"><span className={`inline-flex rounded-md px-3 py-1 text-xs font-semibold ${projectCategory === "Completed" ? "bg-rose-50 text-rose-700" : "bg-violet-50 text-violet-700"}`}>{projectCategory}</span></td>
                               {activeTable === "receipts" && <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${getWarrantyStatusClass(warrantyStatus)}`}>{warrantyStatus}</span></td>}
-                              <td className="p-4"><div className="flex flex-col items-start gap-1.5"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${isFullyPaid ? (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700") : (darkMode ? "border border-amber-400/40 bg-amber-500/15 text-amber-300" : "bg-amber-50 text-amber-700")}`}>{statusLabel}</span>{showNeedsConfirmation && (<span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700"}`}><span aria-hidden="true">🔔</span>Needs Confirmation</span>)}</div></td>
+                              <td className="p-4"><div className="flex flex-col items-start gap-1.5"><span className={`${statusBadgeBaseClassName} ${getPaymentStatusBadgeClassName(isFullyPaid ? "paid" : paymentSummary.status.key, darkMode)}`}>{statusLabel}</span>{showNeedsConfirmation && (<span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700"}`}><span aria-hidden="true">🔔</span>Needs Confirmation</span>)}</div></td>
                               <td
                                 className={`${showTransactionActions ? "p-4" : "px-1 py-4"} text-center transition-[width,padding] duration-700 ease-[cubic-bezier(0.16,1,0.3,1)] motion-reduce:transition-none`}
                                 style={{ width: showTransactionActions ? ("190px") : "56px" }}
@@ -2394,6 +2450,9 @@ function Transactions() {
                           <button type="button" onClick={() => setFeedbackPreviewOrder(order)} aria-label={`View feedback for ${order.reviewProductName || "order"}`} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg ${darkMode ? "bg-blue-500/15 text-blue-300" : "bg-blue-100 text-blue-600"}`}>
                             <BookSearch size={17} aria-hidden="true" />
                           </button>
+                          {canManageFeedbackVisibility && <button type="button" onClick={() => openFeedbackReply(order)} aria-label={`${order.review?.adminResponse ? "Edit" : "Reply to"} feedback for ${order.reviewProductName || "order"}`} title={order.review?.adminResponse ? "Edit Admin Response" : "Reply to Feedback"} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg ${darkMode ? "bg-emerald-500/15 text-emerald-300" : "bg-emerald-100 text-emerald-700"}`}>
+                            <MessageSquare size={17} aria-hidden="true" />
+                          </button>}
                           {canManageFeedbackVisibility && <button type="button" disabled={feedbackVisibilityUpdating} onClick={() => handleToggleFeedbackVisibility(order)} aria-label={`${order.review?.hiddenFromCustomers === true ? "Show" : "Hide"} review from customers`} title={order.review?.hiddenFromCustomers === true ? "Show review to customers" : "Hide review from customers"} className={`inline-flex h-9 w-9 items-center justify-center rounded-lg disabled:opacity-50 ${darkMode ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-700"}`}>
                             {order.review?.hiddenFromCustomers === true ? <Eye size={17} aria-hidden="true" /> : <EyeClosed size={17} aria-hidden="true" />}
                           </button>}
@@ -2424,8 +2483,8 @@ function Transactions() {
                         <p className="mt-1 text-xs text-slate-500">{customerName}</p>
                         <p className="mt-1 break-all text-[10px] text-slate-500">Order ID: {order.tracking || order._id || order.id || "—"}</p>
                       </div>
-                      <span className={`inline-flex rounded-full px-2.5 py-1 text-[10px] font-semibold ${isFullyPaid ? "bg-emerald-100 text-emerald-700" : "bg-amber-50 text-amber-700"}`}>
-                        {paymentSummary.status.label}
+                      <span className={`${statusBadgeBaseClassName} text-[10px] ${getPaymentStatusBadgeClassName(isFullyPaid ? "paid" : paymentSummary.status.key, darkMode)}`}>
+                        {isFullyPaid ? "Fully Paid" : getPaymentStatusLabel(paymentSummary.status)}
                       </span>
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
@@ -2833,6 +2892,71 @@ function Transactions() {
               onPrint={printContract}
               hidePaymentAmounts={hidePaymentAmounts}
             />
+          )}
+
+          {feedbackReplyOrder && (
+            <div className="fixed inset-0 z-[75] flex items-center justify-center bg-black/55 p-4" role="presentation">
+              <section
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="feedback-reply-title"
+                className={`w-full max-w-lg rounded-2xl border p-5 shadow-xl ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}
+              >
+                <div className="flex items-start justify-between gap-4">
+                  <div className="min-w-0">
+                    <h2 id="feedback-reply-title" className="text-lg font-bold">{feedbackReplyOrder.review?.adminResponse ? "Edit Admin Response" : "Reply to Feedback"}</h2>
+                    <p className={`mt-1 truncate text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                      {feedbackReplyOrder.customer_name || `${feedbackReplyOrder.customer?.first_name || ""} ${feedbackReplyOrder.customer?.last_name || ""}`.trim() || "Customer"}
+                      {feedbackReplyOrder.reviewProductName ? ` · ${feedbackReplyOrder.reviewProductName}` : ""}
+                    </p>
+                  </div>
+                  <button type="button" onClick={() => setFeedbackReplyOrder(null)} aria-label="Close reply dialog" className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border ${darkMode ? "border-slate-700 text-slate-300 hover:bg-slate-800" : "border-slate-200 text-slate-600 hover:bg-slate-50"}`}>
+                    <X size={17} aria-hidden="true" />
+                  </button>
+                </div>
+                <form onSubmit={handleSaveFeedbackReply} className="mt-5 space-y-4">
+                  <label htmlFor="feedback-admin-response" className="block text-sm font-semibold">Admin Response</label>
+                  <select
+                    aria-label="Choose a response template"
+                    value={feedbackReplyTemplate}
+                    onChange={(event) => {
+                      const template = ADMIN_FEEDBACK_RESPONSE_TEMPLATES.find((entry) => entry.value === event.target.value);
+                      setFeedbackReplyTemplate(event.target.value);
+                      if (template) setFeedbackReplyText(template.response);
+                    }}
+                    className={`w-full rounded-lg border px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-500 ${darkMode ? "border-slate-700 bg-slate-800 text-slate-100" : "border-slate-300 bg-white text-slate-800"}`}
+                  >
+                    <option value="">Choose a response template</option>
+                    {ADMIN_FEEDBACK_RESPONSE_TEMPLATES.map((template) => (
+                      <option key={template.value} value={template.value}>{template.label}</option>
+                    ))}
+                  </select>
+                  <textarea
+                    id="feedback-admin-response"
+                    value={feedbackReplyText}
+                    onChange={(event) => {
+                      setFeedbackReplyText(event.target.value);
+                      setFeedbackReplyTemplate("");
+                    }}
+                    maxLength={1000}
+                    rows={5}
+                    required
+                    placeholder="Write a response to this feedback"
+                    className={`w-full resize-y rounded-xl border px-3 py-2.5 text-sm outline-none focus:ring-2 focus:ring-emerald-500 ${darkMode ? "border-slate-700 bg-slate-800 text-slate-100 placeholder:text-slate-500" : "border-slate-300 bg-white text-slate-900 placeholder:text-slate-400"}`}
+                  />
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <span className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{feedbackReplyText.length}/1000</span>
+                    <div className="flex gap-2">
+                      <button type="button" onClick={() => setFeedbackReplyOrder(null)} disabled={feedbackReplySaving} className={`rounded-lg border px-4 py-2 text-sm font-semibold disabled:opacity-50 ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}>Cancel</button>
+                      <button type="submit" disabled={feedbackReplySaving || !feedbackReplyText.trim()} className="inline-flex items-center gap-2 rounded-lg bg-emerald-700 px-4 py-2 text-sm font-semibold text-white hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-50">
+                        {feedbackReplySaving && <LoaderCircle size={15} className="animate-spin" aria-hidden="true" />}
+                        {feedbackReplySaving ? "Saving..." : "Submit Response"}
+                      </button>
+                    </div>
+                  </div>
+                </form>
+              </section>
+            </div>
           )}
 
           {feedbackPreviewOrder && (

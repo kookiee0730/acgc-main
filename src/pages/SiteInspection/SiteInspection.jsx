@@ -43,6 +43,7 @@ import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import FilterDropdown from "@/components/FilterDropdown";
 import ContractModal from "../../components/ContractModal";
 import { formatDateToMMDDYYYY, formatDateTimeToMMDDYYYY, formatDateToMMMDDYYYY } from "@/lib/dateUtils";
+import { getContractSignoffBadgeClassName, getPaymentStatusBadgeClassName, getPaymentStatusLabel, isAwaitingContractSignoff, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getInstallationDateError, getMinimumInstallationDate } from "@/lib/installationSchedule";
 import { calculateRequiredDownpayment, getFinalProjectCost } from "@/lib/orderPricing";
 import { getPhilippinePhoneError, isValidPhilippinePhone, normalizePhoneInput } from "@/lib/phoneValidation";
@@ -4915,6 +4916,7 @@ function SiteInspection() {
             const installDate = installDateValue ? formatDateToMMDDYYYY(installDateValue) : "—";
             const orderReference = viewInspection.order_number || viewInspection.tracking || viewInspection.contract_number || `SI-ORD-${String(orderId || "NEW").slice(-10).toUpperCase()}`;
             const contractExists = hasExistingContract(viewInspection);
+            const awaitingContractSignoff = isAwaitingContractSignoff(viewInspection);
             const readinessIssues = [];
             if (!contractExists && !viewInspection.inspection_date) readinessIssues.push("Inspection Date");
             if (!contractExists && !hasValidEstimatedInstallationDate(viewInspection)) readinessIssues.push("Estimated Installation Date");
@@ -4957,19 +4959,10 @@ function SiteInspection() {
                     ? "border border-emerald-500/30 bg-emerald-500/10 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-200"
                     : "border border-emerald-200 bg-emerald-50 px-3 py-2 text-xs font-bold uppercase tracking-[0.16em] text-emerald-700",
                 };
-            const downpaymentStatus = paymentSummary.status.key !== "pending"
-              ? {
-              label: paymentSummary.status.label,
-                  className: darkMode
-                    ? "border border-emerald-500/30 bg-emerald-500/10 text-emerald-200"
-                    : "border border-emerald-200 bg-emerald-50 text-emerald-700",
-                }
-              : {
-                  label: "Pending",
-                  className: darkMode
-                    ? "border border-amber-500/30 bg-amber-500/10 text-amber-200"
-                    : "border border-amber-200 bg-amber-50 text-amber-700",
-                };
+            const downpaymentStatus = {
+              label: getPaymentStatusLabel(paymentSummary.status),
+              className: getPaymentStatusBadgeClassName(paymentSummary.status.key, darkMode),
+            };
             const measurementRows = inspectionItems.map((item, index) => {
               const itemName = item.name || item.product_id?.name || `Item ${index + 1}`;
               const qty = Number(item.qty ?? item.quantity ?? 1) || 1;
@@ -5132,10 +5125,11 @@ function SiteInspection() {
                           <div className={`text-base font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{installDate}</div>
                         </div>
 
-                        <div className="flex items-end justify-start md:justify-end">
+                        <div className="flex flex-wrap items-center justify-start gap-2 md:justify-end">
                           <span className={`inline-flex items-center justify-center rounded-xl border px-3 py-2 text-xs font-bold uppercase tracking-[0.12em] ${statusBadge.className}`}>
                             {!viewInspection.inspection_date && <Phone size={14} className="mr-1.5" aria-hidden="true" />}{statusBadge.label}
                           </span>
+                          {awaitingContractSignoff && <span className={`${statusBadgeBaseClassName} ${getContractSignoffBadgeClassName(darkMode)}`}>Awaiting Contract Sign-off</span>}
                         </div>
                       </div>
                     </div>
@@ -5315,7 +5309,7 @@ function SiteInspection() {
 
                         <div className="mt-3 flex items-center justify-between text-sm">
                           <span className={darkMode ? "text-slate-300" : "text-slate-600"}>{paymentStatusLabel}</span>
-                          <span className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-bold uppercase tracking-[0.12em] ${downpaymentStatus.className}`}>
+                          <span className={`${statusBadgeBaseClassName} ${downpaymentStatus.className}`}>
                             {downpaymentStatus.label}
                           </span>
                         </div>

@@ -126,6 +126,12 @@ export const setOrderReviewVisibility = (orderId, { itemIndex, hiddenFromCustome
     body: JSON.stringify({ itemIndex, hiddenFromCustomers }),
   });
 
+export const respondToCustomerReview = (orderId, { itemIndex, response }) =>
+  apiFetch(`/orders/admin/${orderId}/review/response`, {
+    method: "PUT",
+    body: JSON.stringify({ itemIndex, response }),
+  });
+
 export const cancelCustomerOrder = (orderId, payload = {}) =>
   apiFetch(`/orders/${orderId}/cancel`, {
     method: "PUT",

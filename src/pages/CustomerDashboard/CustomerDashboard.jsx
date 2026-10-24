@@ -102,6 +102,7 @@ import {
   normalizeOrderStatusKey,
 } from "./orderStatusUtils";
 import { formatCustomerPaymentAmountInput, getCustomerPaymentProof, getPaymentSummary, getSavedPaymentTermsLabel, getUnresolvedPaymentProofRecords, isPaymentProofConfirmed, validateCustomerPaymentAmount } from "@/pages/Transactions/paymentProofUtils";
+import { getContractSignoffBadgeClassName, getPaymentStatusLabel, isAwaitingContractSignoff, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { useCustomerPermissions } from "@/hooks/useCustomerPermissions";
 import { buildProductPriceSnapshot, getDefaultBladeCount, getDefaultExtraChargeSelections, getDefaultProductLineTotal, getProductLineBreakdown, getProductLineTotal } from "@/lib/productPricing";
@@ -344,6 +345,7 @@ function CustomerDashboard() {
   const canTrackProducts = !maintenanceMode && customerPermissions.can_track_products;
   const canUploadFeedback = !maintenanceMode && customerPermissions.can_upload_feedback;
   const canShowRatings = customerPermissions.show_ratings_homepage;
+  const canAccessCustomerRatings = canUploadFeedback;
   const isProductModalReadOnly = !canRequestOrders && !canEstimatePricing;
 
   const [activeTab, setActiveTabState] = useState(() => {
@@ -1482,7 +1484,7 @@ function CustomerDashboard() {
   );
 
   const openCustomerReviewModal = (order, itemIndex = null) => {
-    if (!canUploadFeedback) {
+    if (!canAccessCustomerRatings) {
       showPermissionNotice("Feedback access is disabled for your account.");
       return;
     }
@@ -1512,7 +1514,7 @@ function CustomerDashboard() {
   };
 
   const openBatchOrderReviewModal = (order) => {
-    if (!canUploadFeedback) {
+    if (!canAccessCustomerRatings) {
       showPermissionNotice("Feedback access is disabled for your account.");
       return;
     }
@@ -1560,7 +1562,7 @@ function CustomerDashboard() {
   );
 
   const openProductReviewModal = () => {
-    if (!canUploadFeedback) {
+    if (!canAccessCustomerRatings) {
       showPermissionNotice("Feedback access is disabled for your account.");
       return;
     }
@@ -1603,7 +1605,7 @@ function CustomerDashboard() {
   };
 
   const handleOrderReviewPhotoChange = async (e) => {
-    if (!canUploadFeedback) return;
+    if (!canAccessCustomerRatings) return;
     const input = e.currentTarget;
     const files = Array.from(e.target.files || []);
     if (!files.length) return;
@@ -1647,7 +1649,7 @@ function CustomerDashboard() {
       setReviewFormError("Please wait for your photos to finish uploading.");
       return;
     }
-    if (!canUploadFeedback) return;
+    if (!canAccessCustomerRatings) return;
     if (!selectedReviewOrder) return;
     if (!orderReviewForm.rating || orderReviewForm.rating < 1 || orderReviewForm.rating > 5) {
       setReviewFormError("Please select a rating from 1 to 5.");
@@ -1743,7 +1745,7 @@ function CustomerDashboard() {
         setFeaturedProducts(eligibleProducts.slice(0, 3));
         setFeaturedProductsLoading(false);
 
-        if (!canUploadFeedback) {
+        if (!canAccessCustomerRatings) {
           setFeaturedRatingStats({ average: 0, total: 0, counts: { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 } });
           setFeaturedProducts(eligibleProducts.slice(0, 3));
           return;
@@ -1817,7 +1819,7 @@ function CustomerDashboard() {
       active = false;
       unsubscribeRealtime();
     };
-  }, [canUploadFeedback, loading, user?.id]);
+  }, [canAccessCustomerRatings, loading, user?.id]);
 
   useEffect(() => {
     const previousFilters = browseFiltersRef.current;
@@ -1848,7 +1850,7 @@ function CustomerDashboard() {
         setProducts(productsList);
         setIsLoadingProducts(false);
 
-        if (!canUploadFeedback) {
+        if (!canAccessCustomerRatings) {
           setProductReviewStats({});
           return;
         }
@@ -1892,7 +1894,7 @@ function CustomerDashboard() {
     return () => {
       active = false;
     };
-  }, [canUploadFeedback, loading, user?.id]);
+  }, [canAccessCustomerRatings, loading, user?.id]);
 
   useEffect(() => {
     if (loading || !user || !localStorage.getItem("token")) return undefined;
@@ -2078,7 +2080,7 @@ function CustomerDashboard() {
   }, [location.pathname, location.search, navigate, orders, ordersLoading]);
 
   useEffect(() => {
-    if (!selectedProduct?._id || !canUploadFeedback || loading || !user || !localStorage.getItem("token")) {
+    if (!selectedProduct?._id || !canAccessCustomerRatings || loading || !user || !localStorage.getItem("token")) {
       setProductReviews([]);
       return;
     }
@@ -2103,7 +2105,7 @@ function CustomerDashboard() {
     return () => {
       active = false;
     };
-  }, [selectedProduct, canUploadFeedback, loading, user?.id]);
+  }, [selectedProduct, canAccessCustomerRatings, loading, user?.id]);
 
   const generateCartId = () => `${Date.now()}-${Math.random().toString(36).slice(2, 6)}`;
 
@@ -4691,7 +4693,7 @@ function CustomerDashboard() {
     const orderStatus = normalizeOrderStatusKey(order?.status);
 
     if (hasCustomerAcceptedContract(order)) return "Accepted";
-    if (contractStatus === "sent" || orderStatus === "contract_sent" || (order?.contractSentAt && (contractStatus === "accepted" || orderStatus === "contract_accepted"))) return "Needs Your Response";
+    if (contractStatus === "sent" || orderStatus === "contract_sent" || (order?.contractSentAt && (contractStatus === "accepted" || orderStatus === "contract_accepted"))) return "Awaiting Contract Sign-off";
     if (contractStatus === "declined" || orderStatus === "contract_declined") return "Declined";
     return normalizeOrderStatus(order?.contract_status) || normalizeOrderStatus(order?.status) || "Unknown";
   };
@@ -5328,6 +5330,9 @@ function CustomerDashboard() {
                               (status === "site_inspection" && contractStatus === "sent") ||
                               contractStatus === "sent";
                             const notificationDetails = () => {
+                              if (order.notificationType === "feedback_response") {
+                                return { title: order.title || "ACGC SERVICES", message: order.message, color: "text-emerald-600" };
+                              }
                               if (order.notificationType === "repair_request") {
                                 return {
                                   title: order.title,
@@ -5829,7 +5834,7 @@ function CustomerDashboard() {
                         <p className={`line-clamp-3 min-h-[4.5rem] text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
                           {product.description || "Premium aluminum and glass solution for modern spaces."}
                         </p>
-                        {canUploadFeedback && canShowRatings && (
+                        {canAccessCustomerRatings && (
                           <div className={`flex items-center gap-2 ${darkMode ? "text-amber-300" : "text-amber-600"}`}>
                             <div className="flex shrink-0 items-center gap-0.5">
                               {renderRatingStars(averageRating, 14)}
@@ -6034,7 +6039,7 @@ function CustomerDashboard() {
                             </div>
                           </div>
 
-                          {canUploadFeedback && (
+                          {canAccessCustomerRatings && (
                             <div className={`flex min-w-0 items-center gap-1.5 rounded-full border px-2.5 py-1.5 text-[11px] max-md:w-fit max-md:gap-1 max-md:border-0 max-md:bg-transparent max-md:p-0 ${darkMode ? "border-slate-700 bg-slate-900/80 text-slate-300" : "border-slate-200 bg-white text-slate-700"}`}>
                               <span className="flex items-center gap-1 text-amber-400">{renderRatingStars(productReviewStats[product._id || product.id]?.averageRating || 0, 13)}</span>
                               <span className={`truncate ${darkMode ? "font-medium text-slate-200" : "font-medium text-slate-800"}`}>
@@ -6629,7 +6634,7 @@ function CustomerDashboard() {
                         </button>
                         </>}
 
-                        {canUploadFeedback && (
+                        {canAccessCustomerRatings && (
                           <>
                             <button
                               type="button"
@@ -6684,7 +6689,7 @@ function CustomerDashboard() {
                             )}
                           </>
                         )}
-                        {!canUploadFeedback && (
+                        {!canAccessCustomerRatings && (
                           <div className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-xs ${darkMode ? "border-slate-700 bg-slate-800 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
                             <Info size={14} aria-hidden="true" />
                             <span>Customer feedback and reviews will be available soon.</span>
@@ -8071,16 +8076,11 @@ function CustomerDashboard() {
                   const paymentBalanceMessage = isDownpaymentCovered
                     ? `${isFullPaymentTerms ? "Full payment complete" : "Downpayment covered"}. Remaining balance: ${formatCurrency(balanceAmount)}.`
                     : `${isFullPaymentTerms ? "Full payment still due" : "Downpayment still due"}: ${formatCurrency(downpaymentBalance)}.`;
-                  const paymentStatusClasses = {
-                    paid: darkMode ? "border border-emerald-500/40 bg-emerald-500/10 text-emerald-300" : "border border-emerald-200 bg-emerald-50 text-emerald-700",
-                    pending: darkMode ? "border border-amber-500/40 bg-amber-500/10 text-amber-200" : "border border-amber-200 bg-amber-50 text-amber-800",
-                    partial_downpayment: darkMode ? "border border-amber-500/40 bg-amber-500/10 text-amber-200" : "border border-amber-200 bg-amber-50 text-amber-800",
-                    downpayment: darkMode ? "border border-violet-500/40 bg-violet-500/10 text-violet-200" : "border border-violet-200 bg-violet-50 text-violet-800",
-                    partial: darkMode ? "border border-sky-500/40 bg-sky-500/10 text-sky-200" : "border border-sky-200 bg-sky-50 text-sky-800",
-                  };
                   const paymentStatus = {
-                    label: isFullyPaid ? "Fully Paid" : paymentSummary.status.label,
-                    className: paymentStatusClasses[isFullyPaid ? "paid" : paymentSummary.status.key],
+                    label: isFullyPaid ? "Fully Paid" : getPaymentStatusLabel(paymentSummary.status),
+                    className: darkMode
+                      ? "border-amber-500/40 bg-amber-500/10 text-amber-200"
+                      : "border-amber-200 bg-amber-50 text-amber-800",
                   };
                   const isBatchOrder = orderItems.length > 1;
                   const orderDisplayName = isBatchOrder ? "Batch Order" : product.name || product.product_name || "Project item";
@@ -8089,7 +8089,8 @@ function CustomerDashboard() {
                     ? orderItems.find((item) => getOrderItemImage(item) !== PRODUCT_IMAGE_PLACEHOLDER) || product
                     : product;
                   const orderDate = formatDateToMMMDDYYYY(order.updatedAt || order.createdAt) || "—";
-                  const orderStatusLabel = getOrderStatusLabel(order.status);
+                  const awaitingContractSignoff = isAwaitingContractSignoff(order);
+                  const orderStatusLabel = awaitingContractSignoff ? "Awaiting Contract Sign-off" : getOrderStatusLabel(order.status);
                   const hasContractBeenSent =
                     normalizeOrderStatusKey(order?.status) === "contract_sent" ||
                     normalizeOrderStatusKey(order?.contract_status) === "sent" ||
@@ -8104,6 +8105,18 @@ function CustomerDashboard() {
                     const paymentProofSubmission = paymentProofSuccessByOrder[orderId];
                     const latestPaymentProof = getCustomerPaymentProof(order);
                     const lastPaymentProofUrl = paymentProofSubmission?.fileUrl || latestPaymentProof.fileUrl || "";
+                    const showContractSignoffControls = !isCustomerAcceptedContract
+                      && !isFullyPaid
+                      && paymentProofOpenOrderId !== orderId
+                      && latestPaymentProof.status !== "pending"
+                      && latestPaymentProof.status !== "rejected";
+                    const panelMetricCardClassName = `min-w-0 rounded-xl border p-3 ${darkMode ? "border-slate-700 bg-slate-800/80" : "border-slate-200 bg-white"}`;
+                    const panelMetricLabelClassName = `text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`;
+                    const panelMetricNoteClassName = `text-[10px] ${darkMode ? "text-slate-400" : "text-slate-500"}`;
+                    const panelNeutralButtonClassName = `inline-flex h-[34px] shrink-0 items-center justify-center gap-1.5 rounded-lg border px-3 text-xs font-semibold transition ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`;
+                    const contractActionButtonClassName = `inline-flex h-[34px] shrink-0 items-center justify-center rounded-lg border px-4 text-xs font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-400 focus-visible:ring-offset-2 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-100 hover:bg-slate-700" : "border-[#d8d2c6] bg-white text-slate-900 hover:bg-[#f8f6f1]"}`;
+                    const declineContractButtonClassName = `inline-flex h-[34px] shrink-0 items-center justify-center rounded-lg border border-slate-300 px-4 text-xs font-semibold transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-400 focus-visible:ring-offset-2 ${darkMode ? "bg-slate-800 text-red-300 hover:bg-red-500/10" : "bg-white text-red-700 hover:bg-red-50"}`;
+                    const acceptContractButtonClassName = "inline-flex h-[34px] shrink-0 items-center justify-center rounded-lg bg-emerald-700 px-4 text-xs font-semibold text-white transition-colors duration-150 hover:bg-emerald-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-emerald-500 focus-visible:ring-offset-2";
 
                   return (
                     <div
@@ -8126,13 +8139,13 @@ function CustomerDashboard() {
                               />
                               <span
                                 aria-label={`${orderItems.length} items in this batch order`}
-                                className="absolute bottom-0.5 right-0.5 flex h-5 min-w-5 items-center justify-center rounded-full border border-white bg-red-700 px-1 text-[10px] font-bold leading-none text-white shadow-sm"
+                                className="absolute bottom-0.5 right-0.5 flex h-5 min-w-5 items-center justify-center rounded-full border border-white bg-slate-700 px-1 text-[10px] font-bold leading-none text-white shadow-sm"
                               >
                                 {orderItems.length}
                               </span>
                             </div>
                           ) : (
-                            <div className={`h-11 w-11 shrink-0 overflow-hidden rounded-[12px] border shadow-sm sm:h-12 sm:w-12 ${darkMode ? "border-slate-600 bg-slate-700" : "border-red-100 bg-red-50"}`}>
+                            <div className={`h-11 w-11 shrink-0 overflow-hidden rounded-[12px] border shadow-sm sm:h-12 sm:w-12 ${darkMode ? "border-slate-600 bg-slate-700" : "border-slate-200 bg-slate-100"}`}>
                               <img
                                 src={getOrderItemImage(product)}
                                 alt={product.name || product.product_name || "Product image"}
@@ -8150,7 +8163,7 @@ function CustomerDashboard() {
                               <span className={`text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>
                                 {orderDisplayName}
                               </span>
-                              <span className={`inline-flex items-center rounded-full px-2 py-0.5 text-[10px] font-bold ${getOrderStatusClasses(order.status)}`}>
+                              <span className={`text-xs font-semibold ${awaitingContractSignoff ? darkMode ? "text-sky-300" : "text-sky-700" : darkMode ? "text-slate-300" : "text-slate-600"}`}>
                                 {orderStatusLabel}
                               </span>
                             </div>
@@ -8162,7 +8175,7 @@ function CustomerDashboard() {
                           </div>
                         </div>
 
-                        <div className="grid grid-cols-[1fr_auto] items-center gap-x-4 gap-y-1 sm:flex sm:justify-end sm:gap-5">
+                        <div className="flex min-w-0 flex-wrap items-center justify-end gap-x-4 gap-y-2 sm:gap-5">
                           <div className="text-right sm:min-w-[110px]">
                             <p className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Total</p>
                             <p className="mt-0.5 text-base font-bold text-red-600">{formatCurrency(orderTotal)}</p>
@@ -8171,35 +8184,41 @@ function CustomerDashboard() {
                             <p className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Updated</p>
                             <p className={`mt-0.5 text-xs font-medium ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{orderDate}</p>
                           </div>
-                          <div className="col-span-2 flex justify-end sm:col-span-1">
-                            <div className="flex items-center gap-2">
-                              {canUploadFeedback && ["review", "completed"].includes(orderFilter) && isProjectFinished && isOrderCompletedAndReviewable(order) && !isBatchOrder && !hasOrderReview(order) && (
+                          <div className="flex min-w-0 flex-wrap justify-end">
+                            <div className="flex flex-wrap items-center justify-end gap-2">
+                              {["review", "completed"].includes(orderFilter) && isProjectFinished && isOrderCompletedAndReviewable(order) && !isBatchOrder && !hasOrderReview(order) && (
                                 <button
                                   type="button"
+                                  disabled={!canUploadFeedback}
                                   onClick={() => openCustomerReviewModal(order)}
-                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none tracking-[0.02em] shadow-sm transition-all duration-200 ${darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200 hover:bg-amber-500/20 hover:text-amber-100 shadow-amber-500/10" : "border-amber-500 bg-amber-400 text-slate-950 hover:bg-amber-300 hover:shadow-amber-500/30"}`}
+                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none tracking-[0.02em] shadow-sm transition-all duration-200 ${!canUploadFeedback
+                                    ? darkMode ? "cursor-not-allowed border-slate-600 bg-slate-800 text-slate-400 shadow-none" : "cursor-not-allowed border-slate-300 bg-slate-100 text-slate-500 shadow-none"
+                                    : darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200 shadow-amber-500/10 hover:bg-amber-500/20 hover:text-amber-100" : "border-amber-500 bg-amber-400 text-slate-950 hover:bg-amber-300 hover:shadow-amber-500/30"}`}
+                                  title={!canUploadFeedback ? "Feedback is restricted for this account." : undefined}
                                 >
                                   <Star size={12} fill="currentColor" className="drop-shadow-[0_0_2px_rgba(0,0,0,0.12)]" aria-hidden="true" />
                                   <span className="whitespace-nowrap">Leave Feedback</span>
                                 </button>
                               )}
-                              {canUploadFeedback && ["review", "completed"].includes(orderFilter) && isProjectFinished && isOrderCompletedAndReviewable(order) && isBatchOrder && !hasOrderReview(order) && (
+                              {["review", "completed"].includes(orderFilter) && isProjectFinished && isOrderCompletedAndReviewable(order) && isBatchOrder && !hasOrderReview(order) && (
                                 <button
                                   type="button"
-                                  disabled={!canShowRatings}
+                                  disabled={!canUploadFeedback}
                                   onClick={() => openBatchOrderReviewModal(order)}
-                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none shadow-sm disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200" : "border-amber-500 bg-amber-400 text-slate-950"}`}
-                                  title={!canShowRatings ? "Product reviews are restricted for this account." : undefined}
+                                  className={`inline-flex h-9 items-center justify-center gap-1.5 rounded-lg border px-3 text-[10px] font-black leading-none shadow-sm ${!canUploadFeedback
+                                    ? darkMode ? "cursor-not-allowed border-slate-600 bg-slate-800 text-slate-400 shadow-none" : "cursor-not-allowed border-slate-300 bg-slate-100 text-slate-500 shadow-none"
+                                    : darkMode ? "border-amber-500/70 bg-amber-500/15 text-amber-200 hover:bg-amber-500/20" : "border-amber-500 bg-amber-400 text-slate-950 hover:bg-amber-300"}`}
+                                  title={!canUploadFeedback ? "Feedback is restricted for this account." : undefined}
                                 >
                                   <Star size={12} fill="currentColor" aria-hidden="true" />
-                                  <span>Review products</span>
+                                  <span>{canUploadFeedback ? "Review products" : "Leave Feedback"}</span>
                                 </button>
                               )}
                               <button
                                 type="button"
                                 onClick={() => setExpandedOrderId((prev) => (prev === orderId ? null : orderId))}
                                 aria-expanded={isOrderExpanded}
-                                className={`inline-flex w-[7.25rem] shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-lg px-3 py-2 text-xs font-semibold transition ${darkMode ? "bg-red-600 text-white hover:bg-red-500" : "bg-red-700 text-white hover:bg-red-800"}`}
+                                className={panelNeutralButtonClassName}
                               >
                                 {isOrderExpanded ? "Hide details" : "View details"}
                                 {isOrderExpanded ? <ChevronUp size={14} /> : <ChevronDown size={14} />}
@@ -8210,8 +8229,8 @@ function CustomerDashboard() {
                       </div>
 
                       {isOrderExpanded && (
-                        <div className={`border-t p-3 sm:p-4 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-slate-50"}`}>
-                          <div className={`flex flex-col gap-2 pb-3 sm:flex-row sm:items-center sm:justify-between ${darkMode ? "border-b border-slate-700" : "border-b border-slate-200"}`}>
+                          <div className={`border-t p-3 sm:p-4 ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-slate-50"}`}>
+                           <div className={`flex flex-col gap-3 pb-4 sm:flex-row sm:items-center sm:justify-between ${darkMode ? "border-b border-slate-700" : "border-b border-slate-200"}`}>
                             <div>
                               <h4 className={`text-base font-black ${darkMode ? "text-white" : "text-slate-900"}`}>
                                 {isBatchOrder ? "Batch order" : orderDisplayName}
@@ -8225,7 +8244,7 @@ function CustomerDashboard() {
                                 <button
                                   type="button"
                                   onClick={() => openContractModal(order)}
-                                  className={`rounded-lg border px-3 py-1.5 text-xs font-bold transition ${darkMode ? "border-slate-600 text-slate-200 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-100"}`}
+                                  className={panelNeutralButtonClassName}
                                 >
                                   View Contract
                                 </button>
@@ -8233,7 +8252,7 @@ function CustomerDashboard() {
                               <button
                                 type="button"
                                 onClick={() => setSelectedOrderForModal(order)}
-                                className={`rounded-lg px-2.5 py-1.5 text-[11px] font-bold transition shadow-sm ${darkMode ? "bg-green-600 text-slate-100 hover:bg-green-700" : "bg-green-600 text-white hover:bg-green-700"}`}
+                                className={panelNeutralButtonClassName}
                               >
                                 View Order Timeline
                               </button>
@@ -8246,22 +8265,21 @@ function CustomerDashboard() {
                               <p className={`mt-1 text-sm font-bold ${darkMode ? "text-amber-200" : "text-amber-800"}`}>Contract Sent to You</p>
                               <p className={`mt-1 text-sm ${darkMode ? "text-slate-300" : "text-slate-700"}`}>Please review the contract details before accepting.</p>
                               <div className="mt-4 flex flex-wrap gap-2">
-                                <button type="button" onClick={() => openContractModal(order)} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-bold text-slate-700 hover:bg-slate-100">View Contract</button>
-                                <button type="button" onClick={() => openContractConfirmModal("decline", orderId)} className="rounded-lg border border-red-300 bg-white px-4 py-2 text-sm font-bold text-red-700 hover:bg-red-50">Decline</button>
-                                <button type="button" onClick={() => openContractConfirmModal("accept", orderId)} className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white hover:bg-emerald-700">Accept &amp; Sign Contract</button>
+                                <button type="button" onClick={() => openContractModal(order)} className={contractActionButtonClassName}>View Contract</button>
+                                <button type="button" onClick={() => openContractConfirmModal("decline", orderId)} className={declineContractButtonClassName}>Decline</button>
+                                <button type="button" onClick={() => openContractConfirmModal("accept", orderId)} className={acceptContractButtonClassName}>Accept &amp; Sign Contract</button>
                               </div>
                             </section>
                           )}
                           {order.contract_status === "declined" && (
-                            <div className={`mt-4 rounded-xl border p-4 ${darkMode ? "border-red-800 bg-red-950/40" : "border-red-200 bg-red-50"}`}>
-                              <p className={`text-sm font-bold ${darkMode ? "text-red-300" : "text-red-700"}`}>Contract Declined</p>
+                              <div className={`mt-4 rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-800/80" : "border-slate-200 bg-white"}`}>
+                              <p className={`text-sm font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>Contract Declined</p>
                             </div>
                           )}
 
-                          <div className={`mt-4 overflow-hidden rounded-xl border ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
-                            <div className={`divide-y ${darkMode ? "divide-slate-700" : "divide-slate-200"}`}>
+                          <div className="mt-4 space-y-3">
                               {orderItems.map((item, itemIndex) => (
-                                <div key={`${orderId}-item-${itemIndex}`} className="flex items-center justify-between gap-3 px-3 py-3 sm:px-4">
+                                <div key={`${orderId}-item-${itemIndex}`} className={`flex items-start justify-between gap-3 rounded-xl border p-3 sm:items-center sm:p-4 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-white"}`}>
                                   <div className="flex min-w-0 items-center gap-3">
                                     <div className={`h-12 w-12 shrink-0 overflow-hidden rounded-lg border ${darkMode ? "border-slate-600 bg-slate-700" : "border-slate-200 bg-slate-100"}`}>
                                       <img
@@ -8296,11 +8314,11 @@ function CustomerDashboard() {
                                       })()}
                                     </div>
                                   </div>
-                                  <div className="text-right">
-                                    <p className="text-sm font-bold text-red-600">
+                                  <div className="shrink-0 text-right">
+                                    <p className={`text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
                                       {formatCurrency(getItemPriceValue(item))}
                                     </p>
-                                    {canUploadFeedback && isProjectFinished && isOrderCompletedAndReviewable(order) && (
+                                    {canAccessCustomerRatings && isProjectFinished && isOrderCompletedAndReviewable(order) && (
                                       ["reviewed", "completed"].includes(orderFilter)
                                         ? getOrderItemReview(order, itemIndex)?.submittedAt && (
                                           <div className="mt-1 flex justify-end gap-1.5 sm:gap-3">
@@ -8355,36 +8373,35 @@ function CustomerDashboard() {
                                   </div>
                                 </div>
                               ))}
-                            </div>
                           </div>
 
-                          <div className={`mt-4 grid grid-cols-2 gap-x-4 gap-y-3 border-y py-4 sm:grid-cols-3 xl:grid-cols-6 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Total project cost</span>
-                              <span className="text-lg font-bold text-red-600">{formatCurrency(orderTotal)}</span>
-                              <span className={`text-[10px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Confirmed order total</span>
+                          <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-3">
+                            <div className={panelMetricCardClassName}>
+                              <span className={panelMetricLabelClassName}>Total project cost</span>
+                              <span className="mt-1 block text-lg font-bold text-red-600">{formatCurrency(orderTotal)}</span>
+                              <span className={`${panelMetricNoteClassName} mt-1 block`}>Confirmed order total</span>
                             </div>
-                            <div className={`flex flex-col gap-1 rounded-lg px-2 py-1 ${darkMode ? "bg-red-950/30" : "bg-red-50"}`}>
-                              <span className={`text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-red-300" : "text-red-700"}`}>{order.payment_terms === "full_payment" ? "Required full payment" : "Required downpayment"}</span>
-                              <span className={`text-lg font-black ${darkMode ? "text-red-300" : "text-red-700"}`}>{formatCurrency(requiredPaymentAmount)}</span>
-                              <span className={`text-[10px] ${darkMode ? "text-slate-400" : "text-slate-600"}`}>Site Inspection terms: {getSavedPaymentTermsLabel(order.payment_terms)}</span>
+                            <div className={`${panelMetricCardClassName} border-l-4 ${darkMode ? "border-l-amber-400" : "border-l-amber-500"}`}>
+                              <span className={panelMetricLabelClassName}>{order.payment_terms === "full_payment" ? "Required full payment" : "Required downpayment"}</span>
+                              <span className={`mt-1 block text-lg font-bold ${darkMode ? "text-amber-300" : "text-amber-700"}`}>{formatCurrency(requiredPaymentAmount)}</span>
+                              <span className={`${panelMetricNoteClassName} mt-1 block`}>Site Inspection terms: {getSavedPaymentTermsLabel(order.payment_terms)}</span>
                             </div>
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Amount already paid</span>
-                              <span className="text-lg font-bold text-emerald-600">{formatCurrency(downpaymentAmount)}</span>
-                              <span className={`text-[10px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Verified payments only</span>
+                            <div className={panelMetricCardClassName}>
+                              <span className={panelMetricLabelClassName}>Amount already paid</span>
+                              <span className="mt-1 block text-lg font-bold text-emerald-600">{formatCurrency(downpaymentAmount)}</span>
+                              <span className={`${panelMetricNoteClassName} mt-1 block`}>Verified payments only</span>
                             </div>
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Downpayment remaining</span>
-                              <span className={`text-lg font-bold ${downpaymentBalance > 0 ? "text-amber-600" : "text-emerald-600"}`}>{formatCurrency(downpaymentBalance)}</span>
+                            <div className={panelMetricCardClassName}>
+                              <span className={panelMetricLabelClassName}>Downpayment remaining</span>
+                              <span className={`mt-1 block text-lg font-bold ${darkMode ? "text-amber-300" : "text-amber-700"}`}>{formatCurrency(downpaymentBalance)}</span>
                             </div>
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Remaining project balance</span>
-                              <span className={`text-lg font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>{formatCurrency(balanceAmount)}</span>
+                            <div className={panelMetricCardClassName}>
+                              <span className={panelMetricLabelClassName}>Remaining project balance</span>
+                              <span className="mt-1 block text-lg font-bold text-red-600">{formatCurrency(balanceAmount)}</span>
                             </div>
-                            <div className="flex flex-col gap-1">
-                              <span className={`text-[10px] font-semibold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Payment status</span>
-                              <span className={`inline-flex items-center justify-center rounded-full px-3 py-2 text-xs font-black uppercase tracking-[0.08em] ${paymentStatus.className}`}>
+                            <div className={panelMetricCardClassName}>
+                              <span className={`${panelMetricLabelClassName} block`}>Payment status</span>
+                              <span className={`${statusBadgeBaseClassName} mt-2 w-fit ${paymentStatus.className}`}>
                                 {paymentStatus.label}
                               </span>
                             </div>
@@ -8411,13 +8428,19 @@ function CustomerDashboard() {
                               }] : [];
                             });
                             return discrepancies.map(({ record, discrepancy }) => (
-                              <div key={`${record._id}-${discrepancy._id || discrepancy.detected_at || "legacy"}`} role="alert" className={`mt-3 rounded-lg border px-3 py-2.5 text-xs leading-5 ${darkMode ? "border-amber-700/60 bg-amber-950/30 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
-                                <div className="flex items-start gap-2">
-                                  <Info size={15} className="mt-0.5 shrink-0" aria-hidden="true" />
-                                  <div>
-                                    <p className="font-bold">Payment Amount Discrepancy · {String(discrepancy.status || "pending_review").replaceAll("_", " ")}</p>
-                                    <p className="mt-1">Customer-reported: <strong>{formatCurrency(Number(discrepancy.customer_reported_amount))}</strong> · Admin-recorded: <strong>{formatCurrency(Number(discrepancy.admin_recorded_amount))}</strong> · Difference: <strong>{formatCurrency(Number(discrepancy.difference))}</strong></p>
-                                    <p className="mt-1">The recorded amount differs from the amount you submitted. If you believe it is incorrect, contact us for clarification{discrepancyContact ? <> at <a className="inline-block whitespace-nowrap font-bold underline underline-offset-2" href={discrepancyContact.href}><Phone size={14} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />{discrepancyContact.display}</a>.</> : ". Please contact the system administrator for assistance."}</p>
+                              <div key={`${record._id}-${discrepancy._id || discrepancy.detected_at || "legacy"}`} role="alert" className={`mt-3 rounded-xl border px-3.5 py-3 text-xs leading-5 ${darkMode ? "border-amber-700/70 bg-amber-950/45 text-amber-100" : "border-amber-300 bg-[#fff5dc] text-amber-950"}`}>
+                                <div className="flex items-start gap-2.5">
+                                  <Info size={18} className={`mt-0.5 shrink-0 ${darkMode ? "text-amber-300" : "text-amber-900"}`} aria-hidden="true" />
+                                  <div className="min-w-0 flex-1">
+                                    <p className={`font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>Payment Amount Discrepancy <span className={`font-medium ${darkMode ? "text-amber-300" : "text-amber-700"}`}>· {String(discrepancy.status || "pending_review").replaceAll("_", " ")}</span></p>
+                                    <p className={`mt-1.5 flex flex-col gap-1 sm:flex-row sm:flex-wrap sm:items-center sm:gap-x-2 ${darkMode ? "text-slate-300" : "text-slate-500"}`}>
+                                      <span>Customer-reported: <strong className={`font-extrabold ${darkMode ? "text-slate-100" : "text-slate-950"}`}>{formatCurrency(Number(discrepancy.customer_reported_amount))}</strong></span>
+                                      <span aria-hidden="true" className="hidden text-slate-400 sm:inline">·</span>
+                                      <span>Admin-recorded: <strong className={`font-extrabold ${darkMode ? "text-slate-100" : "text-slate-950"}`}>{formatCurrency(Number(discrepancy.admin_recorded_amount))}</strong></span>
+                                      <span aria-hidden="true" className="hidden text-slate-400 sm:inline">·</span>
+                                      <span>Difference: <strong className={`font-extrabold ${darkMode ? "text-slate-100" : "text-slate-950"}`}>{formatCurrency(Number(discrepancy.difference))}</strong></span>
+                                    </p>
+                                    <p className={`mt-2 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>The recorded amount differs from the amount you submitted. If you believe it is incorrect, contact us for clarification{discrepancyContact ? <> at <a className={`ml-1 inline-flex items-center whitespace-nowrap rounded-md border px-2 py-1 font-bold no-underline align-middle transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500 ${darkMode ? "border-amber-600/70 bg-amber-900/50 text-amber-200 hover:bg-amber-900" : "border-amber-300 bg-white/70 text-amber-800 hover:bg-white"}`} href={discrepancyContact.href}><Phone size={14} className="mr-1.5 shrink-0" aria-hidden="true" />{discrepancyContact.display}</a>.</> : ". Please contact the system administrator for assistance."}</p>
                                   </div>
                                 </div>
                               </div>
@@ -8434,21 +8457,43 @@ function CustomerDashboard() {
                                 {[...order.payment_records].filter((record) => record.status !== "pending" || unresolvedPaymentRecords.has(record)).sort((first, second) => new Date(second.verified_at || second.recorded_at || second.rejected_at || second.submitted_at || 0) - new Date(first.verified_at || first.recorded_at || first.rejected_at || first.submitted_at || 0)).map((record) => {
                                   const changed = record.submitted_amount != null && record.verified_amount != null
                                     && Math.round(Number(record.submitted_amount) * 100) !== Math.round(Number(record.verified_amount) * 100);
+                                  const hasPaymentDiscrepancy = (record.discrepancies || []).some((discrepancy) => discrepancy.status !== "resolved")
+                                    || (changed && record.status === "verified");
                                   return (
-                                    <div key={record._id || record.submitted_at} className={`rounded-lg border px-3 py-2 text-xs ${darkMode ? "border-slate-700" : "border-slate-100 bg-slate-50"}`}>
+                                      <div key={record._id || record.submitted_at} className={`rounded-xl border p-3 text-xs ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-[#e9e1d4] bg-white"}`}>
                                       <div className="flex flex-wrap items-center justify-between gap-2">
-                                        <span className={`font-bold ${record.status === "verified" ? "text-emerald-600" : record.status === "rejected" ? "text-red-600" : "text-amber-600"}`}>
-                                          {record.record_source === "admin_recorded" ? "Admin-Recorded Payment" : record.status === "verified" ? "Verified" : record.status === "rejected" ? "Rejected" : "Awaiting verification"}
-                                        </span>
+                                          {hasPaymentDiscrepancy ? (
+                                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-bold ${darkMode ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-800"}`}>
+                                              <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-amber-500" />
+                                              Needs Review
+                                            </span>
+                                          ) : record.status === "verified" && record.record_source !== "admin_recorded" ? (
+                                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-bold ${darkMode ? "bg-emerald-500/15 text-emerald-300" : "bg-emerald-50 text-emerald-700"}`}>
+                                              <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-emerald-500" />
+                                              Verified
+                                            </span>
+                                          ) : record.status === "rejected" ? (
+                                            <span className={`inline-flex items-center gap-1.5 rounded-full px-2 py-1 text-[10px] font-bold ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-50 text-red-700"}`}>
+                                              <span aria-hidden="true" className="h-1.5 w-1.5 rounded-full bg-red-500" />
+                                              Rejected
+                                            </span>
+                                          ) : (
+                                            <span className={`font-bold ${record.status === "verified" ? "text-emerald-600" : record.status === "rejected" ? "text-red-600" : "text-amber-600"}`}>
+                                              {record.record_source === "admin_recorded" ? "Admin-Recorded Payment" : record.status === "rejected" ? "Rejected" : "Awaiting verification"}
+                                            </span>
+                                          )}
                                         <span className={darkMode ? "text-slate-400" : "text-slate-500"}>{formatDateTimeToMMMDDYYYY(record.payment_date || record.recorded_at || record.verified_at || record.rejected_at || record.submitted_at)}</span>
                                       </div>
-                                      <p className={`mt-1 ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
-                                        {record.submitted_amount != null && <>Submitted: <strong>{formatCurrency(record.submitted_amount)}</strong></>}
+                                        <p className={`mt-2 flex flex-wrap gap-x-3 gap-y-1 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
+                                          {record.submitted_amount != null && <>Submitted: <strong className={changed ? "line-through decoration-2 decoration-slate-600" : ""}>{formatCurrency(record.submitted_amount)}</strong></>}
                                         {record.verified_amount != null && <> · Verified: <strong>{formatCurrency(record.verified_amount)}</strong></>}
                                       </p>
-                                      {changed && record.status === "verified" && <p className="mt-1 font-bold text-amber-600">Amount changed by {formatCurrency(Math.abs(Number(record.verified_amount) - Number(record.submitted_amount)))} {Number(record.verified_amount) < Number(record.submitted_amount) ? "lower" : "higher"}.</p>}
+                                      {changed && record.status === "verified" && !(record.discrepancies || []).some((discrepancy) => discrepancy.status !== "resolved") && <p className={`mt-2 rounded-lg border px-3 py-2.5 leading-5 ${darkMode ? "border-amber-700/60 bg-amber-950/40 text-amber-200" : "border-amber-300 bg-amber-50 text-amber-800"}`}>
+                                        <span className="font-bold">Payment discrepancy · </span>Amount changed by {formatCurrency(Math.abs(Number(record.verified_amount) - Number(record.submitted_amount)))} {Number(record.verified_amount) < Number(record.submitted_amount) ? "lower" : "higher"}.
+                                        <span className="mt-1 block text-[11px]">Customer-reported {formatCurrency(Number(record.submitted_amount))} · Admin-recorded {formatCurrency(Number(record.verified_amount))} · Difference {formatCurrency(Math.abs(Number(record.verified_amount) - Number(record.submitted_amount)))}</span>
+                                      </p>}
                                       {(record.discrepancies || []).map((discrepancy) => (
-                                        <div key={discrepancy._id || discrepancy.detected_at} className={`mt-2 rounded-md border px-2 py-1.5 ${discrepancy.status === "resolved" ? darkMode ? "border-emerald-700/50 bg-emerald-950/30 text-emerald-200" : "border-emerald-200 bg-emerald-50 text-emerald-800" : darkMode ? "border-amber-500/30 bg-amber-500/10 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
+                                        <div key={discrepancy._id || discrepancy.detected_at} className={`mt-2 rounded-lg border px-3 py-2.5 leading-5 ${discrepancy.status === "resolved" ? darkMode ? "border-emerald-700/50 bg-emerald-950/30 text-emerald-200" : "border-emerald-200 bg-emerald-50 text-emerald-800" : darkMode ? "border-amber-700/60 bg-amber-950/40 text-amber-200" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
                                           <strong>Payment discrepancy · {String(discrepancy.status || "pending_review").replaceAll("_", " ")}</strong>
                                           <p className="mt-1">Customer-reported {formatCurrency(discrepancy.customer_reported_amount)} · Admin-recorded {formatCurrency(discrepancy.admin_recorded_amount)} · Difference {formatCurrency(discrepancy.difference)}</p>
                                           {discrepancy.resolution_note && <p className="mt-1">Resolution note: {discrepancy.resolution_note}</p>}
@@ -8466,27 +8511,43 @@ function CustomerDashboard() {
                                         </p>
                                       )}
                                       {record.proof_file_url && (
-                                        <button type="button" onClick={() => openCustomerPaymentProofPreview(record.proof_file_url, record.proof_file_name || "Payment proof")} className="mt-2 inline-flex font-semibold text-sky-700 underline underline-offset-2">
-                                          View payment proof{record.proof_file_name ? `: ${record.proof_file_name}` : ""}
-                                        </button>
+                                        <div className={`mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2.5 ${darkMode ? "border-slate-700 bg-slate-800/80" : "border-[#e2e7f0] bg-[#eef3ff]"}`}>
+                                          <div className="flex min-w-0 items-start gap-2.5">
+                                            {(/\.(png|jpe?g|gif|webp|bmp|svg|heic)$/i.test(record.proof_file_name || record.proof_file_url))
+                                              ? <ImagePlus size={15} className={`mt-0.5 shrink-0 ${darkMode ? "text-sky-300" : "text-sky-700"}`} aria-hidden="true" />
+                                              : <FileText size={15} className={`mt-0.5 shrink-0 ${darkMode ? "text-sky-300" : "text-sky-700"}`} aria-hidden="true" />}
+                                            <div className="min-w-0">
+                                              <p className={`break-all font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{record.proof_file_name || "Payment proof"}</p>
+                                              {record.submitted_at && <p className={`mt-0.5 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{formatDateTimeToMMMDDYYYY(record.submitted_at)}</p>}
+                                            </div>
+                                          </div>
+                                          <button type="button" onClick={() => openCustomerPaymentProofPreview(record.proof_file_url, record.proof_file_name || "Payment proof")} className={`shrink-0 font-semibold underline underline-offset-2 ${darkMode ? "text-sky-300" : "text-blue-700"}`}>
+                                            View proof
+                                          </button>
+                                        </div>
                                       )}
                                       {(record.supporting_documents || []).map((document) => (
-                                        <div key={document._id} className={`mt-2 flex flex-wrap items-center justify-between gap-2 rounded-md border px-2 py-2 ${darkMode ? "border-sky-800 bg-sky-950/30" : "border-sky-200 bg-sky-50"}`}>
-                                          <div className="min-w-0">
-                                            <p className={`truncate font-semibold ${darkMode ? "text-sky-200" : "text-sky-900"}`} title={document.original_name}>
+                                        <div key={document._id} className={`mt-2 flex flex-wrap items-center justify-between gap-3 rounded-lg border px-3 py-2.5 ${darkMode ? "border-slate-700 bg-slate-800/80" : "border-[#e2e7f0] bg-[#eef3ff]"}`}>
+                                          <div className="flex min-w-0 items-start gap-2.5">
+                                            {String(document.format || document.original_name || "").toLowerCase() === "pdf" || String(document.original_name || "").toLowerCase().endsWith(".pdf")
+                                              ? <FileText size={15} className={`mt-0.5 shrink-0 ${darkMode ? "text-sky-300" : "text-sky-700"}`} aria-hidden="true" />
+                                              : <ImagePlus size={15} className={`mt-0.5 shrink-0 ${darkMode ? "text-sky-300" : "text-sky-700"}`} aria-hidden="true" />}
+                                            <div className="min-w-0">
+                                            <p className={`break-all font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`} title={document.original_name}>
                                               Admin supporting document: {document.original_name}
                                             </p>
-                                            <p className={`mt-0.5 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-600"}`}>
-                                              Uploaded by {document.uploaded_by_name || "Administrator"} ({document.uploaded_by_role || "admin"}) · {formatDateTimeToMMMDDYYYY(document.uploaded_at)}
-                                            </p>
+                                            {(document.uploaded_by_name || document.uploaded_by_role || document.uploaded_at) && <p className={`mt-0.5 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-600"}`}>
+                                              {document.uploaded_by_name || document.uploaded_by_role ? <>Uploaded by {[document.uploaded_by_name, document.uploaded_by_role ? `(${document.uploaded_by_role})` : ""].filter(Boolean).join(" ")}</> : null}{document.uploaded_at && <>{document.uploaded_by_name || document.uploaded_by_role ? " · " : ""}{formatDateTimeToMMMDDYYYY(document.uploaded_at)}</>}
+                                            </p>}
+                                            </div>
                                           </div>
                                           <button
                                             type="button"
                                             disabled={Boolean(adminPaymentDocumentLoadingId)}
                                             onClick={() => viewAdminPaymentSupportingDocument(orderId, record._id, document)}
-                                            className="shrink-0 font-semibold text-sky-700 underline underline-offset-2 disabled:cursor-wait disabled:opacity-60"
+                                            className={`shrink-0 font-semibold underline underline-offset-2 disabled:cursor-wait disabled:opacity-60 ${darkMode ? "text-sky-300" : "text-blue-700"}`}
                                           >
-                                            {adminPaymentDocumentLoadingId === String(document._id) ? "Loading..." : "View supporting document"}
+                                            {adminPaymentDocumentLoadingId === String(document._id) ? "Loading..." : "View document"}
                                           </button>
                                         </div>
                                       ))}
@@ -8501,7 +8562,7 @@ function CustomerDashboard() {
                             <div className={`mt-6 rounded-xl border px-4 py-3 text-sm font-semibold ${darkMode ? "border-red-900/60 bg-red-950/30 text-red-200" : "border-red-200 bg-red-50 text-red-700"}`}>
                               This order was cancelled. Payment and cancellation actions are unavailable.
                             </div>
-                          ) : <div className="mt-6 grid gap-3 sm:grid-cols-2">
+                            ) : <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-2">
                             {isFullyPaid ? (
                               <div className={`rounded-xl border px-4 py-3 text-sm font-bold sm:col-span-2 ${darkMode ? "border-emerald-800 bg-emerald-950/40 text-emerald-300" : "border-emerald-200 bg-emerald-50 text-emerald-700"}`}>
                                 <p>Payment is fully paid. No additional payment submission is needed.</p>
@@ -8549,13 +8610,13 @@ function CustomerDashboard() {
                                 </button>
                               </div>
                             ) : paymentProofOpenOrderId === orderId ? (
-                              <div className={`sm:col-span-2 rounded-xl border p-3 sm:p-4 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                              <div className={`sm:col-span-2 rounded-xl border p-4 sm:p-5 ${darkMode ? "border-slate-700 bg-slate-800/80" : "border-[#e9e1d4] bg-white"}`}>
                                 <div className="grid w-full max-w-2xl gap-3">
                                   <div>
-                                    <label htmlFor={`payment-amount-${orderId}`} className={`mb-1.5 block text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>
-                                      Amount paid <span className="text-red-500">(required)</span>
+                                    <label htmlFor={`payment-amount-${orderId}`} className={`mb-1.5 flex items-center gap-2 text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
+                                      Amount paid <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${darkMode ? "bg-amber-500/15 text-amber-300" : "bg-amber-100 text-amber-700"}`}>(required)</span>
                                     </label>
-                                    <p className={`mb-1.5 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                                    <p className={`mb-2 text-xs leading-5 ${darkMode ? "text-sky-300" : "text-blue-700"}`}>
                                       {isDownpaymentCovered
                                         ? `${isFullPaymentTerms ? "Full payment complete" : "Downpayment covered"}. Remaining balance: ${formatRequiredPaymentAmount(balanceAmount)}. Enter any amount up to ${formatRequiredPaymentAmount(balanceAmount)}.`
                                         : `${isFullPaymentTerms ? "Full payment still due" : "Downpayment still due"}: ${formatRequiredPaymentAmount(downpaymentBalance)}. Submit at least this amount and no more than ${formatRequiredPaymentAmount(balanceAmount)}.`}
@@ -8567,23 +8628,26 @@ function CustomerDashboard() {
                                       value={paymentProofForm.amount}
                                       onChange={(event) => setPaymentProofForm((prev) => ({ ...prev, amount: formatCustomerPaymentAmountInput(event.target.value) }))}
                                       placeholder="₱0.00"
-                                      className={`w-full rounded-lg border px-3 py-2.5 text-sm font-semibold outline-none focus:border-emerald-500 focus:ring-2 focus:ring-emerald-500/20 ${darkMode ? "border-slate-600 bg-slate-800 text-white placeholder:text-slate-400" : "border-slate-300 bg-white text-slate-900 placeholder:text-slate-400"}`}
+                                      className={`h-11 w-full rounded-xl border px-3 text-sm font-semibold outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-500/20 ${darkMode ? "border-slate-600 bg-slate-900 text-white placeholder:text-slate-400" : "border-[#e9e1d4] bg-white text-slate-900 placeholder:text-slate-400"}`}
                                     />
                                     {isPaymentBelowRequired && (
-                                      <p role="alert" className={`mt-2 rounded-lg border px-3 py-2 text-xs leading-5 ${darkMode ? "border-amber-700 bg-amber-950/40 text-amber-200" : "border-amber-200 bg-amber-50 text-amber-900"}`}>
-                                        This amount is below the required payment of {formatCurrency(downpaymentBalance)} and cannot be submitted. Please contact us{paymentSupportContact ? <> at <a href={paymentSupportContact.href} className="inline-block whitespace-nowrap font-bold underline underline-offset-2"><Phone size={14} className="mr-1 inline-block align-[-2px]" aria-hidden="true" />{paymentSupportContact.display}</a></> : " to discuss payment options"}.
-                                      </p>
+                                      <div role="alert" className={`mt-2 flex items-start gap-2 rounded-lg border px-3 py-2.5 text-xs leading-5 ${darkMode ? "border-red-700/70 bg-red-950/35 text-red-200" : "border-red-200 bg-red-50 text-red-900"}`}>
+                                        <AlertTriangle size={15} className={`mt-0.5 shrink-0 ${darkMode ? "text-red-400" : "text-red-600"}`} aria-hidden="true" />
+                                        <p className="min-w-0 flex-1">
+                                          This amount is below the required payment of <strong className={`font-extrabold ${darkMode ? "text-red-300" : "text-red-800"}`}>{formatCurrency(downpaymentBalance)}</strong> and cannot be submitted. Please contact us{paymentSupportContact ? <span className="mt-1 block sm:ml-1 sm:mt-0 sm:inline"> at <a href={paymentSupportContact.href} className={`inline-flex items-center whitespace-nowrap rounded-md border px-2 py-0.5 font-bold no-underline align-middle transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-red-700 bg-red-900/50 text-red-200 hover:bg-red-900" : "border-red-200 bg-white/80 text-red-700 hover:bg-white"}`}><Phone size={14} className="mr-1.5 shrink-0" aria-hidden="true" />{paymentSupportContact.display}</a></span> : " to discuss payment options"}.
+                                        </p>
+                                      </div>
                                     )}
                                   </div>
-                                  <div className="w-full max-w-xs">
-                                    <div className={`mb-1.5 text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>
-                                      Payment proof <span className={`font-normal ${darkMode ? "text-slate-400" : "text-slate-500"}`}>(optional)</span>
+                                  <div className="w-full pt-1">
+                                    <div className={`mb-2 flex items-center gap-2 text-sm font-bold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
+                                      Payment proof <span className={`rounded-full border px-2 py-0.5 text-[10px] font-medium ${darkMode ? "border-slate-600 bg-slate-800 text-slate-300" : "border-[#e9e1d4] bg-[#faf8f4] text-slate-600"}`}>(optional)</span>
                                     </div>
                                     <label
                                       htmlFor={`payment-proof-${orderId}`}
-                                      className={`flex min-h-9 cursor-pointer items-center gap-2 rounded-lg border border-dashed px-2.5 py-1.5 transition focus-within:ring-2 focus-within:ring-emerald-500 ${darkMode ? "border-slate-600 bg-slate-800 hover:border-slate-500" : "border-slate-300 bg-slate-50 hover:border-emerald-400 hover:bg-emerald-50/50"}`}
+                                      className={`flex min-h-11 cursor-pointer items-center gap-2 rounded-xl border border-dashed px-3 py-2 transition focus-within:ring-2 focus-within:ring-amber-500 ${darkMode ? "border-slate-600 bg-slate-900 hover:border-slate-500" : "border-[#e9e1d4] bg-[#faf8f4] hover:border-amber-400"}`}
                                     >
-                                      <FileText size={15} className="shrink-0 text-emerald-600" aria-hidden="true" />
+                                      <FileText size={15} className="shrink-0 text-slate-400" aria-hidden="true" />
                                       <span className={`min-w-0 flex-1 truncate text-[11px] font-medium ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
                                         {paymentProofForm.fileName || "Choose an image or PDF"}
                                       </span>
@@ -8602,11 +8666,11 @@ function CustomerDashboard() {
                                   <p role="alert" className="mt-2 text-xs font-semibold text-red-600">{paymentProofError}</p>
                                 )}
 
-                                <div className="mt-3 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
+                                <div className="mt-4 flex flex-col-reverse gap-2 sm:flex-row sm:justify-end">
                                   <button
                                     type="button"
                                     onClick={requestClosePaymentProofForm}
-                                    className={`rounded-lg border px-4 py-2 text-sm font-semibold transition ${darkMode ? "border-slate-600 text-slate-300 hover:bg-slate-800" : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"}`}
+                                    className={`inline-flex h-11 items-center justify-center rounded-xl border px-5 text-sm font-semibold transition ${darkMode ? "border-slate-600 bg-slate-800 text-slate-200 hover:bg-slate-700" : "border-[#e9e1d4] bg-white text-slate-800 hover:bg-[#faf8f4]"}`}
                                   >
                                     Cancel
                                   </button>
@@ -8614,28 +8678,45 @@ function CustomerDashboard() {
                                     type="button"
                                     onClick={() => submitPaymentProof(order)}
                                     disabled={paymentProofLoading || isPaymentBelowRequired}
-                                    className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-bold text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-70"
+                                    className="inline-flex h-11 items-center justify-center rounded-xl bg-emerald-700 px-5 text-sm font-bold text-white transition hover:bg-emerald-800 disabled:cursor-not-allowed disabled:opacity-70"
                                   >
                                     {paymentProofLoading ? "Submitting..." : "Submit Payment Info"}
                                   </button>
                                 </div>
                               </div>
                             ) : (
-                              <button
-                                type="button"
-                                onClick={() => isCustomerAcceptedContract && handleOpenPaymentProofForm(orderId)}
-                                disabled={!isCustomerAcceptedContract}
-                                className="w-full rounded-xl bg-emerald-600 px-4 py-3 text-base font-black text-white transition hover:bg-emerald-700 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:bg-emerald-600"
-                              >
-                                {isCustomerAcceptedContract ? "I've already paid" : "Awaiting contract sign-off"}
-                              </button>
+                              isCustomerAcceptedContract ? (
+                                <div className="col-span-full flex justify-end">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleOpenPaymentProofForm(orderId)}
+                                    className="inline-flex h-9 w-fit items-center justify-center rounded-lg bg-emerald-700 px-4 text-xs font-bold text-white transition hover:bg-emerald-800"
+                                  >
+                                    I've already paid
+                                  </button>
+                                </div>
+                              ) : (
+                                <div className="col-span-full flex flex-wrap items-center justify-end gap-3">
+                                  <span className={`inline-flex items-center gap-2 text-xs font-semibold ${darkMode ? "text-sky-300" : "text-sky-700"}`}>
+                                    <span aria-hidden="true" className={`h-1.5 w-1.5 rounded-full ${darkMode ? "bg-sky-400" : "bg-sky-600"}`} />
+                                    Awaiting Contract Sign-off
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handleCancelRequest(order)}
+                                    className={`inline-flex h-9 w-fit items-center justify-center rounded-lg border px-4 text-xs font-bold transition ${darkMode ? "border-red-500/60 bg-transparent text-red-400 hover:bg-red-500/10" : "border-red-500 bg-transparent text-red-600 hover:bg-red-50"}`}
+                                  >
+                                    Cancel request
+                                  </button>
+                                </div>
+                              )
                             )}
 
-                            {!isCustomerAcceptedContract && (
+                            {!isCustomerAcceptedContract && !showContractSignoffControls && (
                               <button
                                 type="button"
                                 onClick={() => handleCancelRequest(order)}
-                                className={`w-full rounded-xl border px-4 py-3 text-base font-black transition ${darkMode ? "border-red-500/60 bg-red-500/10 text-red-400 hover:bg-red-500/20" : "border-red-500 bg-transparent text-red-600 hover:bg-red-50"}`}
+                                className={`inline-flex h-9 w-fit items-center justify-center rounded-lg border px-4 text-xs font-bold transition ${darkMode ? "border-red-500/60 bg-transparent text-red-400 hover:bg-red-500/10" : "border-red-500 bg-transparent text-red-600 hover:bg-red-50"}`}
                               >
                                 Cancel request
                               </button>
@@ -8818,6 +8899,12 @@ function CustomerDashboard() {
                 <p className={`whitespace-pre-line break-words text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-700"}`}>
                   {reviewDetailsOrder.review?.comment || "No written feedback."}
                 </p>
+                {reviewDetailsOrder.review?.adminResponse && (
+                  <section className={`rounded-xl border p-3.5 ${darkMode ? "border-slate-600 bg-slate-800" : "border-emerald-200 bg-emerald-50"}`}>
+                    <h3 className={`text-sm font-bold ${darkMode ? "text-emerald-300" : "text-emerald-900"}`}>ACGC SERVICES</h3>
+                    <p className={`mt-1.5 whitespace-pre-line break-words text-sm leading-6 ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{reviewDetailsOrder.review.adminResponse}</p>
+                  </section>
+                )}
                 <section>
                   <h3 className={`mb-2 text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-800"}`}>Photos</h3>
                   {(reviewDetailsOrder.review?.photos || []).length > 0 ? (
@@ -8849,7 +8936,7 @@ function CustomerDashboard() {
                 >
                   Close
                 </button>
-                {canUploadFeedback && isOrderReviewEditable(reviewDetailsOrder, reviewDetailsOrder.reviewItemIndex) && (
+                {canAccessCustomerRatings && isOrderReviewEditable(reviewDetailsOrder, reviewDetailsOrder.reviewItemIndex) && (
                   <button
                     type="button"
                     onClick={() => {
@@ -8867,7 +8954,7 @@ function CustomerDashboard() {
           </div>
         )}
 
-        {showCustomerReviewModal && canUploadFeedback && selectedReviewOrder && (
+        {showCustomerReviewModal && canAccessCustomerRatings && selectedReviewOrder && (
           <div className="customer-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/45 p-3 backdrop-blur-sm">
             <div
               key={`${selectedReviewOrder._id || selectedReviewOrder.id}-${selectedReviewOrder.reviewItemIndex ?? "order"}`}
@@ -9039,7 +9126,7 @@ function CustomerDashboard() {
           </div>
         )}
 
-        {showProductReviewModal && canUploadFeedback && (
+        {showProductReviewModal && canAccessCustomerRatings && (
           <div className="customer-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
             <div
               role="dialog"
@@ -9192,6 +9279,12 @@ function CustomerDashboard() {
                           </div>
                         )}
                         <p className="mt-1.5 whitespace-pre-line text-sm leading-6 text-slate-600">{review.comment || "No review comment."}</p>
+                        {review.adminResponse && (
+                          <section className={`mt-4 rounded-xl border p-3.5 ${darkMode ? "border-slate-600 bg-slate-800" : "border-emerald-200 bg-emerald-50"}`}>
+                            <h4 className={`text-sm font-bold ${darkMode ? "text-emerald-300" : "text-emerald-900"}`}>ACGC SERVICES</h4>
+                            <p className={`mt-1.5 whitespace-pre-line break-words text-sm leading-6 ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{review.adminResponse}</p>
+                          </section>
+                        )}
                         {review.photos?.length > 0 && (
                           <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
                             {review.photos.map((photo, photoIndex) => (
@@ -9502,6 +9595,7 @@ function CustomerDashboard() {
                       contractStatus === "accepted"
                     );
                     const notificationMessage = () => {
+                      if (order.notificationType === "feedback_response") return order.message;
                       if (order.notificationType === "repair_request") return order.message;
                       if (isSiteInspectionNotification) {
                         return order.message || `Your site inspection for order ${order.tracking} is scheduled for ${formatDateToMMMDDYYYY(order.inspection_date)}.`;
@@ -10507,6 +10601,8 @@ function CustomerDashboard() {
                     ? darkMode
                       ? "border border-emerald-400/30 bg-emerald-500/15 text-emerald-300"
                       : "bg-emerald-100 text-emerald-700"
+                    : statusLabel === "Awaiting Contract Sign-off"
+                      ? getContractSignoffBadgeClassName(darkMode)
                     : darkMode
                       ? "border border-red-400/30 bg-red-500/15 text-red-300"
                       : "bg-red-100 text-red-700";
@@ -10532,7 +10628,7 @@ function CustomerDashboard() {
 
                         <div className="min-w-0 text-center xl:text-left">
                           <p className={`text-[9px] font-black uppercase tracking-[0.18em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Status</p>
-                          <span className={`mt-1 inline-flex rounded-full px-2.5 py-0.5 text-[11px] font-black leading-tight ${statusClass}`}>{statusLabel}</span>
+                          <span className={`mt-1 ${statusBadgeBaseClassName} ${statusClass}`}>{statusLabel}</span>
                         </div>
 
                         <div className="min-w-0 text-center xl:text-left">

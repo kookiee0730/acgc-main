@@ -32,7 +32,7 @@ export const getOrderStatusLabel = (status) => {
     case "site inspection":
       return "Site Inspection";
     case "contract sent":
-      return "Contract Sent";
+      return "Awaiting Contract Sign-off";
     case "contract accepted":
       return "Contract Accepted";
     case "contract declined":
@@ -57,6 +57,11 @@ export const getOrderStatusClasses = (status) => {
   switch (normalized) {
     case "completed":
       return "bg-red-50 text-red-700 border border-red-200";
+    case "awaiting contract sign off":
+    case "contract sent":
+      return "bg-sky-50 text-sky-800 border border-sky-200";
+    case "awaiting payment":
+      return "bg-amber-50 text-amber-800 border border-amber-200";
     case "contract declined":
     case "cancelled":
       return "bg-red-100 text-red-800 border border-red-300";

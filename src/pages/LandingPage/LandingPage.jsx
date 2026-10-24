@@ -36,6 +36,7 @@ import { getProductEstimatorState } from "@/components/ProductPriceEstimator";
 import { useAuth } from "@/contexts/AuthContext";
 import { getCart, saveCart } from "@/api/cart";
 import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
+import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getProducts } from "../../api/products";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { getProductReviewSummary, trackOrder } from "../../api/orders";
@@ -2006,8 +2007,8 @@ function LandingPage() {
               </div>
               <div className="min-w-0 rounded-xl border border-slate-200/80 bg-white p-3">
                 <p className="text-[9px] font-extrabold uppercase tracking-[0.12em] text-slate-500">Payment Status</p>
-                <span className={`mt-2 inline-flex min-h-8 w-full items-center justify-center rounded-full border px-2 text-[10px] font-extrabold ${trackingPaymentSummary.status.key === "paid" ? "border-emerald-300 bg-emerald-50 text-emerald-800" : trackingPaymentSummary.status.key === "pending" ? "border-amber-300 bg-amber-50 text-amber-900" : "border-sky-300 bg-sky-50 text-sky-800"}`}>
-                  {trackingPaymentSummary.status.label.toUpperCase()}
+                <span className={`mt-2 ${statusBadgeBaseClassName} min-h-8 w-full px-2 text-center text-[10px] font-extrabold uppercase tracking-wide ${getPaymentStatusBadgeClassName(trackingPaymentSummary.status.key)}`}>
+                  {getPaymentStatusLabel(trackingPaymentSummary.status)}
                 </span>
               </div>
             </div>

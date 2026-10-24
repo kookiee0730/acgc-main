@@ -4,6 +4,7 @@ import logo from "../../assets/images/ACGCLOGO1.png";
 import { ChevronDown, ChevronUp, CircleAlert, CircleCheck, CircleX, LoaderCircle, Truck } from "lucide-react";
 import OrderProgressTimeline from "@/components/OrderProgressTimeline";
 import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
+import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getFinalProjectCost } from "@/lib/orderPricing";
 import { trackOrder } from "../../api/orders";
 import { useCustomerPermissions } from "@/hooks/useCustomerPermissions";
@@ -308,8 +309,8 @@ function TrackOrder() {
                     </div>
                     <div className="min-w-0">
                       <p className="text-[10px] font-medium uppercase tracking-[0.08em] text-muted-foreground">PAYMENT STATUS</p>
-                      <span className={`mt-1 inline-flex min-h-8 w-full items-center justify-center rounded-full border px-3 text-xs font-medium ${trackingPaymentSummary.status.key === "paid" ? "border-emerald-300 bg-emerald-50 text-emerald-800 dark:border-emerald-900 dark:bg-emerald-950/40 dark:text-emerald-200" : trackingPaymentSummary.status.key === "pending" ? "border-amber-300 bg-amber-50 text-amber-900 dark:border-amber-900 dark:bg-amber-950/40 dark:text-amber-200" : "border-sky-300 bg-sky-50 text-sky-800 dark:border-sky-900 dark:bg-sky-950/40 dark:text-sky-200"}`}>
-                        {trackingPaymentSummary.status.label.toUpperCase()}
+                      <span className={`mt-1 ${statusBadgeBaseClassName} min-h-8 w-full px-3 text-center text-xs ${getPaymentStatusBadgeClassName(trackingPaymentSummary.status.key, true)}`}>
+                        {getPaymentStatusLabel(trackingPaymentSummary.status)}
                       </span>
                     </div>
                   </div>

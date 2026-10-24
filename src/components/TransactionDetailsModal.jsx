@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { XCircle } from "lucide-react";
 import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
+import { getContractSignoffBadgeClassName, getPaymentStatusBadgeClassName, getPaymentStatusLabel, isAwaitingContractSignoff, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getOrderRepairHistory } from "@/api/repairs";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 
@@ -49,6 +50,7 @@ const computeWarrantyExpiryDate = (start, periodValue) => {
 function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarranty = false, darkMode = false, hidePaymentAmounts = false, includeRepairHistory = false }) {
   const contentRef = useRef(null);
   const warrantyHeadingRef = useRef(null);
+  const repairHistoryHeadingRef = useRef(null);
   const [repairHistory, setRepairHistory] = useState([]);
   const [repairHistoryLoading, setRepairHistoryLoading] = useState(false);
   const [repairHistoryError, setRepairHistoryError] = useState("");
@@ -194,7 +196,8 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
   const customerName = order.customer_name
     || `${order.customer?.first_name || ""} ${order.customer?.last_name || ""}`.trim()
     || "Customer";
-  const projectStatus = String(order.status || "pending").replace(/_/g, " ");
+  const awaitingContractSignoff = isAwaitingContractSignoff(order);
+  const projectStatus = awaitingContractSignoff ? "Awaiting Contract Sign-off" : String(order.status || "pending").replace(/_/g, " ");
   const orderType = order.order_type === "walk_in_customer" ? "Walk-in Order" : "Website Order";
   const projectRevenue = Number(paymentSummary.totalAmount) || 0;
   const projectCosts = order.project_costs || order.projectCosts || null;
@@ -203,6 +206,7 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
   const recordedProjectCost = hasRecordedProjectCost ? projectCostFields.reduce((sum, value) => sum + Number(value), 0) : null;
   const targetProfitMargin = 0.3333;
   const targetNetProfit = projectRevenue * targetProfitMargin;
+  const targetProjectCosts = projectRevenue * (1 - targetProfitMargin);
   const estimatedProfit = hasRecordedProjectCost ? projectRevenue - recordedProjectCost : targetNetProfit;
   const estimatedMargin = hasRecordedProjectCost
     ? estimatedProfit !== null && projectRevenue > 0 ? (estimatedProfit / projectRevenue) * 100 : null
@@ -229,11 +233,14 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
 
         <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-100 p-3">
           <div className="mb-3 flex flex-wrap gap-2">
-            <span className={`rounded-md border px-2 py-1 text-[10px] font-semibold ${paymentSummary.status.key === "paid" ? "border-emerald-200 bg-emerald-100 text-emerald-700" : "border-amber-200 bg-amber-50 text-amber-800"}`}>
-              {paymentSummary.status.label}
+            <span className={`${statusBadgeBaseClassName} text-[10px] ${getPaymentStatusBadgeClassName(paymentSummary.status.key, darkMode)}`}>
+              {getPaymentStatusLabel(paymentSummary.status)}
             </span>
-            <span className="rounded-md border border-blue-200 bg-blue-100 px-2 py-1 text-[10px] font-semibold text-blue-700">{projectStatus}</span>
+            <span className={`${statusBadgeBaseClassName} text-[10px] ${awaitingContractSignoff ? getContractSignoffBadgeClassName(darkMode) : darkMode ? "border-blue-400/30 bg-blue-500/10 text-blue-200" : "border-blue-200 bg-blue-100 text-blue-700"}`}>{projectStatus}</span>
             <span className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-700">{orderType}</span>
+            {includeRepairHistory && <button type="button" onClick={() => repairHistoryHeadingRef.current?.scrollIntoView({ behavior: "smooth", block: "start" })} className={`rounded-md border px-2 py-1 text-[10px] font-semibold ${repairHistory.length ? "border-amber-200 bg-amber-50 text-amber-800" : "border-slate-200 bg-white text-slate-700"}`}>
+              {repairHistoryLoading ? "Checking repair history…" : repairHistoryError ? "Repair history unavailable" : repairHistory.length ? `Repair history: ${repairHistory.length} ticket${repairHistory.length === 1 ? "" : "s"}` : "No repair history"}
+            </button>}
           </div>
 
           <section className="rounded-md border border-slate-200 bg-white p-3">
@@ -325,15 +332,15 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                 </div>
                 <div className="grid gap-2 sm:grid-cols-2">
                   <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Project Revenue</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : `₱${projectRevenue.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p></div>
-                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Total Project Costs</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : hasRecordedProjectCost ? `₱${recordedProjectCost.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}` : "Not recorded"}</p></div>
+                  <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{hasRecordedProjectCost ? "Total Project Costs" : "Target Project Costs at 66.67%"}</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : `₱${(hasRecordedProjectCost ? recordedProjectCost : targetProjectCosts).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p></div>
                   <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{hasRecordedProjectCost ? "Estimated Net Profit" : "Target Net Profit at 33.33%"}</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : estimatedProfit === null ? "Unavailable" : `₱${estimatedProfit.toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p></div>
                   <div className="rounded-md bg-slate-50 p-3"><p className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">{hasRecordedProjectCost ? "Net Profit Margin" : "Target Profit Margin"}</p><p className="mt-1 text-sm font-bold text-slate-900">{hidePaymentAmounts ? "••••••" : estimatedMargin === null ? "Unavailable" : `${estimatedMargin.toFixed(2)}%${hasRecordedProjectCost ? "" : " target"}`}</p></div>
                 </div>
-                {!hasRecordedProjectCost && <p className="mt-2 text-[11px] leading-5 text-slate-500">Target estimate only. Actual project costs, profit, and margin remain unavailable until material, labor, and other expenses are recorded.</p>}
+                {!hasRecordedProjectCost && <p className="mt-2 text-[11px] leading-5 text-slate-500">Target cost and profit estimates use a 66.67% cost / 33.33% profit split of project revenue. Actual project costs are not recorded; estimates do not represent recorded expenses or actual profit.</p>}
               </section>
 
               <section className="mt-3 rounded-md border border-slate-200 bg-white p-3">
-                <h3 className="mb-3 border-b border-slate-200 pb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">REPAIR HISTORY</h3>
+                <h3 ref={repairHistoryHeadingRef} className="mb-3 scroll-mt-3 border-b border-slate-200 pb-2 text-[10px] font-extrabold uppercase tracking-[0.18em] text-slate-500">REPAIR HISTORY FOR THIS PROJECT</h3>
                 {repairHistoryLoading && <p className="text-sm text-slate-500">Loading repair history…</p>}
                 {!repairHistoryLoading && repairHistoryError && <p role="alert" className="text-sm text-red-600">{repairHistoryError}</p>}
                 {!repairHistoryLoading && !repairHistoryError && repairHistory.length === 0 && <p className="text-sm text-slate-600">No repair history found for this project.</p>}

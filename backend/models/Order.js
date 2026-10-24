@@ -240,6 +240,9 @@ const OrderItemSchema = new mongoose.Schema(
       tags: { type: [String], default: [] },
       photos: { type: [String], default: [] },
       hiddenFromCustomers: { type: Boolean, default: false },
+      adminResponse: { type: String, trim: true, maxlength: 1000, default: "" },
+      adminRespondedAt: { type: Date, default: null },
+      adminRespondedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null },
       submittedAt: { type: Date, default: null },
       updatedAt: { type: Date, default: null },
     },
@@ -843,6 +846,21 @@ const OrderSchema = new mongoose.Schema(
       hiddenFromCustomers: {
         type: Boolean,
         default: false,
+      },
+      adminResponse: {
+        type: String,
+        trim: true,
+        maxlength: 1000,
+        default: "",
+      },
+      adminRespondedAt: {
+        type: Date,
+        default: null,
+      },
+      adminRespondedBy: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        default: null,
       },
       submittedAt: {
         type: Date,

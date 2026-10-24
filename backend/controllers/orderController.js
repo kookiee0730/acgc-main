@@ -1960,6 +1960,77 @@ export const setOrderReviewVisibility = async (req, res) => {
   }
 };
 
+export const respondToCustomerReview = async (req, res) => {
+  try {
+    const responseText = req.body?.response;
+    if (typeof responseText !== "string" || !responseText.trim() || responseText.trim().length > 1000) {
+      return res.status(400).json({ success: false, message: "Response must be between 1 and 1000 characters." });
+    }
+
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const rawItemIndex = req.body?.itemIndex;
+    const hasItemIndex = rawItemIndex !== undefined && rawItemIndex !== null;
+    let review;
+    let productName;
+    let isFirstResponse = false;
+    if (hasItemIndex) {
+      const itemIndex = Number(rawItemIndex);
+      if (!Number.isInteger(itemIndex) || itemIndex < 0 || itemIndex >= order.items.length) {
+        return res.status(400).json({ success: false, message: "A valid product index is required." });
+      }
+      review = order.items[itemIndex]?.review;
+      productName = order.items[itemIndex]?.name || order.items[itemIndex]?.product_name || "your product";
+      if (!review?.submittedAt && !review?.rating) return res.status(404).json({ success: false, message: "Product feedback not found." });
+      isFirstResponse = !String(review.adminResponse || "").trim();
+      review.adminResponse = responseText.trim();
+      review.adminRespondedAt = new Date();
+      review.adminRespondedBy = req.user.id;
+      order.markModified(`items.${itemIndex}.review`);
+    } else {
+      review = order.review;
+      productName = order.items?.length > 1 ? "your project" : order.items?.[0]?.name || "your project";
+      if (!review || (!review.submittedAt && !review.rating)) return res.status(404).json({ success: false, message: "Customer feedback not found." });
+      isFirstResponse = !String(review.adminResponse || "").trim();
+      review.adminResponse = responseText.trim();
+      review.adminRespondedAt = new Date();
+      review.adminRespondedBy = req.user.id;
+      order.markModified("review");
+    }
+
+    await order.save();
+    if (isFirstResponse && order.customer) {
+      const submittedAt = review.submittedAt ? new Date(review.submittedAt).getTime() : "legacy";
+      const eventKey = `feedback_response_${hasItemIndex ? rawItemIndex : "order"}_${submittedAt}`;
+      try {
+        await CustomerNotification.updateOne(
+          { order: order._id, eventKey },
+          { $setOnInsert: {
+            customer: order.customer,
+            order: order._id,
+            eventKey,
+            type: "feedback_response",
+            title: "ACGC SERVICES",
+            message: `An admin responded to your feedback for ${productName}.`,
+            tracking: order.tracking || "",
+            stageKey: "feedback_response",
+            stageName: "ACGC SERVICES",
+            itemIndex: hasItemIndex ? Number(rawItemIndex) : null,
+            productName,
+          } },
+          { upsert: true },
+        );
+      } catch (notificationError) {
+        if (notificationError?.code !== 11000) throw notificationError;
+      }
+    }
+    return res.json({ success: true, order });
+  } catch (error) {
+    console.error("Respond to customer review error:", error);
+    return res.status(500).json({ success: false, message: "Unable to save admin response." });
+  }
+};
+
 export const submitOrderReview = async (req, res) => {
   try {
     const { orderId } = req.params;
@@ -2170,6 +2241,7 @@ export const getProductReviews = async (req, res) => {
               comment: review.comment || "",
               tags: review.tags || [],
               photos: review.photos || [],
+              adminResponse: review.adminResponse || "",
               submittedAt: review.submittedAt || null,
               itemIndex,
             }];
