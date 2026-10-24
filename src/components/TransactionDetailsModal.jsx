@@ -348,9 +348,16 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                   <div className="space-y-2">
                     {repairHistory.map((repair) => {
                       const repairId = String(repair._id || repair.id);
-                      const repairCost = repair.quotation?.total;
+                      const hasIssuedQuotation = Boolean(repair.quotation?.issuedAt);
+                      const isWarrantyRepair = repair.workflowType === "warranty";
+                      const repairCost = hasIssuedQuotation ? repair.quotation?.total : null;
                       const paidAmount = repair.completion?.amountPaid;
                       const isExpanded = expandedRepairId === repairId;
+                      const paymentStatus = { not_required: "Not required", pending: "Pending", received: "Received" }[repair.payment?.status];
+                      const warrantyStart = formatDateToMMMDDYYYY(repair.warranty?.startsAt);
+                      const warrantyEnd = formatDateToMMMDDYYYY(repair.warranty?.expiresAt);
+                      const scheduleStart = formatDateToMMMDDYYYY(repair.schedule?.startDate || repair.schedule?.date);
+                      const scheduleEnd = formatDateToMMMDDYYYY(repair.schedule?.finishDate || repair.schedule?.date);
                       return (
                         <article key={repairId} className="rounded-md border border-slate-200 bg-slate-50 p-3">
                           <div className="flex flex-wrap items-start justify-between gap-2">
@@ -361,10 +368,10 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                             <span className="rounded-full bg-blue-50 px-2.5 py-1 text-[10px] font-semibold capitalize text-blue-700">{String(repair.status || "unknown").replaceAll("_", " ")}</span>
                           </div>
                           <div className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
-                            <p><span className="text-slate-500">Requested: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.createdAt || repair.requestedAt) || "—"}</span></p>
-                            <p><span className="text-slate-500">Repair cost: </span><span className="font-medium text-slate-800">{repairCost === undefined || repairCost === null ? "Not set" : `₱${Number(repairCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></p>
-                            <p><span className="text-slate-500">Payment: </span><span className="font-medium capitalize text-slate-800">{String(repair.payment?.status || "pending").replaceAll("_", " ")}</span></p>
-                            <p><span className="text-slate-500">Completed: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.completion?.completedAt) || "—"}</span></p>
+                            {(repair.createdAt || repair.requestedAt) && <p><span className="text-slate-500">Requested: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.createdAt || repair.requestedAt)}</span></p>}
+                            <p><span className="text-slate-500">Repair cost: </span><span className="font-medium text-slate-800">{isWarrantyRepair ? "No charge (warranty)" : repairCost == null ? "Not quoted" : `₱${Number(repairCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</span></p>
+                            {paymentStatus && <p><span className="text-slate-500">Payment: </span><span className="font-medium text-slate-800">{paymentStatus}</span></p>}
+                            {repair.completion?.completedAt && <p><span className="text-slate-500">Completed: </span><span className="font-medium text-slate-800">{formatDateToMMMDDYYYY(repair.completion.completedAt)}</span></p>}
                           </div>
                           <button type="button" onClick={() => setExpandedRepairId(isExpanded ? "" : repairId)} aria-expanded={isExpanded} className="mt-3 rounded-md border border-slate-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700 hover:bg-slate-100">
                             {isExpanded ? "Hide full details" : "View full repair details"}
@@ -372,16 +379,16 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                           {isExpanded && (
                             <div className="mt-3 space-y-3 border-t border-slate-200 pt-3 text-xs text-slate-700">
                               <div className="grid gap-2 sm:grid-cols-2">
-                                <p><span className="text-slate-500">Repair type: </span><span className="font-medium capitalize">{repair.workflowType || "—"}</span></p>
-                                <p><span className="text-slate-500">Linked product number: </span><span className="font-medium">{Number.isInteger(repair.productIndex) ? repair.productIndex + 1 : "—"}</span></p>
-                                <p><span className="text-slate-500">Warranty: </span><span className="font-medium capitalize">{String(repair.warranty?.status || "unknown").replaceAll("_", " ")}</span></p>
-                                <p><span className="text-slate-500">Warranty dates: </span><span className="font-medium">{formatDateToMMMDDYYYY(repair.warranty?.startsAt) || "—"} – {formatDateToMMMDDYYYY(repair.warranty?.expiresAt) || "—"}</span></p>
-                                <p><span className="text-slate-500">Repair schedule: </span><span className="font-medium">{formatDateToMMMDDYYYY(repair.schedule?.startDate || repair.schedule?.date) || "—"} – {formatDateToMMMDDYYYY(repair.schedule?.finishDate || repair.schedule?.date) || "—"}</span></p>
-                                <p><span className="text-slate-500">Invoice: </span><span className="font-medium">{repair.invoiceNumber || "—"}</span></p>
+                                {repair.workflowType && <p><span className="text-slate-500">Repair type: </span><span className="font-medium capitalize">{repair.workflowType}</span></p>}
+                                {Number.isInteger(repair.productIndex) && <p><span className="text-slate-500">Linked product number: </span><span className="font-medium">{repair.productIndex + 1}</span></p>}
+                                {isWarrantyRepair && repair.warranty?.status && repair.warranty.status !== "unknown" && <p><span className="text-slate-500">Warranty: </span><span className="font-medium capitalize">{String(repair.warranty.status).replaceAll("_", " ")}</span></p>}
+                                {isWarrantyRepair && (warrantyStart || warrantyEnd) && <p><span className="text-slate-500">Warranty dates: </span><span className="font-medium">{warrantyStart || warrantyEnd}{warrantyStart && warrantyEnd && warrantyStart !== warrantyEnd ? ` – ${warrantyEnd}` : ""}</span></p>}
+                                {(scheduleStart || scheduleEnd) && <p><span className="text-slate-500">Repair schedule: </span><span className="font-medium">{scheduleStart || scheduleEnd}{scheduleStart && scheduleEnd && scheduleStart !== scheduleEnd ? ` – ${scheduleEnd}` : ""}</span></p>}
+                                {repair.invoiceNumber && <p><span className="text-slate-500">Invoice: </span><span className="font-medium">{repair.invoiceNumber}</span></p>}
                               </div>
-                              <div><p className="font-semibold text-slate-500">Repair description</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.issueDescription || "No description recorded."}</p></div>
+                              {repair.issueDescription && <div><p className="font-semibold text-slate-500">Repair description</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.issueDescription}</p></div>}
                               {repair.inspection?.notes && <div><p className="font-semibold text-slate-500">Inspection notes</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.inspection.notes}</p></div>}
-                              {repair.quotation && <div><p className="font-semibold text-slate-500">Quotation</p><p className="mt-1">Labor: {repair.quotation.laborCost == null ? "Not set" : `₱${Number(repair.quotation.laborCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`} · Payment received: {paidAmount == null ? "Not recorded" : `₱${Number(paidAmount).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</p>{repair.quotation.notes && <p className="mt-1 whitespace-pre-wrap">{repair.quotation.notes}</p>}{repair.quotation.parts?.length > 0 && <ul className="mt-1 list-inside list-disc">{repair.quotation.parts.map((part, index) => <li key={`${repairId}-part-${index}`}>{part.description}: ₱{Number(part.cost || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</li>)}</ul>}</div>}
+                              {hasIssuedQuotation && <div><p className="font-semibold text-slate-500">Quotation</p>{repair.quotation.laborCost != null && <p className="mt-1">Service fee: ₱{Number(repair.quotation.laborCost).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>}{paidAmount != null && <p className="mt-1">Payment received: ₱{Number(paidAmount).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</p>}{repair.quotation.notes && <p className="mt-1 whitespace-pre-wrap">{repair.quotation.notes}</p>}{repair.quotation.parts?.length > 0 && <ul className="mt-1 list-inside list-disc">{repair.quotation.parts.map((part, index) => <li key={`${repairId}-part-${index}`}>{part.description}: ₱{Number(part.cost || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</li>)}</ul>}</div>}
                               {repair.completion?.notes && <div><p className="font-semibold text-slate-500">Completion notes</p><p className="mt-1 whitespace-pre-wrap break-words">{repair.completion.notes}</p></div>}
                               {repair.mediaUrls?.length > 0 && <div><p className="font-semibold text-slate-500">Request photos</p><div className="mt-1 flex flex-wrap gap-2">{repair.mediaUrls.map((url, index) => <a key={`${repairId}-media-${index}`} href={url} target="_blank" rel="noreferrer" className="text-blue-700 underline">Photo {index + 1}</a>)}</div></div>}
                               {repair.history?.length > 0 && <div><p className="font-semibold text-slate-500">Ticket history</p><ul className="mt-1 space-y-1">{[...repair.history].sort((a, b) => new Date(b.createdAt || 0) - new Date(a.createdAt || 0)).map((entry, index) => <li key={`${repairId}-event-${index}`}>{formatDateToMMMDDYYYY(entry.createdAt) || "—"} · {String(entry.event || "Update").replaceAll("_", " ")}{entry.detail ? ` — ${entry.detail}` : ""}</li>)}</ul></div>}

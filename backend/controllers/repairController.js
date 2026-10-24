@@ -14,7 +14,7 @@ const money = (value, label = "Amount") => {
 const statusError = (message, status = 409) => Object.assign(new Error(message), { status });
 const event = (repair, name, detail, actor) => repair.history.push({ event: name, detail: text(detail), actor: actor?.id || null, actorRole: actor?.role || "system" });
 const publicCustomer = (repair) => ({
-  _id: repair._id, order: repair.order, orderTracking: repair.orderTracking, productName: repair.productName,
+  _id: repair._id, repairTrackingId: repair.repairTrackingId, order: repair.order, orderTracking: repair.orderTracking, productName: repair.productName,
   customerName: repair.customerName, customerEmail: repair.customerEmail, customerPhone: repair.customerPhone,
   issueDescription: repair.issueDescription, mediaUrls: repair.mediaUrls, installationDate: repair.installationDate, workflowType: repair.workflowType,
   warranty: repair.warranty, status: repair.status, inspection: repair.inspection, quotation: repair.quotation,
@@ -62,8 +62,12 @@ export const listRepairRequests = async (req, res) => {
   const filter = { workflowVersion: 2 };
   if (["warranty", "paid"].includes(req.query.type)) filter.workflowType = req.query.type;
   if (["pending_review", "quotation_pending_approval", "customer_accepted", "admin_approved", "scheduled", "in_progress", "completed", "cancelled", "rejected"].includes(req.query.status)) filter.status = req.query.status;
-  const repairs = await RepairRequest.find(filter).sort({ updatedAt: -1 }).limit(1000).lean();
-  res.json({ success: true, repairs });
+  const repairs = await RepairRequest.find(filter).sort({ updatedAt: -1 }).limit(1000);
+  const repairRecords = await Promise.all(repairs.map(async (repair) => {
+    if (!repair.repairTrackingId) await repair.save();
+    return repair.toObject();
+  }));
+  res.json({ success: true, repairs: repairRecords });
 };
 
 export const getAdminOrderRepairHistory = async (req, res) => {
@@ -96,6 +100,10 @@ export const getAdminCustomerRepairProducts = async (req, res) => {
     productIndex,
     orderTracking: order.tracking || "",
     productName: text(item.name, 200) || "Ordered product",
+    width: Number(item.width) || 0,
+    height: Number(item.height) || 0,
+    measurementUnit: text(item.measurement_unit, 12) || "in",
+    quantity: Number(item.quantity) || 1,
     installationDate: order.estimated_installation_date || item.warranty_start_date || order.warranty_start_date || null,
     completedAt: order.updatedAt || order.createdAt || null,
     warranty: warrantyForItem(order, item),
@@ -145,8 +153,39 @@ export const createAdminRepairRequest = async (req, res) => {
 };
 
 export const listCustomerRepairRequests = async (req, res) => {
-  const repairs = await RepairRequest.find({ customer: req.user.id, workflowVersion: 2 }).sort({ updatedAt: -1 }).lean();
-  res.json({ success: true, repairs: repairs.map(publicCustomer) });
+  const repairs = await RepairRequest.find({ customer: req.user.id, workflowVersion: 2 }).sort({ updatedAt: -1 });
+  const customerRepairs = await Promise.all(repairs.map(async (repair) => {
+    if (!repair.repairTrackingId) await repair.save();
+    return publicCustomer(repair);
+  }));
+  res.json({ success: true, repairs: customerRepairs });
+};
+
+export const trackRepairRequest = async (req, res) => {
+  const repairTrackingId = String(req.params.repairTrackingId || "").trim().toUpperCase();
+  if (!/^RPR-(?:\d{6}-[A-F0-9]{8}|\d{8}-[A-F0-9]{10})$/.test(repairTrackingId)) {
+    return res.status(400).json({ success: false, message: "Enter a valid repair request ID." });
+  }
+  const repair = await RepairRequest.findOne({ repairTrackingId })
+    .select("repairTrackingId productName issueDescription workflowType warranty.status warranty.expiresAt status schedule createdAt updatedAt completion.completedAt")
+    .lean();
+  if (!repair) return res.status(404).json({ success: false, message: "No repair request was found with that ID." });
+  return res.json({
+    success: true,
+    repair: {
+      _id: repair._id,
+      repairTrackingId: repair.repairTrackingId,
+      productName: repair.productName,
+      issueDescription: repair.issueDescription,
+      workflowType: repair.workflowType,
+      warranty: repair.warranty,
+      status: repair.status,
+      schedule: repair.schedule,
+      requestedAt: repair.createdAt,
+      updatedAt: repair.updatedAt,
+      completedAt: repair.completion?.completedAt || null,
+    },
+  });
 };
 
 export const createCustomerRepairRequest = async (req, res) => {

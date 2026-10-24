@@ -2,6 +2,7 @@ import { apiFetch } from "./client";
 
 export const getRepairableOrders = () => apiFetch("/repairs/customer/orders", { cache: "no-store" });
 export const getCustomerRepairRequests = () => apiFetch("/repairs/customer", { cache: "no-store" });
+export const trackRepairRequest = (repairTrackingId) => apiFetch(`/repairs/track/${encodeURIComponent(repairTrackingId)}`, { cache: "no-store" });
 export const createCustomerRepairRequest = (payload) => apiFetch("/repairs/customer/requests", { method: "POST", body: JSON.stringify(payload) });
 export const respondToRepairQuotation = (repairId, payload) => apiFetch(`/repairs/customer/${encodeURIComponent(repairId)}/quotation-response`, { method: "POST", body: JSON.stringify(payload) });
 export const submitRepairPaymentProof = (repairId, payload) => apiFetch(`/repairs/customer/${encodeURIComponent(repairId)}/payment-proof`, { method: "POST", body: JSON.stringify(payload) });

@@ -54,6 +54,7 @@ export const getAdminOrder = (orderId, module) => {
 };
 
 export const getProductReviews = (productId) => apiFetch(`/orders/reviews/product/${encodeURIComponent(productId)}`);
+export const getCustomerFeedbackSummary = () => apiFetch("/orders/reviews/summary", { cache: "no-store" });
 export const getProductReviewSummary = (productId) =>
   apiFetch(`/orders/reviews/product/${encodeURIComponent(productId)}/summary`);
 

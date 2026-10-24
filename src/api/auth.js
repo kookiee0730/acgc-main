@@ -74,3 +74,22 @@ export const verifyEmailChangeCode = (code) => apiFetch("/auth/profile/email-cha
 export const resendEmailChangeCode = () => apiFetch("/auth/profile/email-change/resend", {
   method: "POST",
 });
+
+export const requestUsernameChange = (payload) => apiFetch("/auth/profile/username-change/request-code", {
+  method: "POST",
+  body: JSON.stringify(payload),
+});
+
+export const resendUsernameChangeCode = () => apiFetch("/auth/profile/username-change/resend", {
+  method: "POST",
+});
+
+export const verifyUsernameChangeCode = (code) => apiFetch("/auth/profile/username-change/verify", {
+  method: "POST",
+  body: JSON.stringify({ code }),
+});
+
+export const completeUsernameChange = (username) => apiFetch("/auth/profile/username-change/complete", {
+  method: "POST",
+  body: JSON.stringify({ username }),
+});

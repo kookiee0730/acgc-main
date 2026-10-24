@@ -32,6 +32,12 @@ const UserSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    pending_username: { type: String, lowercase: true, trim: true, minlength: 6, maxlength: 12, default: null },
+    pending_username_verification_code: { type: String, default: null },
+    pending_username_verification_expires: { type: Date, default: null },
+    pending_username_verification_attempts: { type: Number, default: 0 },
+    pending_username_verification_sent_at: { type: Date, default: null },
+    username_change_verified_until: { type: Date, default: null },
     username: {
       type: String,
       required: true,
@@ -163,6 +169,10 @@ UserSchema.index(
   { pending_email: 1 },
   { unique: true, partialFilterExpression: { pending_email: { $type: "string" } } },
 );
+UserSchema.index(
+  { pending_username: 1 },
+  { unique: true, partialFilterExpression: { pending_username: { $type: "string" } } },
+);
 
 // Hash password before saving
 UserSchema.pre("save", async function () {
@@ -187,6 +197,12 @@ UserSchema.methods.toJSON = function () {
     delete user.pending_email_verification_expires;
     delete user.pending_email_verification_attempts;
     delete user.pending_email_verification_sent_at;
+    delete user.pending_username;
+    delete user.pending_username_verification_code;
+    delete user.pending_username_verification_expires;
+    delete user.pending_username_verification_attempts;
+    delete user.pending_username_verification_sent_at;
+    delete user.username_change_verified_until;
     delete user.password_reset_code;
     delete user.password_reset_expires;
     delete user.password_reset_sent_at;

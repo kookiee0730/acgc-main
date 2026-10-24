@@ -67,6 +67,8 @@ import {
   declineContract,
   submitOrderReview,
   getProductReviews,
+  getProductReviewSummary,
+  getCustomerFeedbackSummary,
   cancelCustomerOrder,
 } from "@/api/orders";
 import { uploadFiles } from "@/api/uploads";
@@ -91,6 +93,7 @@ import { getCart, saveCart } from "@/api/cart";
 import { formatDateToMMMDDYYYY, formatDateTimeToMMMDDYYYY, formatTimeAgo } from "@/lib/dateUtils";
 import { buildDelayNotifications, sortCustomerNotificationsNewestFirst } from "@/lib/delayNotifications";
 import CustomerRepairRequests from "@/components/CustomerRepairRequests";
+import UsernameChangeFlow from "@/components/UsernameChangeFlow";
 import { getCustomerRepairRequests } from "@/api/repairs";
 import {
   getCustomerOrderNotificationMessage,
@@ -769,6 +772,7 @@ function CustomerDashboard() {
     last_name: "",
     phone: "",
     email: "",
+    username: "",
     street_address: "",
     city: "",
     province: "",
@@ -781,6 +785,7 @@ function CustomerDashboard() {
   const [profileMessage, setProfileMessage] = useState("");
   const [profileError, setProfileError] = useState("");
   const [emailChangeOpen, setEmailChangeOpen] = useState(false);
+  const [usernameChangeOpen, setUsernameChangeOpen] = useState(false);
   const [showEmailChangePassword, setShowEmailChangePassword] = useState(false);
   const [emailChangeSaving, setEmailChangeSaving] = useState(false);
   const [emailChangeError, setEmailChangeError] = useState("");
@@ -1186,6 +1191,7 @@ function CustomerDashboard() {
         last_name: user.last_name || "",
         phone: user.phone || "",
         email: user.email || "",
+        username: user.username || "",
         street_address: user.street_address || "",
         city: user.city || "",
         province: user.province || "",
@@ -1754,21 +1760,20 @@ function CustomerDashboard() {
         const productReviewData = await Promise.all(
           eligibleProducts.map(async (product) => {
             try {
-              const reviewResponse = await getProductReviews(product._id || product.id);
-              const reviews = Array.isArray(reviewResponse.reviews) ? reviewResponse.reviews : [];
-              const ratedReviews = reviews.filter((review) => Number(review.rating) > 0);
-              const averageRating = ratedReviews.length
-                ? ratedReviews.reduce((sum, review) => sum + Number(review.rating), 0) / ratedReviews.length
-                : 0;
+              const reviewResponse = await getProductReviewSummary(product._id || product.id);
+              const ratingsCount = Math.max(0, Number(reviewResponse.total) || 0);
+              const ratingCounts = [5, 4, 3, 2, 1].reduce((counts, star) => {
+                counts[star] = Math.max(0, Number(reviewResponse.counts?.[star]) || 0);
+                return counts;
+              }, {});
+              const verifiedTotal = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star] * star, 0);
+              const verifiedCount = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star], 0);
 
               return {
                 product,
-                averageRating,
-                ratingsCount: ratedReviews.length,
-                ratingCounts: [5, 4, 3, 2, 1].reduce((counts, star) => {
-                  counts[star] = ratedReviews.filter((review) => Math.round(Number(review.rating)) === star).length;
-                  return counts;
-                }, {}),
+                averageRating: verifiedCount ? verifiedTotal / verifiedCount : 0,
+                ratingsCount: verifiedCount || ratingsCount,
+                ratingCounts,
               };
             } catch (error) {
               return {
@@ -1781,17 +1786,13 @@ function CustomerDashboard() {
           })
         );
 
-        const totalFeaturedRatings = productReviewData.reduce((sum, entry) => sum + entry.ratingsCount, 0);
-        const featuredRatingCounts = productReviewData.reduce((counts, entry) => {
-          [5, 4, 3, 2, 1].forEach((star) => {
-            counts[star] += entry.ratingCounts?.[star] || 0;
-          });
+        const feedbackSummary = await getCustomerFeedbackSummary().catch(() => null);
+        const featuredRatingCounts = [5, 4, 3, 2, 1].reduce((counts, star) => {
+          counts[star] = Math.max(0, Number(feedbackSummary?.counts?.[star]) || 0);
           return counts;
-        }, { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 });
-        const featuredRatingTotal = [5, 4, 3, 2, 1].reduce(
-          (sum, star) => sum + featuredRatingCounts[star] * star,
-          0
-        );
+        }, {});
+        const totalFeaturedRatings = [5, 4, 3, 2, 1].reduce((sum, star) => sum + featuredRatingCounts[star], 0);
+        const featuredRatingTotal = [5, 4, 3, 2, 1].reduce((sum, star) => sum + featuredRatingCounts[star] * star, 0);
 
         setFeaturedRatingStats({
           average: totalFeaturedRatings ? featuredRatingTotal / totalFeaturedRatings : 0,
@@ -1859,15 +1860,17 @@ function CustomerDashboard() {
         await Promise.all(
           productsList.slice(0, 12).map(async (product) => {
             try {
-              const reviewResponse = await getProductReviews(product._id || product.id);
-              const reviews = Array.isArray(reviewResponse.reviews) ? reviewResponse.reviews : [];
-              const rated = reviews.filter((review) => Number(review.rating) > 0);
-              const average = rated.length
-                ? (rated.reduce((sum, review) => sum + Number(review.rating), 0) / rated.length).toFixed(1)
-                : null;
+              const reviewResponse = await getProductReviewSummary(product._id || product.id);
+              const ratingsCount = Math.max(0, Number(reviewResponse.total) || 0);
+              const ratingCounts = [5, 4, 3, 2, 1].reduce((counts, star) => {
+                counts[star] = Math.max(0, Number(reviewResponse.counts?.[star]) || 0);
+                return counts;
+              }, {});
+              const verifiedTotal = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star] * star, 0);
+              const verifiedCount = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star], 0);
               stats[product._id || product.id] = {
-                averageRating: Number(average) || 0,
-                ratingsCount: rated.length,
+                averageRating: verifiedCount ? Number((verifiedTotal / verifiedCount).toFixed(1)) : 0,
+                ratingsCount: verifiedCount || ratingsCount,
               };
             } catch (error) {
               stats[product._id || product.id] = {
@@ -3473,6 +3476,7 @@ function CustomerDashboard() {
       last_name: user?.last_name || "",
       phone: user?.phone || "",
       email: user?.email || "",
+      username: user?.username || "",
       street_address: user?.street_address || "",
       city: user?.city || "",
       province: user?.province || "",
@@ -3556,6 +3560,7 @@ function CustomerDashboard() {
         last_name: nextProfile?.last_name || "",
         phone: nextProfile?.phone || "",
         email: nextProfile?.email || profileForm.email,
+        username: nextProfile?.username || "",
         street_address: nextProfile?.street_address || "",
         city: nextProfile?.city || "",
         province: nextProfile?.province || "",
@@ -5137,6 +5142,19 @@ function CustomerDashboard() {
           style: darkMode
             ? { background: "rgb(30 41 59)", border: "1px solid rgb(71 85 105)", color: "rgb(241 245 249)" }
             : { background: "white", border: "1px solid rgb(226 232 240)", color: "rgb(15 23 42)" },
+        }}
+      />
+      <UsernameChangeFlow
+        open={usernameChangeOpen}
+        onClose={() => setUsernameChangeOpen(false)}
+        currentUsername={profileForm.username || user?.username || ""}
+        email={profileForm.email || user?.email || ""}
+        darkMode={darkMode}
+        onVerified={async (username, response) => {
+          try { await refreshUser(); } catch (refreshError) { console.warn("Profile refresh after username verification failed", refreshError); }
+          setProfileForm((current) => ({ ...current, username }));
+          setProfileMessage(response.message || "Your username has been updated successfully.");
+          toast.success("Your username has been updated successfully.");
         }}
       />
       {permissionNotice && (
@@ -10068,6 +10086,22 @@ function CustomerDashboard() {
                         onChange={handleProfileChange}
                         placeholder="Last Name"
                       />
+                      <div>
+                        <ProfileTextField
+                          label="Username"
+                          icon={User}
+                          darkMode={darkMode}
+                          type="text"
+                          name="username"
+                          value={profileForm.username}
+                          disabled
+                          action={(
+                            <button type="button" onClick={() => setUsernameChangeOpen(true)} className={`inline-flex items-center gap-1.5 text-xs font-semibold ${darkMode ? "text-red-300 hover:text-red-200" : "text-red-700 hover:text-red-800"}`}>
+                              <Pencil size={13} aria-hidden="true" /> Change username
+                            </button>
+                          )}
+                        />
+                      </div>
                       <ProfileTextField
                         label="Phone Number"
                         icon={Phone}

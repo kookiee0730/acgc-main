@@ -16,6 +16,7 @@ import {
   LogOut,
   Eye,
   EyeOff,
+  Pencil,
 } from "lucide-react";
 import { useAuth } from "@/contexts/AuthContext";
 import { isPasswordPolicySatisfied, PASSWORD_POLICY_HINT, PASSWORD_POLICY_MESSAGE } from "@/lib/passwordStrength";
@@ -32,6 +33,7 @@ import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import { useIsMobile } from "@/hooks/useIsMobile";
 import ProfileAvatar from "../../components/ui/ProfileAvatar";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
+import UsernameChangeFlow from "@/components/UsernameChangeFlow";
 
 function AdminProfileTextField({ label, icon: Icon, darkMode, action, inputClassName = "", ...inputProps }) {
   const inputId = inputProps.id || `admin-profile-${inputProps.name}`;
@@ -104,6 +106,7 @@ function AdminProfile() {
   const [passwordModalError, setPasswordModalError] = useState("");
   const [showDiscardConfirmation, setShowDiscardConfirmation] = useState(false);
   const [emailChangeOpen, setEmailChangeOpen] = useState(false);
+  const [usernameChangeOpen, setUsernameChangeOpen] = useState(false);
   const [showEmailChangePassword, setShowEmailChangePassword] = useState(false);
   const [emailChangeSaving, setEmailChangeSaving] = useState(false);
   const [emailChangeError, setEmailChangeError] = useState("");
@@ -573,6 +576,19 @@ function AdminProfile() {
   return (
     <div className="flex h-screen overflow-hidden bg-gray-100">
       <Toaster position="bottom-right" />
+      <UsernameChangeFlow
+        open={usernameChangeOpen}
+        onClose={() => setUsernameChangeOpen(false)}
+        currentUsername={profile?.username || user?.username || ""}
+        email={profile?.email || user?.email || ""}
+        darkMode={darkMode}
+        onVerified={async (username, response) => {
+          try { await refreshUser(); } catch (refreshError) { console.warn("Profile refresh after username verification failed", refreshError); }
+          setProfile((current) => ({ ...current, username }));
+          setSuccess(response.message || "Your username has been updated successfully.");
+          toast.success("Your username has been updated successfully.");
+        }}
+      />
       <Sidebar isOpen={isSidebarOpen} onToggle={() => setIsSidebarOpen((open) => !open)} />
 
       <div className="flex-1 min-h-0 flex flex-col">
@@ -713,7 +729,13 @@ function AdminProfile() {
                           </button>
                         )}
                       />
-                      <AdminProfileTextField label="Username" icon={User} darkMode={darkMode} type="text" name="username" value={profile.username} disabled />
+                      <div>
+                        <AdminProfileTextField label="Username" icon={User} darkMode={darkMode} type="text" name="username" value={profile.username} disabled action={(
+                          <button type="button" onClick={() => setUsernameChangeOpen(true)} className={`inline-flex items-center gap-1.5 text-xs font-semibold ${darkMode ? "text-red-300 hover:text-red-200" : "text-red-700 hover:text-red-800"}`}>
+                            <Pencil size={13} aria-hidden="true" /> Change username
+                          </button>
+                        )} />
+                      </div>
                       <AdminProfileTextField label="Phone Number" icon={Phone} darkMode={darkMode} type="tel" inputMode="tel" maxLength={13} name="phone" value={profile.phone} onChange={handleChange} placeholder="+639171234567 or 09171234567" />
                       <div className="md:col-span-2">
                         <AdminProfileTextField label="Address" icon={MapPin} darkMode={darkMode} type="text" name="street_address" value={profile.street_address} onChange={handleChange} placeholder="Business address" />

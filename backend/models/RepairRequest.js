@@ -1,4 +1,5 @@
 import mongoose from "mongoose";
+import { randomBytes } from "node:crypto";
 
 const RepairEventSchema = new mongoose.Schema({
   event: { type: String, required: true, trim: true },
@@ -15,6 +16,7 @@ const PartSchema = new mongoose.Schema({
 
 const RepairRequestSchema = new mongoose.Schema({
   workflowVersion: { type: Number, default: 2, immutable: true },
+  repairTrackingId: { type: String, trim: true, uppercase: true, unique: true, sparse: true },
   order: { type: mongoose.Schema.Types.ObjectId, ref: "Order", default: null, index: true },
   productIndex: { type: Number, default: 0, min: 0 },
   customer: { type: mongoose.Schema.Types.ObjectId, ref: "User", default: null, index: true },
@@ -65,6 +67,12 @@ const RepairRequestSchema = new mongoose.Schema({
   invoiceNumber: { type: String, default: "", trim: true },
   history: { type: [RepairEventSchema], default: [] },
 }, { timestamps: true });
+
+RepairRequestSchema.pre("validate", function () {
+  if (this.repairTrackingId) return;
+  const date = new Date().toISOString().slice(2, 10).replaceAll("-", "");
+  this.repairTrackingId = `RPR-${date}-${randomBytes(4).toString("hex").toUpperCase()}`;
+});
 
 RepairRequestSchema.index({ customer: 1, updatedAt: -1 });
 RepairRequestSchema.index({ workflowType: 1, status: 1, updatedAt: -1 });

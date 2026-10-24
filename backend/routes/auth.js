@@ -361,7 +361,7 @@ const validateRecoveryProfile = (body = {}) => {
   const { email, username, password, first_name, last_name } = body;
   return Boolean(
     typeof email === "string" && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim()) && email.length <= 254 &&
-    typeof username === "string" && /^[a-zA-Z0-9._-]{3,50}$/.test(username.trim()) &&
+    typeof username === "string" && /^[a-zA-Z0-9._-]{6,12}$/.test(username.trim()) &&
     typeof first_name === "string" && first_name.trim() && first_name.trim().length <= 80 &&
     typeof last_name === "string" && last_name.trim() && last_name.trim().length <= 80 &&
     isPasswordPolicySatisfied(password)
@@ -612,8 +612,34 @@ const createEmailChangeCode = async (user, pendingEmail) => {
   await sendPendingEmailVerificationCode(user, pendingEmail, code);
 };
 
+const sendPendingUsernameVerificationCode = async (user, code) => {
+  const email = buildCustomerEmailTemplate({
+    title: "Your ACGC username verification code",
+    summary: `Hello ${user.first_name || ""}, enter this code to verify your account before changing your username.`,
+    status: "Account Verification",
+    fields: [["Verification code", code]],
+    nextSteps: "This code expires in 10 minutes. After verifying it, you can choose a new username.",
+  });
+  await sendMail({
+    from: process.env.EMAIL_FROM || "ACGC <no-reply@acgc.local>",
+    to: user.email,
+    subject: "Your ACGC username verification code",
+    ...email,
+  });
+};
+
+const createUsernameChangeCode = async (account) => {
+  const code = String(randomInt(100000, 1000000));
+  account.pending_username_verification_code = hashVerificationToken(`${account._id}:username-change:${code}`);
+  account.pending_username_verification_expires = new Date(Date.now() + 10 * 60 * 1000);
+  account.pending_username_verification_attempts = 0;
+  account.pending_username_verification_sent_at = new Date();
+  await account.save();
+  await sendPendingUsernameVerificationCode(account, code);
+};
+
 const getProfileEmailChangeAccount = async (req) => {
-  let AccountModel = req.user.auth_source === "admin" || (!req.user.auth_source && req.user.role === "admin")
+  let AccountModel = req.user.auth_source === "admin" || (!req.user.auth_source && ["admin", "super_admin"].includes(req.user.role))
     ? Admin
     : User;
   let account = await AccountModel.findById(req.user.id);
@@ -636,6 +662,18 @@ const hasEmailChangeConflict = async (email, account, AccountModel) => {
     Admin.findOne({ pending_email: email, ...adminFilter }).select("_id"),
   ]);
   return Boolean(existingUser || existingPendingUser || existingAdmin || existingPendingAdmin);
+};
+
+const hasUsernameChangeConflict = async (username, account, AccountModel) => {
+  const userFilter = AccountModel === User ? { _id: { $ne: account._id } } : {};
+  const adminFilter = AccountModel === Admin ? { _id: { $ne: account._id } } : {};
+  const [existingUser, pendingUser, existingAdmin, pendingAdmin] = await Promise.all([
+    User.findOne({ username, ...userFilter }).select("_id"),
+    User.findOne({ pending_username: username, ...userFilter }).select("_id"),
+    Admin.findOne({ username, ...adminFilter }).select("_id"),
+    Admin.findOne({ pending_username: username, ...adminFilter }).select("_id"),
+  ]);
+  return Boolean(existingUser || pendingUser || existingAdmin || pendingAdmin);
 };
 
 const sendPasswordResetCode = async (account, code) => {
@@ -1356,6 +1394,13 @@ router.post("/register", async (req, res) => {
       });
     }
 
+    if (!/^[a-zA-Z0-9._-]{6,12}$/.test(String(username).trim())) {
+      return res.status(400).json({
+        success: false,
+        message: "Use a username with 6-12 letters, numbers, dots, underscores, or hyphens.",
+      });
+    }
+
     if (!isPasswordPolicySatisfied(password)) {
       return res.status(400).json({ success: false, message: PASSWORD_POLICY_MESSAGE });
     }
@@ -1473,7 +1518,7 @@ router.post("/profile/email-change", authMiddleware, async (req, res) => {
       return res.status(400).json({ success: false, message: "Current password is required." });
     }
 
-    const { account, AccountModel } = await getProfileEmailChangeAccount(req);
+    const { account } = await getProfileEmailChangeAccount(req);
     if (!account) {
       return res.status(404).json({ success: false, message: "Account not found." });
     }
@@ -1635,6 +1680,175 @@ router.post("/profile/email-change/verify", authMiddleware, async (req, res) => 
     }
     console.error("Verify email change code error:", error);
     return res.status(500).json({ success: false, message: "Unable to verify the code." });
+  }
+});
+
+router.post("/profile/username-change/request-code", authMiddleware, async (req, res) => {
+  try {
+    const currentPassword = String(req.body?.current_password || "");
+    if (!currentPassword) return res.status(400).json({ success: false, message: "Current password is required." });
+
+    const { account, AccountModel } = await getProfileEmailChangeAccount(req);
+    if (!account) return res.status(404).json({ success: false, message: "Account not found." });
+    if (!(await account.comparePassword(currentPassword))) {
+      return res.status(401).json({ success: false, message: "Current password is incorrect." });
+    }
+    const requestCooldownEndsAt = account.pending_username_verification_sent_at
+      ? account.pending_username_verification_sent_at.getTime() + 30 * 1000
+      : 0;
+    if (Date.now() < requestCooldownEndsAt) {
+      return res.status(429).json({
+        success: false,
+        retry_after_seconds: Math.ceil((requestCooldownEndsAt - Date.now()) / 1000),
+        message: "Please wait before requesting another verification code.",
+      });
+    }
+    account.pending_username = null;
+    account.pending_username_verification_code = null;
+    account.pending_username_verification_expires = null;
+    account.pending_username_verification_attempts = 0;
+    account.pending_username_verification_sent_at = null;
+    account.username_change_verified_until = null;
+    try {
+      await createUsernameChangeCode(account);
+    } catch (mailError) {
+      await AccountModel.updateOne(
+        { _id: account._id },
+        { $set: {
+          pending_username_verification_code: null,
+          pending_username_verification_expires: null,
+          pending_username_verification_attempts: 0,
+          pending_username_verification_sent_at: null,
+        } },
+      );
+      return res.status(502).json({ success: false, message: "Unable to send the verification code. Your current username is unchanged." });
+    }
+
+    return res.json({ success: true, verification_email: account.email });
+  } catch (error) {
+    console.error("Request username change error:", error);
+    return res.status(500).json({ success: false, message: "Unable to request a username change." });
+  }
+});
+
+router.post("/profile/username-change/resend", authMiddleware, async (req, res) => {
+  try {
+    const { account } = await getProfileEmailChangeAccount(req);
+    if (!account) return res.status(404).json({ success: false, message: "Account not found." });
+    if (!account.pending_username_verification_code) return res.status(400).json({ success: false, message: "Request a verification code before resending it." });
+
+    const cooldownEndsAt = account.pending_username_verification_sent_at
+      ? account.pending_username_verification_sent_at.getTime() + 30 * 1000
+      : 0;
+    if (Date.now() < cooldownEndsAt) {
+      return res.status(429).json({
+        success: false,
+        retry_after_seconds: Math.ceil((cooldownEndsAt - Date.now()) / 1000),
+        message: "Please wait before requesting another verification code.",
+      });
+    }
+
+    try {
+      await createUsernameChangeCode(account);
+    } catch (mailError) {
+      const AccountModel = account.constructor;
+      await AccountModel.updateOne(
+        { _id: account._id },
+        { $set: {
+          pending_username_verification_code: null,
+          pending_username_verification_expires: null,
+          pending_username_verification_sent_at: null,
+        } },
+      );
+      return res.status(502).json({ success: false, message: "Unable to send a new verification code. Please try again later." });
+    }
+    return res.json({ success: true, message: "A new verification code was sent." });
+  } catch (error) {
+    console.error("Resend username change code error:", error);
+    return res.status(500).json({ success: false, message: "Unable to resend the verification code." });
+  }
+});
+
+router.post("/profile/username-change/verify", authMiddleware, async (req, res) => {
+  try {
+    const code = String(req.body?.code || "").trim();
+    if (!/^\d{6}$/.test(code)) return res.status(400).json({ success: false, message: "Enter the six-digit verification code." });
+    const { account } = await getProfileEmailChangeAccount(req);
+    if (!account) return res.status(404).json({ success: false, message: "Account not found." });
+    if (!account.pending_username_verification_code || !account.pending_username_verification_expires) {
+      return res.status(400).json({ success: false, message: "Your verification code has expired. Request a new code to continue." });
+    }
+    if (account.pending_username_verification_expires <= new Date()) {
+      account.pending_username_verification_code = null;
+      await account.save();
+      return res.status(400).json({ success: false, message: "Your verification code has expired. Request a new code to continue." });
+    }
+    if (account.pending_username_verification_attempts >= 5) {
+      account.pending_username_verification_code = null;
+      account.pending_username_verification_expires = null;
+      await account.save();
+      return res.status(429).json({ success: false, message: "Too many incorrect codes. Request a new code to continue." });
+    }
+
+    const expectedCodeHash = hashVerificationToken(`${account._id}:username-change:${code}`);
+    if (!verificationHashesMatch(expectedCodeHash, account.pending_username_verification_code)) {
+      account.pending_username_verification_attempts += 1;
+      if (account.pending_username_verification_attempts >= 5) {
+        account.pending_username_verification_code = null;
+        account.pending_username_verification_expires = null;
+      }
+      await account.save();
+      const attemptsRemaining = Math.max(0, 5 - account.pending_username_verification_attempts);
+      return res.status(attemptsRemaining ? 400 : 429).json({
+        success: false,
+        attempts_remaining: attemptsRemaining,
+        message: attemptsRemaining
+          ? `Incorrect verification code. ${attemptsRemaining} attempt${attemptsRemaining === 1 ? "" : "s"} remaining.`
+          : "Too many incorrect codes. Request a new code to continue.",
+      });
+    }
+
+    account.pending_username_verification_code = null;
+    account.pending_username_verification_expires = null;
+    account.pending_username_verification_attempts = 0;
+    account.pending_username_verification_sent_at = null;
+    account.username_change_verified_until = new Date(Date.now() + 10 * 60 * 1000);
+    await account.save();
+    return res.json({ success: true, message: "Email verified. You can now choose a new username." });
+  } catch (error) {
+    console.error("Verify username change code error:", error);
+    return res.status(500).json({ success: false, message: "Unable to verify the code." });
+  }
+});
+
+router.post("/profile/username-change/complete", authMiddleware, async (req, res) => {
+  try {
+    const username = String(req.body?.username || "").trim().toLowerCase();
+    if (!/^[a-z0-9._-]{6,12}$/.test(username)) {
+      return res.status(400).json({ success: false, message: "Use a username with 6-12 letters, numbers, dots, underscores, or hyphens." });
+    }
+    const { account, AccountModel } = await getProfileEmailChangeAccount(req);
+    if (!account) return res.status(404).json({ success: false, message: "Account not found." });
+    if (!account.username_change_verified_until || account.username_change_verified_until <= new Date()) {
+      account.username_change_verified_until = null;
+      await account.save();
+      return res.status(400).json({ success: false, message: "Verify the code sent to your email before choosing a username." });
+    }
+    if (username === String(account.username || "").toLowerCase()) {
+      return res.status(400).json({ success: false, message: "The new username matches your current username." });
+    }
+    if (await hasUsernameChangeConflict(username, account, AccountModel)) {
+      return res.status(409).json({ success: false, message: "That username is already in use. Choose another username." });
+    }
+
+    account.username = username;
+    account.username_change_verified_until = null;
+    await account.save();
+    return res.json({ success: true, username: account.username, message: "Your username has been updated successfully." });
+  } catch (error) {
+    if (error?.code === 11000) return res.status(409).json({ success: false, message: "That username is already in use. Choose another username." });
+    console.error("Complete username change error:", error);
+    return res.status(500).json({ success: false, message: "Unable to update your username." });
   }
 });
 
@@ -2232,16 +2446,16 @@ router.get("/me", authMiddleware, async (req, res) => {
     let user = null;
     let role = req.user.role;
 
-    if (role === "admin") {
+    if (["admin", "super_admin"].includes(role)) {
       user = await Admin.findById(req.user.id);
       if (!user) {
-        user = await User.findOne({ _id: req.user.id, role: "admin" });
+        user = await User.findOne({ _id: req.user.id, role: { $in: ["admin", "super_admin"] } });
       }
     } else {
       user = await User.findById(req.user.id);
       if (!user) {
         user = await Admin.findById(req.user.id);
-        role = user ? "admin" : role;
+        role = user && role !== "super_admin" ? "admin" : role;
       }
     }
 
@@ -2317,16 +2531,16 @@ router.put("/profile", authMiddleware, async (req, res) => {
     let user = null;
     let role = req.user.role;
 
-    if (role === "admin") {
+    if (["admin", "super_admin"].includes(role)) {
       user = await Admin.findById(req.user.id);
       if (!user) {
-        user = await User.findOne({ _id: req.user.id, role: "admin" });
+        user = await User.findOne({ _id: req.user.id, role: { $in: ["admin", "super_admin"] } });
       }
     } else {
       user = await User.findById(req.user.id);
       if (!user) {
         user = await Admin.findById(req.user.id);
-        role = user ? "admin" : role;
+        role = user && role !== "super_admin" ? "admin" : role;
       }
     }
 
@@ -2337,14 +2551,10 @@ router.put("/profile", authMiddleware, async (req, res) => {
       });
     }
 
-    // Always validate current password since frontend requires it for any profile change
     if (current_password) {
       const isCurrentPasswordValid = await user.comparePassword(current_password);
       if (!isCurrentPasswordValid) {
-        return res.status(401).json({
-          success: false,
-          message: "Current password is incorrect",
-        });
+        return res.status(401).json({ success: false, message: "Current password is incorrect" });
       }
     }
 

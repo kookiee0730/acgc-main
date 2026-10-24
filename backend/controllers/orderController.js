@@ -2210,6 +2210,38 @@ export const getProductReviewSummary = async (req, res) => {
   }
 };
 
+export const getCustomerFeedbackSummary = async (req, res) => {
+  try {
+    const orders = await Order.find({
+      $or: [
+        { "review.submittedAt": { $ne: null } },
+        { "items.review.submittedAt": { $ne: null } },
+      ],
+    }).select("review items.review").lean();
+    const counts = { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 };
+    let total = 0;
+    let ratingTotal = 0;
+    const addReview = (review) => {
+      if (!review?.submittedAt || review.hiddenFromCustomers === true) return;
+      const rating = Number(review.rating);
+      if (!Number.isFinite(rating) || rating < 1 || rating > 5) return;
+      counts[Math.round(rating)] += 1;
+      ratingTotal += rating;
+      total += 1;
+    };
+
+    for (const order of orders) {
+      addReview(order.review);
+      for (const item of order.items || []) addReview(item.review);
+    }
+
+    return res.json({ success: true, average: total ? ratingTotal / total : 0, total, counts });
+  } catch (error) {
+    console.error("Get customer feedback summary error:", error);
+    return res.status(500).json({ success: false, message: "Unable to fetch customer ratings." });
+  }
+};
+
 export const getProductReviews = async (req, res) => {
   try {
     const { productId } = req.params;

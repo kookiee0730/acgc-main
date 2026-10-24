@@ -16,7 +16,7 @@ const EMPTY_PROFILE = {
 };
 
 const inputClass = "w-full rounded-xl border border-gray-300 bg-white py-2.5 pr-4 text-sm text-slate-950 outline-none transition focus:border-red-500 focus:ring-4 focus:ring-red-500/10";
-const ADMIN_USERNAME_PATTERN = /^[A-Za-z0-9._-]{3,50}$/;
+const ADMIN_USERNAME_PATTERN = /^[A-Za-z0-9._-]{6,12}$/;
 
 const validateRecoveryProfile = (profile) => {
   const firstName = profile.first_name.trim();
@@ -26,7 +26,7 @@ const validateRecoveryProfile = (profile) => {
 
   if (!firstName || !lastName) return "Enter the administrator first and last name.";
   if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.length > 254) return "Enter a valid administrator email address.";
-  if (!ADMIN_USERNAME_PATTERN.test(username)) return "Use a username with 3-50 letters, numbers, dots, underscores, or hyphens. Do not use an email address as the username.";
+  if (!ADMIN_USERNAME_PATTERN.test(username)) return "Use a username with 6-12 letters, numbers, dots, underscores, or hyphens. Do not use an email address as the username.";
   if (!isPasswordPolicySatisfied(profile.password)) return PASSWORD_POLICY_MESSAGE;
   if (profile.password !== profile.confirmPassword) return "The passwords do not match.";
   return "";
@@ -173,7 +173,7 @@ function AdminRecovery() {
                   <RecoveryField icon={UserRound} label="First name" autoComplete="given-name" name="first_name" required maxLength={80} value={profile.first_name} onChange={updateProfile} placeholder="Enter first name" />
                   <RecoveryField icon={UserRound} label="Last name" autoComplete="family-name" name="last_name" required maxLength={80} value={profile.last_name} onChange={updateProfile} placeholder="Enter last name" />
                   <RecoveryField icon={Mail} label="Administrator email" autoComplete="email" name="email" type="email" required maxLength={254} value={profile.email} onChange={updateProfile} placeholder="Enter administrator email" />
-                  <RecoveryField icon={AtSign} label="Administrator username" autoComplete="username" name="username" required minLength={3} maxLength={50} pattern="[A-Za-z0-9._-]{3,50}" title="Use 3-50 letters, numbers, dots, underscores, or hyphens. Do not use an email address." value={profile.username} onChange={updateProfile} placeholder="admin_acgc" />
+                  <RecoveryField icon={AtSign} label="Administrator username" autoComplete="username" name="username" required minLength={6} maxLength={12} pattern="[A-Za-z0-9._-]{6,12}" title="Use 6-12 letters, numbers, dots, underscores, or hyphens. Do not use an email address." value={profile.username} onChange={updateProfile} placeholder="admin_acgc" />
                   <label className="space-y-1.5 text-sm font-semibold text-slate-700">
                     New password
                     <span className="relative block">

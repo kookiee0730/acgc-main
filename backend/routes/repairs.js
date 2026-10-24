@@ -1,5 +1,5 @@
 import express from "express";
-import { authMiddleware, roleMiddleware, staffModulePermission } from "../middleware/auth.js";
+import { authMiddleware, optionalAuthMiddleware, permissionMiddleware, roleMiddleware, staffModulePermission } from "../middleware/auth.js";
 import {
   completeRepair,
   createCustomerRepairRequest,
@@ -17,6 +17,7 @@ import {
   scheduleRepair,
   submitRepairPaymentProof,
   startRepair,
+  trackRepairRequest,
 } from "../controllers/repairController.js";
 
 const router = express.Router();
@@ -26,6 +27,7 @@ const staffRepairAccess = (action) => [authMiddleware, roleMiddleware(["admin", 
 router.get("/customer/orders", ...customer, listCompletedRepairProjects);
 router.get("/customer", ...customer, listCustomerRepairRequests);
 router.post("/customer/requests", ...customer, createCustomerRepairRequest);
+router.get("/track/:repairTrackingId", optionalAuthMiddleware, permissionMiddleware("can_track_products"), trackRepairRequest);
 router.post("/customer/:repairId/quotation-response", ...customer, respondToQuotation);
 router.post("/customer/:repairId/payment-proof", ...customer, submitRepairPaymentProof);
 router.get("/admin/requests", ...staffRepairAccess("view"), listRepairRequests);

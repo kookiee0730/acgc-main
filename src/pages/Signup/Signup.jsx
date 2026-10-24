@@ -234,7 +234,7 @@ function Signup() {
                 <Field icon={UserRound} label="First Name *" name="first_name" value={formData.first_name} onChange={handleChange} placeholder="Enter your first name" inputClass={inputClass} />
                 <Field icon={UserRound} label="Last Name *" name="last_name" value={formData.last_name} onChange={handleChange} placeholder="Enter your last name" inputClass={inputClass} />
                 <Field icon={Mail} label="Email *" type="email" name="email" value={formData.email} onChange={handleChange} placeholder="Enter your email" inputClass={inputClass} />
-                <Field icon={AtSign} label="Username *" name="username" value={formData.username} onChange={handleChange} placeholder="Choose a username" inputClass={inputClass} />
+                <Field icon={AtSign} label="Username *" name="username" minLength={6} maxLength={12} pattern="[A-Za-z0-9._-]{6,12}" title="Use 6-12 letters, numbers, dots, underscores, or hyphens." value={formData.username} onChange={handleChange} placeholder="Choose a username" inputClass={inputClass} />
               </div>
 
               <div className="mt-1.5"><Field icon={MapPin} label="Address *" name="street_address" value={formData.street_address} onChange={handleChange} placeholder="Enter your street address" inputClass={inputClass} /></div>

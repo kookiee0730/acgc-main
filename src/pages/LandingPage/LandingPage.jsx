@@ -39,7 +39,9 @@ import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
 import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getProducts } from "../../api/products";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
-import { getProductReviewSummary, trackOrder } from "../../api/orders";
+import { getCustomerFeedbackSummary, getProductReviewSummary, trackOrder } from "../../api/orders";
+import { trackRepairRequest } from "@/api/repairs";
+import OrderRepairProgress from "@/components/OrderRepairProgress";
 import logo from "../../assets/images/ACGCLOGO1.png";
 import { calculateEstimate } from "@/lib/estimator";
 import { getFinalProjectCost } from "@/lib/orderPricing";
@@ -106,6 +108,7 @@ function LandingPage() {
   const [featuredError, setFeaturedError] = useState("");
   const [trackingNumber, setTrackingNumber] = useState("");
   const [trackingResult, setTrackingResult] = useState(null);
+  const [repairTrackingResult, setRepairTrackingResult] = useState(null);
   const [trackingError, setTrackingError] = useState("");
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [showAllTrackedItems, setShowAllTrackedItems] = useState(false);
@@ -245,17 +248,13 @@ function LandingPage() {
           stats[product._id || product.id] = { averageRating, ratingsCount };
         });
 
-        const totalRatings = productReviewData.reduce((sum, entry) => sum + entry.ratingsCount, 0);
-        const ratingCounts = productReviewData.reduce((counts, entry) => {
-          [5, 4, 3, 2, 1].forEach((star) => {
-            counts[star] += entry.ratingCounts?.[star] || 0;
-          });
+        const feedbackSummary = await getCustomerFeedbackSummary().catch(() => null);
+        const ratingCounts = [5, 4, 3, 2, 1].reduce((counts, star) => {
+          counts[star] = Math.max(0, Number(feedbackSummary?.counts?.[star]) || 0);
           return counts;
-        }, { 5: 0, 4: 0, 3: 0, 2: 0, 1: 0 });
-        const weightedRatingTotal = productReviewData.reduce(
-          (sum, entry) => sum + entry.averageRating * entry.ratingsCount,
-          0
-        );
+        }, {});
+        const totalRatings = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star], 0);
+        const weightedRatingTotal = [5, 4, 3, 2, 1].reduce((sum, star) => sum + ratingCounts[star] * star, 0);
 
         setCatalogProducts(activeProducts);
         setFeaturedProductStats(stats);
@@ -791,20 +790,28 @@ function LandingPage() {
     if (!customerPermissions.can_track_products) {
       setTrackingError("Order tracking is currently unavailable.");
       setTrackingResult(null);
+      setRepairTrackingResult(null);
       return;
     }
     const tracking = trackingNumber.trim();
     if (!tracking) {
       setTrackingError("Please enter your tracking number.");
       setTrackingResult(null);
+      setRepairTrackingResult(null);
       return;
     }
 
     setTrackingLoading(true);
     setTrackingError("");
     setTrackingResult(null);
+    setRepairTrackingResult(null);
     setShowAllTrackedItems(false);
     try {
+      if (/^RPR-/i.test(tracking)) {
+        const response = await trackRepairRequest(tracking);
+        setRepairTrackingResult(response.repair);
+        return;
+      }
       const response = await trackOrder(tracking);
       setTrackingResult(response.order || response);
     } catch (error) {
@@ -1931,7 +1938,7 @@ function LandingPage() {
         </div>
         <div className="min-w-0 pt-0.5">
           <h3 className="text-lg font-extrabold leading-tight text-slate-900">Track an Order</h3>
-          <p className="mt-1.5 text-sm leading-6 text-slate-500">Enter your tracking number to see current order status.</p>
+          <p className="mt-1.5 text-sm leading-6 text-slate-500">Enter your order tracking number or repair request ID to see its current status.</p>
         </div>
       </div>
       <form className="flex w-full flex-col gap-2.5 sm:flex-row" onSubmit={handleTrackOrder}>
@@ -1957,7 +1964,7 @@ function LandingPage() {
       {!customerPermissions.can_track_products && <p className="text-xs font-semibold text-amber-700" role="status">Order tracking is currently unavailable.</p>}
     </div>
     {trackingError && <div role="alert" className="mt-5 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-sm font-medium text-rose-800">{trackingError}</div>}
-    {trackingResult && (
+    {repairTrackingResult ? <OrderRepairProgress repairRequests={[repairTrackingResult]} /> : trackingResult && (
       <>
         <div className="mt-7 flex flex-col gap-4 rounded-2xl border border-red-100 bg-gradient-to-r from-red-50/80 via-white to-white p-4 sm:flex-row sm:items-center sm:justify-between sm:p-5">
           <div className="flex items-center gap-3">

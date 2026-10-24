@@ -7,12 +7,15 @@ import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
 import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getFinalProjectCost } from "@/lib/orderPricing";
 import { trackOrder } from "../../api/orders";
+import { trackRepairRequest } from "@/api/repairs";
+import OrderRepairProgress from "@/components/OrderRepairProgress";
 import { useCustomerPermissions } from "@/hooks/useCustomerPermissions";
 
 function TrackOrder() {
   const customerPermissions = useCustomerPermissions();
   const [trackingNumber, setTrackingNumber] = useState("");
   const [trackingResult, setTrackingResult] = useState(null);
+  const [repairTrackingResult, setRepairTrackingResult] = useState(null);
   const [trackingError, setTrackingError] = useState("");
   const [trackingLoading, setTrackingLoading] = useState(false);
   const [showAllTrackedItems, setShowAllTrackedItems] = useState(false);
@@ -23,20 +26,28 @@ function TrackOrder() {
     if (!customerPermissions.can_track_products) {
       setTrackingError("Order tracking is disabled by the system administrator.");
       setTrackingResult(null);
+      setRepairTrackingResult(null);
       return;
     }
     const tracking = trackingNumber.trim();
     if (!tracking) {
       setTrackingError("Please enter your tracking number.");
       setTrackingResult(null);
+      setRepairTrackingResult(null);
       return;
     }
 
     setTrackingLoading(true);
     setTrackingError("");
     setTrackingResult(null);
+    setRepairTrackingResult(null);
     setShowAllTrackedItems(false);
     try {
+      if (/^RPR-/i.test(tracking)) {
+        const response = await trackRepairRequest(tracking);
+        setRepairTrackingResult(response.repair);
+        return;
+      }
       const response = await trackOrder(tracking);
       setTrackingResult(response.order || response);
     } catch (error) {
@@ -228,7 +239,7 @@ function TrackOrder() {
                 </div>
                 <div className="min-w-0">
                   <h2 className="text-[18px] font-medium leading-tight text-foreground">Track an Order</h2>
-                  <p className="mt-1 text-[13px] text-muted-foreground">Enter your Order ID to see current order status.</p>
+                  <p className="mt-1 text-[13px] text-muted-foreground">Enter your order tracking number or repair request ID to see its current status.</p>
                 </div>
               </div>
 
@@ -238,7 +249,7 @@ function TrackOrder() {
                     type="text"
                     value={trackingNumber}
                     onChange={(event) => setTrackingNumber(event.target.value)}
-                    placeholder="Enter Order ID"
+                    placeholder="Enter order or repair request ID"
                     className="h-10 w-full rounded-xl border border-input bg-background px-3 font-mono text-sm text-foreground outline-none transition-colors placeholder:text-muted-foreground focus-visible:ring-2 focus-visible:ring-ring motion-reduce:transition-none"
                   />
                 </label>
@@ -262,7 +273,7 @@ function TrackOrder() {
               </div>
             )}
 
-            {trackingResult && (
+            {repairTrackingResult ? <OrderRepairProgress repairRequests={[repairTrackingResult]} /> : trackingResult && (
             <>
               <div className="mt-5 flex flex-wrap items-end justify-between gap-3">
                 <div>

@@ -99,7 +99,6 @@ function AboutBusinessContent({ darkMode = false }) {
               <li key={service} className={`flex items-center gap-3 rounded-xl px-3 py-3 text-sm transition-colors ${darkMode ? "text-slate-300 hover:bg-slate-800/80" : "text-slate-700 hover:bg-red-50/70"}`}>
                 <span className="flex size-6 shrink-0 items-center justify-center rounded-full bg-red-700 text-white shadow-sm"><Check size={13} strokeWidth={3} aria-hidden="true" /></span>
                 <span className="leading-5">{service}</span>
-                <ArrowUpRight size={15} className={`ml-auto shrink-0 ${darkMode ? "text-slate-600" : "text-slate-300"}`} aria-hidden="true" />
               </li>
             ))}
           </ul>
