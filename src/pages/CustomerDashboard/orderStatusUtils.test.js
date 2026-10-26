@@ -13,6 +13,7 @@ describe("customer order status utils", () => {
     expect(normalizeOrderStatus("contract_sent")).toBe("contract sent");
     expect(getOrderStatusLabel("Completed")).toBe("Completed");
     expect(getOrderStatusLabel("Site Inspection")).toBe("Site Inspection");
+    expect(getOrderStatusClasses("Completed")).toContain("text-emerald-700");
     expect(getOrderStatusClasses("Installation")).toContain("text-red-700");
     expect(getOrderStatusClasses("cancelled")).toContain("text-red-800");
   });

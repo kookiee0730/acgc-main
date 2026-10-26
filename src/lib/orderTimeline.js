@@ -145,6 +145,40 @@ const normalizeStageStatus = (value) =>
     .replace(/[_\s]+/g, "-")
     .replace(/-+/g, "-");
 
+const getDateInBusinessTimeZone = (value, timeZone = "Asia/Manila") => {
+  if (!value) return "";
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const parts = new Intl.DateTimeFormat("en", {
+    timeZone,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const fields = Object.fromEntries(parts.map(({ type, value: part }) => [type, part]));
+  return `${fields.year}-${fields.month}-${fields.day}`;
+};
+
+export const isInstallationDeadlineOverdue = (order, now = new Date()) => {
+  const orderStatus = String(order?.status || "").toLowerCase();
+  if (!order?.estimated_installation_date || ["completed", "cancelled"].includes(orderStatus)) return false;
+
+  const progressSets = (Array.isArray(order.items) && order.items.length > 1
+    ? order.items.map((item) => item?.progress_stages?.length ? item.progress_stages : order.progress_stages?.length ? order.progress_stages : [])
+    : [order.progress_stages?.length ? order.progress_stages : order.items?.[0]?.progress_stages || []])
+    .filter((stages) => stages.length > 0);
+  const allStagesComplete = progressSets.length > 0 && progressSets.every((stages) => stages.every((stage) => {
+    const completed = stage?.completed === true || ["done", "completed"].includes(normalizeStageStatus(stage?.status));
+    const subStages = Array.isArray(stage?.subStages) ? stage.subStages : [];
+    return completed && subStages.every((sub) => sub?.completed === true || ["done", "completed"].includes(normalizeStageStatus(sub?.status)));
+  }));
+  if (allStagesComplete) return false;
+
+  const deadline = getDateInBusinessTimeZone(order.estimated_installation_date);
+  const today = getDateInBusinessTimeZone(now);
+  return Boolean(deadline && today && deadline <= today);
+};
+
 export const calculateStageProgressPercent = (steps = []) => {
   const visibleSteps = Array.isArray(steps) ? steps.filter(Boolean) : [];
 
@@ -153,7 +187,7 @@ export const calculateStageProgressPercent = (steps = []) => {
   }
 
   const activeIndex = visibleSteps.findLastIndex((step) => (
-    Boolean(step?.active) || ["in-progress", "in_progress", "delayed", "active"].includes(normalizeStageStatus(step?.status || ""))
+    Boolean(step?.active) || ["in-progress", "in_progress", "delayed", "active"].includes(normalizeStageStatus(step?.progressStatus ?? step?.status ?? ""))
   ));
 
   if (activeIndex >= 0) {
@@ -161,7 +195,7 @@ export const calculateStageProgressPercent = (steps = []) => {
   }
 
   const completedIndex = visibleSteps.findLastIndex((step) => (
-    Boolean(step?.done) || ["done", "completed"].includes(normalizeStageStatus(step?.status || ""))
+    Boolean(step?.done) || ["done", "completed"].includes(normalizeStageStatus(step?.progressStatus ?? step?.status ?? ""))
   ));
 
   if (completedIndex >= 0) {
@@ -184,10 +218,11 @@ const getBatchMilestoneIndex = (order, hasProductionStarted) => {
   return 0;
 };
 
-export const buildBatchProductTimelineStages = (order, item, itemIndex = 0) => {
+export const buildBatchProductTimelineStages = (order, item, itemIndex = 0, { applyDeadlineDelay = true, now = new Date() } = {}) => {
   const status = String(order?.status || "").toLowerCase();
   const contractStatus = String(order?.contract_status || "").toLowerCase();
   const isCancelled = status === "cancelled";
+  const isOverdue = applyDeadlineDelay && isInstallationDeadlineOverdue(order, now);
   const hasAcceptedContract = status === "contract_accepted" || contractStatus === "accepted";
   const hasItemStages = Array.isArray(item?.progress_stages) && item.progress_stages.length > 0;
   const savedStages = hasItemStages
@@ -253,25 +288,32 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0) => {
       ? "cancelled"
       : completed
       ? "completed"
+      : isOverdue
+      ? "delayed"
       : sourceStatus === "delayed"
       ? "delayed"
       : ["in-progress", "in_progress", "active"].includes(sourceStatus)
       ? "in-progress"
       : "pending";
     const subStages = Array.isArray(sourceStage?.subStages)
-      ? sourceStage.subStages.map((sub) => ({
-          name: sub.name || "",
-          status: sub.completed || sub.status === "done"
-            ? "completed"
-            : sub.status === "delayed"
-            ? "delayed"
-            : sub.status === "in_progress"
-            ? "in-progress"
-            : "pending",
-          date: formatDateTimeToMMDDYYYY(sub.date),
-          notes: sub.description || null,
-          images: Array.isArray(sub.images) ? sub.images : [],
-        }))
+      ? sourceStage.subStages.map((sub) => {
+          const subCompleted = sub.completed || ["done", "completed"].includes(normalizeStageStatus(sub.status));
+          return {
+            name: sub.name || "",
+            status: subCompleted
+              ? "completed"
+              : isOverdue
+              ? "delayed"
+              : normalizeStageStatus(sub.status) === "delayed"
+              ? "delayed"
+              : normalizeStageStatus(sub.status) === "in-progress"
+              ? "in-progress"
+              : "pending",
+            date: formatDateTimeToMMDDYYYY(sub.date),
+            notes: sub.description || null,
+            images: Array.isArray(sub.images) ? sub.images : [],
+          };
+        })
       : [];
     const latestDelayEntry = Array.isArray(sourceStage?.delayHistory)
       ? sourceStage.delayHistory.at(-1)
@@ -282,12 +324,14 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0) => {
       batchStageKey: definition.key,
       label: sourceStage?.name || definition.label,
       status: stepStatus,
+      progressStatus: completed ? "completed" : sourceStatus === "delayed" ? "delayed" : ["in-progress", "in_progress", "active"].includes(sourceStatus) ? "in-progress" : "pending",
       statusText: stepStatus === "completed" ? "Completed" : stepStatus === "in-progress" ? "In Progress" : stepStatus === "delayed" ? "Delayed" : stepStatus === "cancelled" ? "Cancelled" : "Pending",
+      deadlineDelayed: isOverdue && !completed,
       date: stepStatus === "completed" ? formatDateTimeToMMDDYYYY(sourceStage?.date || sourceStage?.installationCompletedAt) || "Completed" : stepStatus === "in-progress" ? "In progress" : "Pending",
       assignedTo: definition.key.includes("installation") ? "Installation Team" : "Production Team",
       notes: sourceStage?.delayReason || sourceStage?.delayNotes || `Current phase: ${definition.label}`,
       ...(sourceStage ? { photoRequirement: sourceStage.photoRequirement === "required" ? "required" : "optional" } : {}),
-      delayReason: latestDelayEntry?.reason || sourceStage?.delayReason || "",
+      delayReason: latestDelayEntry?.reason || sourceStage?.delayReason || (isOverdue && !completed ? "The estimated installation date has passed." : ""),
       delayNotes: latestDelayEntry?.notes || sourceStage?.delayNotes || "",
       delayReportedAt: formatDateTimeToMMDDYYYY(latestDelayEntry?.reportedAt || sourceStage?.delayReportedAt) || "Not recorded",
       delayExpectedResolution: formatDateToMMDDYYYY(latestDelayEntry?.expectedResolution || sourceStage?.delayExpectedResolution) || "Not set",
@@ -298,7 +342,7 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0) => {
 
   const productionComplete = productionSteps.every((step) => step.status === "completed");
 
-  const normalizedProductionSteps = hasAcceptedContract && savedStages.length === 0
+  const normalizedProductionSteps = hasAcceptedContract && savedStages.length === 0 && !isOverdue
     ? productionSteps.map((step, index) => index === 0 ? { ...step, status: "in-progress", statusText: "In Progress" } : step)
     : productionSteps;
 
@@ -320,6 +364,7 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0) => {
 
 export const buildOrderTimelineStages = (order) => {
   if (!order) return [];
+  const deadlineOverdue = isInstallationDeadlineOverdue(order);
 
   const currentIndex = getOrderStageScore(order);
   const contractOutcomeStage = order.contract_status === "declined"
@@ -380,14 +425,16 @@ export const buildOrderTimelineStages = (order) => {
       const completed = isAgreementStage
         ? sourceStage.customerResponse === "accepted" || sourceStage.customerResponse === "reschedule_requested"
         : (!!sourceStage.completed || ["done", "completed"].includes(normalizedSourceStatus)) && subStagesComplete;
-      const delayed = !completed && normalizedSourceStatus === "delayed";
+      const delayed = !completed && (deadlineOverdue || normalizedSourceStatus === "delayed");
       const inProgress = !completed && ["in-progress", "in_progress", "active"].includes(normalizedSourceStatus);
       const status = completed ? "completed" : delayed ? "delayed" : inProgress ? "in-progress" : "pending";
       const subStages = Array.isArray(sourceStage.subStages)
         ? sourceStage.subStages.map((sub) => ({
             name: sub.name || "",
-            status: sub.completed
+            status: sub.completed || ["done", "completed"].includes(normalizeStageStatus(sub.status))
               ? "completed"
+              : deadlineOverdue
+              ? "delayed"
               : normalizeStageStatus(sub.status) === "delayed"
               ? "delayed"
               : ["in-progress", "in_progress", "active"].includes(normalizeStageStatus(sub.status))
@@ -443,8 +490,9 @@ export const buildOrderTimelineStages = (order) => {
         ? "Waiting for Customer Response"
         : "Pending";
 
-      const statusText =
-        definition.key === "installation_scheduling"
+      const statusText = deadlineOverdue && !completed
+        ? "Delayed"
+        : definition.key === "installation_scheduling"
           ? completed
             ? "Completed"
             : sourceStage.customerResponse === "accepted"
@@ -469,6 +517,7 @@ export const buildOrderTimelineStages = (order) => {
         label: isAgreementStage ? "Installation Agreement" : sourceStage.name || definition.label,
         status,
         statusText,
+        deadlineDelayed: deadlineOverdue && !completed,
         date: isAgreementStage
           ? sourceStage.customerResponseAt ? formatDateTimeToMMDDYYYY(sourceStage.customerResponseAt) : null
           : formatDateTimeToMMDDYYYY(sourceStage.date || (definition.key === "installation" ? sourceStage.installationCompletedAt : null)),
@@ -536,10 +585,10 @@ export const buildOrderTimelineStages = (order) => {
   const contractAccepted = order.contract_status === "accepted" || order.status === "contract_accepted";
   if (contractAccepted) {
     const productionFallback = [
-      { key: "cutting", label: "Cutting", status: "in-progress", statusText: "In Progress", date: null, assignedTo: "Production Team", notes: "Current phase: Cutting", images: [], subStages: [] },
-      { key: "assembly", label: "Assembly", status: "pending", statusText: "Pending", date: null, assignedTo: "Production Team", notes: "Current phase: Assembly", images: [], subStages: [] },
-      { key: "fabrication", label: "Fabrication", status: "pending", statusText: "Pending", date: null, assignedTo: "Production Team", notes: "Current phase: Fabrication", images: [], subStages: [] },
-      { key: "installation", label: "Installation", status: "pending", statusText: "Pending", date: null, assignedTo: "Production Team", notes: "Current phase: Installation", images: [], subStages: [] },
+      { key: "cutting", label: "Cutting", status: deadlineOverdue ? "delayed" : "in-progress", statusText: deadlineOverdue ? "Delayed" : "In Progress", deadlineDelayed: deadlineOverdue, date: null, assignedTo: "Production Team", notes: "Current phase: Cutting", images: [], subStages: [] },
+      { key: "assembly", label: "Assembly", status: deadlineOverdue ? "delayed" : "pending", statusText: deadlineOverdue ? "Delayed" : "Pending", deadlineDelayed: deadlineOverdue, date: null, assignedTo: "Production Team", notes: "Current phase: Assembly", images: [], subStages: [] },
+      { key: "fabrication", label: "Fabrication", status: deadlineOverdue ? "delayed" : "pending", statusText: deadlineOverdue ? "Delayed" : "Pending", deadlineDelayed: deadlineOverdue, date: null, assignedTo: "Production Team", notes: "Current phase: Fabrication", images: [], subStages: [] },
+      { key: "installation", label: "Installation", status: deadlineOverdue ? "delayed" : "pending", statusText: deadlineOverdue ? "Delayed" : "Pending", deadlineDelayed: deadlineOverdue, date: null, assignedTo: "Production Team", notes: "Current phase: Installation", images: [], subStages: [] },
       completedStage,
     ];
 

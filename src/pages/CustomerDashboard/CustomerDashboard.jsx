@@ -1,4 +1,4 @@
-﻿import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useNavigate, useLocation } from "react-router-dom";
 import { createPortal } from "react-dom";
 import toast, { Toaster } from "react-hot-toast";
@@ -49,6 +49,8 @@ import {
   Paperclip,
   ChevronDown,
   ChevronUp,
+  ChevronLeft,
+  ChevronRight,
   ImagePlus,
   Scissors,
   Truck,
@@ -519,7 +521,6 @@ function CustomerDashboard() {
   }, [customerPaymentProofPreview?.url]);
   const [showCustomerReviewModal, setShowCustomerReviewModal] = useState(false);
   const [reviewDetailsOrder, setReviewDetailsOrder] = useState(null);
-  const [showProductReviewModal, setShowProductReviewModal] = useState(false);
   const [selectedReviewRatingTab, setSelectedReviewRatingTab] = useState(0);
   const [reviewOrderMode, setReviewOrderMode] = useState("estimate");
   const [orderReviewAgreed, setOrderReviewAgreed] = useState(false);
@@ -802,6 +803,7 @@ function CustomerDashboard() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [notificationsOpen, setNotificationsOpen] = useState(false);
   const [notificationFilter, setNotificationFilter] = useState("all");
+  const [notificationPage, setNotificationPage] = useState(1);
   const [readNotificationIds, setReadNotificationIds] = useState(() => {
     try {
       return new Set(JSON.parse(localStorage.getItem(CUSTOMER_READ_NOTIFICATIONS_KEY) || "[]"));
@@ -977,7 +979,10 @@ function CustomerDashboard() {
           ? order.items?.[notification.itemIndex]?.progress_stages || []
           : order.progress_stages || [];
         const installationIndex = stages.findIndex((stage) => (
-          [stage.key, stage.name].some((value) => String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_") === "installation")
+          [stage.key, stage.name].some((value) => {
+            const normalizedValue = String(value || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
+            return normalizedValue === "installation" || normalizedValue.startsWith("installation_");
+          })
         ));
         if (installationIndex < 0) return false;
 
@@ -1086,6 +1091,14 @@ function CustomerDashboard() {
     const isRead = readNotificationIds.has(notification.notificationId);
     return notificationFilter === "all" || (notificationFilter === "unread" ? !isRead : isRead);
   });
+  const notificationPageSize = 10;
+  const sortedFilteredNotifications = [...filteredNotifications].sort(sortCustomerNotificationsNewestFirst);
+  const notificationTotalPages = Math.max(1, Math.ceil(sortedFilteredNotifications.length / notificationPageSize));
+  const currentNotificationPage = Math.min(notificationPage, notificationTotalPages);
+  const paginatedCustomerNotifications = sortedFilteredNotifications.slice(
+    (currentNotificationPage - 1) * notificationPageSize,
+    currentNotificationPage * notificationPageSize,
+  );
 
   const markAllCustomerNotificationsRead = () => {
     const nextReadNotificationIds = new Set(readNotificationIds);
@@ -1566,18 +1579,6 @@ function CustomerDashboard() {
     createUnsavedSnapshot({ form: orderReviewForm, topics: selectedReviewTopics }) !== customerReviewBaselineRef.current,
     closeCustomerReviewModal,
   );
-
-  const openProductReviewModal = () => {
-    if (!canAccessCustomerRatings) {
-      showPermissionNotice("Feedback access is disabled for your account.");
-      return;
-    }
-    setShowProductReviewModal(true);
-  };
-
-  const closeProductReviewModal = () => {
-    setShowProductReviewModal(false);
-  };
 
   const handleOrderReviewChange = (field, value) => {
     setOrderReviewForm((prev) => ({ ...prev, [field]: value }));
@@ -5336,6 +5337,7 @@ function CustomerDashboard() {
                             const status = normalizeOrderStatusKey(order?.status);
                             const contractStatus = normalizeOrderStatusKey(order?.contract_status);
                             const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
+                            const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : null;
                             const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                             const isDelayNotification = order.notificationType === "delay";
                             const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
@@ -5374,7 +5376,7 @@ function CustomerDashboard() {
                               }
                               if (["overdue_payment", "installation_payment_reminder"].includes(order.notificationType)) {
                                 return {
-                                  title: order.title,
+                                  title: order.notificationType === "overdue_payment" ? "Remaining Balance" : order.title,
                                   message: order.message,
                                   color: order.notificationType === "overdue_payment" ? "text-red-600" : "text-amber-600",
                                 };
@@ -5539,7 +5541,7 @@ function CustomerDashboard() {
                                         <p className={`truncate text-xs sm:text-sm ${isRead ? "font-medium" : "font-bold"} ${darkMode ? isRead ? "text-slate-300" : "text-white" : isRead ? "text-slate-600" : "text-slate-950"}`}>{details.title}</p>
                                         {!isRead && <span className="shrink-0 rounded-full bg-red-100 px-1.5 py-0.5 text-[8px] font-bold uppercase text-red-700 sm:text-[9px]">New</span>}
                                       </div>
-                                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold uppercase sm:px-2 sm:text-[10px] ${getOrderStatusClasses(isDelayNotification ? "Delayed" : order.status)}`}>{isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status)}</span>
+                                      <span className={`shrink-0 rounded-full px-1.5 py-0.5 text-[8px] font-bold uppercase sm:px-2 sm:text-[10px] ${getOrderStatusClasses(notificationStatusLabel || (isDelayNotification ? "Delayed" : order.status))}`}>{notificationStatusLabel || (isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status))}</span>
                                     </div>
                                     <p className={`mt-0.5 text-[11px] leading-4 sm:text-xs ${darkMode ? "text-slate-300" : "text-slate-600"}`}>
                                       {renderAdminContactMessage(details.message)}
@@ -6222,7 +6224,7 @@ function CustomerDashboard() {
 
             {selectedProduct && (
               <div className="customer-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-2 sm:p-4">
-                <div className={`mobile-fullscreen-dialog order-flow-modal relative flex max-h-[88vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ${darkMode ? "order-flow-modal-dark" : ""}`}>
+                <div className={`mobile-fullscreen-dialog order-flow-modal relative flex w-full flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ${!isProductModalReadOnly && isBladePricingProduct(selectedProduct) ? "max-h-[92vh] max-w-7xl" : "max-h-[88vh] max-w-5xl"} ${darkMode ? "order-flow-modal-dark" : ""}`}>
                   {/* Header with cleaner elevated styling */}
                   {!isProductModalReadOnly && (
                     <div className="flex-shrink-0 border-b border-red-500/30 bg-gradient-to-r from-red-600 via-red-600 to-red-700 px-4 py-1.5 shadow-[0_8px_18px_rgba(220,38,38,0.16)] sm:px-5 sm:py-2">
@@ -6272,11 +6274,11 @@ function CustomerDashboard() {
                         <p className="mt-1 text-sm leading-5">{renderAdminContactMessage(onlineOrderCooldownMessage)}</p>
                       </div>
                     )}
-                    <div className={`grid items-start gap-5 p-4 sm:p-5 ${isProductModalReadOnly ? "md:grid-cols-[minmax(0,1.1fr)_minmax(300px,0.9fr)] lg:gap-8 lg:p-7" : "md:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)] lg:gap-7 lg:p-6"}`}>
+                    <div className={`grid items-start gap-5 p-4 sm:p-5 ${isProductModalReadOnly ? "md:grid-cols-[minmax(0,1.1fr)_minmax(300px,0.9fr)] lg:gap-8 lg:p-7" : isBladePricingProduct(selectedProduct) ? "md:grid-cols-[minmax(0,1fr)_minmax(400px,1fr)] lg:gap-7 lg:p-6" : "md:grid-cols-[minmax(0,1.3fr)_minmax(300px,0.9fr)] lg:gap-7 lg:p-6"}`}>
                       {/* Left: Product Image & Description */}
                       <div className={`min-w-0 space-y-4 ${isProductModalReadOnly ? darkMode ? "rounded-xl bg-slate-800 p-2" : "rounded-xl bg-slate-50 p-2" : ""}`}>
                         <div className="space-y-2">
-                          <div className="relative aspect-[4/3] overflow-hidden rounded-2xl bg-slate-100 shadow-sm">
+                          <div className="relative aspect-[3/2] w-full overflow-hidden rounded-2xl bg-white shadow-sm">
                             <div data-product-image-skeleton className="absolute inset-0 animate-pulse bg-slate-200 motion-reduce:animate-none" />
                             <img
                                                             onLoad={handleProductImageLoad}
@@ -6288,7 +6290,7 @@ function CustomerDashboard() {
                               height="900"
                               loading="eager"
                               decoding="async"
-                              className="aspect-[4/3] max-h-[300px] w-full object-cover"
+                              className="h-full w-full object-fill"
                               onError={(event) => {
                                 event.currentTarget.onerror = null;
                                 event.currentTarget.src = PRODUCT_IMAGE_PLACEHOLDER;
@@ -6577,7 +6579,7 @@ function CustomerDashboard() {
                         )}
 
                         {/* Action Buttons */}
-                        {canRequestOrders && <>
+                        {canRequestOrders && <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
                         <button
                           type="button"
                           onClick={() => {
@@ -6650,62 +6652,13 @@ function CustomerDashboard() {
                           <ShoppingCart size={20} />
                           Add to Cart
                         </button>
-                        </>}
+                        </div>}
 
-                        {canAccessCustomerRatings && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={openProductReviewModal}
-                              aria-label={`View customer reviews for ${selectedProduct?.name || "this product"}`}
-                              className={`group mt-2 w-full rounded-xl border p-3 text-left transition hover:-translate-y-0.5 hover:shadow-md ${darkMode ? "border-slate-700 bg-slate-800 hover:border-slate-600" : "border-slate-200 bg-white hover:border-slate-300"}`}
-                            >
-                              <div className="flex min-w-0 items-center gap-3">
-                                <div className={`h-12 w-12 shrink-0 overflow-hidden rounded-lg border ${darkMode ? "border-slate-600 bg-slate-700" : "border-slate-200 bg-slate-50"}`}>
-                                  <img
-                                    src={getProductImage(selectedProduct, 480) || PRODUCT_IMAGE_PLACEHOLDER}
-                                    srcSet={getProductImageSrcSet(getProductImage(selectedProduct, 480), [240, 480, 720])}
-                                    alt={selectedProduct?.name || "Product"}
-                                    width="480"
-                                    height="480"
-                                    loading="lazy"
-                                    decoding="async"
-                                    onError={handleProductImageError}
-                                    className="h-full w-full object-cover"
-                                  />
-                                </div>
-                                <div className="min-w-0 flex-1">
-                                  <div className="flex items-center justify-between gap-2">
-                                    <p className={`text-[10px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Customer Reviews</p>
-                                    <ArrowRight size={15} className={`shrink-0 transition-transform group-hover:translate-x-0.5 ${darkMode ? "text-slate-400" : "text-slate-500"}`} aria-hidden="true" />
-                                  </div>
-                                  <div className="mt-1 flex items-center gap-2">
-                                    <span className="inline-flex items-center gap-0.5">{renderRatingStars(averageProductReviewRating, 14)}</span>
-                                    <span className={`text-sm font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>
-                                      {productReviewAverageRating ? `${productReviewAverageRating} / 5` : "— / 5"}
-                                    </span>
-                                  </div>
-                                  <p className={`mt-1 truncate text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
-                                    {productReviews[0]?.title || (totalRatedReviews ? "Read the latest customer feedback" : "No reviews yet")}
-                                  </p>
-                                </div>
-                              </div>
-                              <div className={`mt-3 flex items-center justify-between gap-3 border-t pt-2.5 text-xs ${darkMode ? "border-slate-700 text-slate-300" : "border-slate-100 text-slate-600"}`}>
-                                <span className={`rounded-full border px-2.5 py-1 font-medium ${darkMode ? "border-slate-600 bg-slate-700" : "border-slate-200 bg-slate-50"}`}>
-                                  {totalRatedReviews} rating{totalRatedReviews === 1 ? "" : "s"}
-                                </span>
-                                <span className={`font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>
-                                  View reviews
-                                </span>
-                              </div>
-                            </button>
-                            {!canRequestOrders && (
-                              <div className={`mt-2 flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold ${darkMode ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
-                                <Phone size={14} aria-hidden="true" />
-                                <span>Call for inquiries: <strong className={darkMode ? "text-slate-100" : "text-slate-900"}>09123456789</strong></span>
-                              </div>
-                            )}
-                          </>
+                        {canAccessCustomerRatings && !canRequestOrders && (
+                          <div className={`mt-2 flex items-center justify-center gap-2 rounded-xl border px-3 py-2.5 text-xs font-semibold ${darkMode ? "border-slate-700 bg-slate-800 text-slate-300" : "border-slate-200 bg-slate-50 text-slate-600"}`}>
+                            <Phone size={14} aria-hidden="true" />
+                            <span>Call for inquiries: <strong className={darkMode ? "text-slate-100" : "text-slate-900"}>09123456789</strong></span>
+                          </div>
                         )}
                         {!canAccessCustomerRatings && (
                           <div className={`flex items-center gap-2 rounded-lg border px-3 py-2.5 text-xs ${darkMode ? "border-slate-700 bg-slate-800 text-slate-400" : "border-slate-200 bg-slate-50 text-slate-500"}`}>
@@ -6715,6 +6668,82 @@ function CustomerDashboard() {
                         )}
 
                       </div>
+                      {canAccessCustomerRatings && (
+                        <section className={`md:col-span-2 mt-2 overflow-hidden rounded-xl border ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`} aria-labelledby="product-ratings-heading">
+                          <div className="border-b border-slate-200 px-5 py-4 dark:border-slate-700 sm:px-6">
+                            <h3 id="product-ratings-heading" className={`text-lg font-bold ${darkMode ? "text-white" : "text-slate-900"}`}>Product Ratings</h3>
+                          </div>
+                          <div className={`grid gap-4 border-b p-4 sm:p-5 md:grid-cols-[190px_minmax(0,1fr)] ${darkMode ? "border-slate-700 bg-slate-800/60" : "border-slate-100 bg-rose-50/40"}`}>
+                            <div className="flex flex-col items-center justify-center border-b pb-4 text-center md:border-b-0 md:border-r md:pb-0 md:pr-5">
+                              {productReviewsLoading ? (
+                                <p className={`text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`} role="status">Loading reviews...</p>
+                              ) : totalRatedReviews > 0 ? (
+                                <>
+                                  <p className={`text-3xl font-bold ${darkMode ? "text-rose-300" : "text-red-600"}`}><span>{productReviewAverageRating}</span><span className="text-base font-medium"> / 5</span></p>
+                                  <div className="mt-1 flex items-center gap-0.5 text-amber-500" aria-label={`${productReviewAverageRating} out of 5 stars`}>{renderRatingStars(averageProductReviewRating, 20)}</div>
+                                  <p className={`mt-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{totalRatedReviews} rating{totalRatedReviews === 1 ? "" : "s"}</p>
+                                </>
+                              ) : (
+                                <>
+                                  <p className={`text-2xl font-bold ${darkMode ? "text-slate-300" : "text-slate-500"}`}>- <span className="text-sm font-medium">/ 5</span></p>
+                                  <p className={`mt-2 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>No ratings yet</p>
+                                </>
+                              )}
+                            </div>
+                            <div className="flex flex-wrap content-center gap-2" role="group" aria-label="Filter reviews by rating">
+                              <button type="button" onClick={() => setSelectedReviewRatingTab(0)} aria-pressed={selectedReviewRatingTab === 0} className={`rounded-md border px-3 py-2 text-xs font-semibold transition ${selectedReviewRatingTab === 0 ? "border-red-600 bg-red-600 text-white" : darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:border-red-400" : "border-slate-200 bg-white text-slate-700 hover:border-red-300"}`}>All ({productReviews.length})</button>
+                              {reviewRatingCounts.map(({ star, count }) => (
+                                <button key={star} type="button" onClick={() => setSelectedReviewRatingTab(star)} aria-pressed={selectedReviewRatingTab === star} className={`rounded-md border px-3 py-2 text-xs font-semibold transition ${selectedReviewRatingTab === star ? "border-red-600 bg-red-600 text-white" : darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:border-red-400" : "border-slate-200 bg-white text-slate-700 hover:border-red-300"}`}>
+                                  {star} Star ({count})
+                                </button>
+                              ))}
+                            </div>
+                          </div>
+                          {productReviewsLoading ? (
+                            <p className={`px-5 py-6 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`} role="status">Loading reviews...</p>
+                          ) : filteredProductReviews.length === 0 ? (
+                            <p className={`px-5 py-6 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
+                              {productReviews.length === 0 ? "No reviews yet" : `No ${selectedReviewRatingTab}-star reviews`}
+                            </p>
+                          ) : (
+                            <div className={`max-h-[55dvh] touch-pan-y overflow-y-auto overscroll-contain pb-[calc(5rem+env(safe-area-inset-bottom))] md:max-h-none md:overflow-visible md:pb-0 ${darkMode ? "divide-y divide-slate-700" : "divide-y divide-slate-100"}`} style={{ WebkitOverflowScrolling: "touch" }}>
+                              {filteredProductReviews.map((review, index) => (
+                                <article key={`${review.orderId || index}-${review.submittedAt || index}`} className="p-4 sm:p-5">
+                                  <div className="flex items-start gap-3">
+                                    <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-full text-sm font-bold ${darkMode ? "bg-slate-700 text-slate-200" : "bg-slate-100 text-slate-600"}`} aria-hidden="true">{String(review.customerName || "A").trim().charAt(0).toUpperCase()}</div>
+                                    <div className="min-w-0 flex-1">
+                                      <div className="flex flex-wrap items-start justify-between gap-2">
+                                        <div className="min-w-0">
+                                          <p className={`truncate text-sm font-semibold ${darkMode ? "text-slate-100" : "text-slate-900"}`}>{review.customerName || "Anonymous"}</p>
+                                          <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{formatDateToMMMDDYYYY(review.submittedAt) || "Date unavailable"}</p>
+                                        </div>
+                                        <div className="inline-flex items-center gap-1 text-xs font-semibold text-amber-600">
+                                          <span className="inline-flex items-center">{renderRatingStars(review.rating, 14)}</span>
+                                          <span>{Number(review.rating) > 0 ? `${Number(review.rating).toFixed(1)} / 5` : "No rating"}</span>
+                                        </div>
+                                      </div>
+                                      {review.title && <h4 className={`mt-3 text-sm font-semibold ${darkMode ? "text-white" : "text-slate-900"}`}>{review.title}</h4>}
+                                      <p className={`mt-2 whitespace-pre-line break-words text-sm leading-6 ${darkMode ? "text-slate-300" : "text-slate-700"}`}>{review.comment || "No review comment."}</p>
+                                      {review.photos?.length > 0 && (
+                                        <div className="mt-3 flex flex-wrap gap-2">
+                                          {review.photos.map((photo, photoIndex) => <img key={photoIndex} src={photo} alt={`Review photo ${photoIndex + 1}`} className="h-20 w-20 rounded-lg border border-slate-200 object-cover" loading="lazy" />)}
+                                        </div>
+                                      )}
+                                      {review.adminResponse && (
+                                        <div className={`mt-4 rounded-lg border p-3 ${darkMode ? "border-slate-600 bg-slate-800" : "border-slate-200 bg-slate-50"}`}>
+                                          <p className={`text-xs font-bold ${darkMode ? "text-slate-200" : "text-slate-700"}`}>ACGC SERVICES</p>
+                                          <p className={`mt-1 whitespace-pre-line break-words text-sm leading-5 ${darkMode ? "text-slate-300" : "text-slate-600"}`}>{review.adminResponse}</p>
+                                        </div>
+                                      )}
+                                    </div>
+                                  </div>
+                                </article>
+                              ))}
+                            </div>
+                          )}
+                        </section>
+                      )}
+
                     </div>
                   </div>
                 </div>
@@ -9144,186 +9173,6 @@ function CustomerDashboard() {
           </div>
         )}
 
-        {showProductReviewModal && canAccessCustomerRatings && (
-          <div className="customer-modal-overlay mobile-fullscreen-overlay fixed inset-0 z-50 flex items-center justify-center bg-slate-950/40 p-4">
-            <div
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="product-reviews-title"
-              className="mobile-fullscreen-dialog flex max-h-[92vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl ring-1 ring-slate-200"
-            >
-              <div className="flex flex-col gap-3 border-b border-slate-200 bg-white px-5 py-4 sm:flex-row sm:items-center sm:justify-between sm:px-6">
-                <div>
-                  <p className="text-[11px] font-bold uppercase tracking-[0.18em] text-red-600">Product feedback</p>
-                  <h2 id="product-reviews-title" className="mt-1 text-xl font-black text-slate-950">Customer Reviews</h2>
-                  <p className="mt-1 text-sm text-slate-600">{selectedProduct?.product_name || selectedProduct?.name || "Product"}</p>
-                </div>
-                <button
-                  type="button"
-                  onClick={closeProductReviewModal}
-                  className="inline-flex min-h-10 items-center justify-center rounded-lg border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-700 transition hover:bg-slate-50"
-                >
-                  Close
-                </button>
-              </div>
-              <div className="flex-1 space-y-5 overflow-y-auto p-4 sm:p-6">
-                <section className="grid gap-5 rounded-xl border border-slate-200 bg-slate-50 p-4 sm:grid-cols-[180px_minmax(0,1fr)] sm:p-5" aria-label="Product rating summary">
-                  <div className="flex flex-col items-center justify-center text-center sm:border-r sm:border-slate-200 sm:pr-5">
-                    <p className="text-xs font-bold uppercase tracking-[0.16em] text-slate-500">Average rating</p>
-                    {totalRatedReviews > 0 ? (
-                      <>
-                        <p className="mt-2 text-5xl font-black leading-none text-slate-950">{productReviewAverageRating}</p>
-                        <div className="mt-2 flex items-center gap-0.5 text-amber-500" aria-label={`${productReviewAverageRating} out of 5 stars`}>
-                          {renderRatingStars(averageProductReviewRating, 16)}
-                        </div>
-                      </>
-                    ) : (
-                      <p className="mt-3 text-lg font-bold text-slate-700">No ratings yet</p>
-                    )}
-                    <p className="mt-2 text-xs font-medium text-slate-500">
-                      {totalRatedReviews} rating{totalRatedReviews === 1 ? "" : "s"}
-                    </p>
-                  </div>
-                  <div className="flex flex-col justify-center gap-2.5">
-                    {[5, 4, 3, 2, 1].map((star) => {
-                      const count = reviewRatingCounts.find((entry) => entry.star === star)?.count || 0;
-                      const percentage = totalRatedReviews ? Math.round((count / totalRatedReviews) * 100) : 0;
-                      return (
-                        <div key={star} className="grid grid-cols-[42px_minmax(0,1fr)_28px] items-center gap-3 text-xs">
-                          <span className="inline-flex items-center gap-1 font-semibold text-slate-600">
-                            {star}<Star size={12} fill="currentColor" className="text-amber-500" aria-hidden="true" />
-                          </span>
-                          <div className="h-2 overflow-hidden rounded-full bg-slate-200" aria-hidden="true">
-                            <div className="h-full rounded-full bg-amber-400 transition-[width]" style={{ width: `${percentage}%` }} />
-                          </div>
-                          <span className="text-right font-medium text-slate-500">{count}</span>
-                        </div>
-                      );
-                    })}
-                  </div>
-                </section>
-
-                <div className="flex min-w-0 items-center justify-between gap-3">
-                  <h3 className="shrink-0 text-sm font-bold text-slate-900">
-                    Reviews <span className="font-medium text-slate-500">({productReviews.length})</span>
-                  </h3>
-                  <div className="flex min-w-0 flex-1 justify-end overflow-hidden">
-                    <div className="flex w-max gap-1.5 overflow-x-auto pb-1" role="group" aria-label="Filter reviews by rating">
-                      <button
-                        type="button"
-                        onClick={() => setSelectedReviewRatingTab(0)}
-                        aria-pressed={selectedReviewRatingTab === 0}
-                        className={`shrink-0 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
-                          selectedReviewRatingTab === 0
-                            ? darkMode ? "border-slate-500 bg-slate-700 text-white" : "border-slate-900 bg-slate-900 text-white"
-                            : darkMode ? "border-slate-600 bg-slate-900 text-slate-300 hover:bg-slate-800" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                        }`}
-                      >
-                        All
-                      </button>
-                      {reviewRatingCounts.map(({ star, count }) => (
-                        <button
-                          key={star}
-                          type="button"
-                          onClick={() => setSelectedReviewRatingTab(star)}
-                          aria-pressed={selectedReviewRatingTab === star}
-                          className={`shrink-0 rounded-lg border px-3 py-2 text-xs font-semibold transition ${
-                            selectedReviewRatingTab === star
-                              ? darkMode ? "border-amber-300 bg-amber-300 text-amber-950 hover:bg-amber-200" : "border-amber-400 bg-amber-50 text-amber-900"
-                              : darkMode ? "border-slate-600 bg-slate-900 text-slate-300 hover:bg-slate-800" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"
-                          }`}
-                        >
-                          {star} star ({count})
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-
-                {filteredProductReviews.length === 0 ? (
-                  <div className="rounded-xl border border-dashed border-slate-300 px-6 py-12 text-center">
-                    <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-full bg-amber-50 text-amber-500">
-                      <Star size={20} aria-hidden="true" />
-                    </span>
-                    <h3 className="mt-3 text-base font-bold text-slate-900">
-                      {productReviews.length === 0 ? "No reviews yet" : `No ${selectedReviewRatingTab}-star reviews`}
-                    </h3>
-                    <p className="mx-auto mt-1 max-w-sm text-sm leading-5 text-slate-500">
-                      {productReviews.length === 0
-                        ? "Customer feedback for this product will appear here."
-                        : "Try another rating filter to see more customer feedback."}
-                    </p>
-                    {productReviews.length > 0 && selectedReviewRatingTab > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => setSelectedReviewRatingTab(0)}
-                        className="mt-4 rounded-lg px-3 py-2 text-sm font-semibold text-red-700 transition hover:bg-red-50"
-                      >
-                        Show all reviews
-                      </button>
-                    )}
-                  </div>
-                ) : (
-                  <div className="divide-y divide-slate-200 overflow-hidden rounded-xl border border-slate-200 bg-white">
-                    {filteredProductReviews.map((review, index) => (
-                      <article key={`${review.orderId || index}-${review.submittedAt || index}`} className="p-4 sm:p-5">
-                        <div className="flex flex-wrap items-start justify-between gap-3">
-                          <div className="min-w-0">
-                            <p className="truncate text-sm font-bold text-slate-900">{review.customerName || "Anonymous"}</p>
-                            <p className="mt-1 text-xs text-slate-500">{formatDateToMMMDDYYYY(review.submittedAt) || "Date unavailable"}</p>
-                          </div>
-                          <div className="inline-flex shrink-0 items-center gap-2 rounded-lg bg-amber-50 px-2.5 py-1.5 text-xs font-semibold text-amber-900">
-                            {Number(review.rating) > 0 ? (
-                              <>
-                                <span className="inline-flex items-center gap-0.5 text-amber-500" aria-label={`${review.rating} out of 5 stars`}>
-                                  {renderRatingStars(review.rating, 13)}
-                                </span>
-                                <span>{Number(review.rating).toFixed(1)}</span>
-                              </>
-                            ) : "No rating"}
-                          </div>
-                        </div>
-                        {review.title && <h4 className="mt-3 text-base font-bold text-slate-900">{review.title}</h4>}
-                        {review.tags?.length > 0 && (
-                          <div className="mt-3 flex flex-wrap gap-1.5" aria-label="Review topics">
-                            {review.tags.map((tag) => {
-                              const topic = ORDER_REVIEW_TOPICS.find((entry) => entry.value === tag);
-                              return topic ? (
-                                <span key={tag} className="rounded-full border border-red-200 bg-red-50 px-2.5 py-1 text-[10px] font-semibold text-red-700">
-                                  {topic.label}
-                                </span>
-                              ) : null;
-                            })}
-                          </div>
-                        )}
-                        <p className="mt-1.5 whitespace-pre-line text-sm leading-6 text-slate-600">{review.comment || "No review comment."}</p>
-                        {review.adminResponse && (
-                          <section className={`mt-4 rounded-xl border p-3.5 ${darkMode ? "border-slate-600 bg-slate-800" : "border-emerald-200 bg-emerald-50"}`}>
-                            <h4 className={`text-sm font-bold ${darkMode ? "text-emerald-300" : "text-emerald-900"}`}>ACGC SERVICES</h4>
-                            <p className={`mt-1.5 whitespace-pre-line break-words text-sm leading-6 ${darkMode ? "text-slate-100" : "text-slate-800"}`}>{review.adminResponse}</p>
-                          </section>
-                        )}
-                        {review.photos?.length > 0 && (
-                          <div className="mt-4 grid grid-cols-2 gap-2 sm:grid-cols-3">
-                            {review.photos.map((photo, photoIndex) => (
-                              <img
-                                key={photoIndex}
-                                src={photo}
-                                alt={`Review photo ${photoIndex + 1}`}
-                                className="aspect-[4/3] w-full rounded-lg object-cover"
-                              />
-                            ))}
-                          </div>
-                        )}
-                      </article>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-          </div>
-        )}
-
         {activeTab === "cart" && canRequestOrders && (
           <div className={`flex min-h-0 flex-1 flex-col rounded-2xl border p-4 shadow-sm sm:p-6 ${darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`}>
             <div className="flex flex-col gap-3 border-b pb-5 sm:flex-row sm:items-center sm:justify-between">
@@ -9557,7 +9406,7 @@ function CustomerDashboard() {
                 <button
                   key={filter}
                   type="button"
-                  onClick={() => setNotificationFilter(filter)}
+                  onClick={() => { setNotificationFilter(filter); setNotificationPage(1); }}
                   className={`shrink-0 rounded-lg px-3 py-2 text-xs font-semibold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 sm:px-4 sm:text-sm ${
                     notificationFilter === filter
                       ? darkMode
@@ -9587,14 +9436,13 @@ function CustomerDashboard() {
               </div>
             ) : (
               <div className="space-y-4">
-                {[...filteredNotifications]
-                  .sort(sortCustomerNotificationsNewestFirst)
-                  .map((order) => {
+                {paginatedCustomerNotifications.map((order) => {
                     const product = order.items?.[0] || {};
                     const isRead = readNotificationIds.has(order.notificationId);
                     const status = normalizeOrderStatusKey(order?.status);
                     const contractStatus = normalizeOrderStatusKey(order?.contract_status);
                     const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
+                    const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : null;
                       const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
                     const isDelayNotification = order.notificationType === "delay";
                       const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
@@ -9678,7 +9526,7 @@ function CustomerDashboard() {
                       installation_up_next: "Installation Coming Up",
                       installation_completed: "Installation Completed",
                       site_inspection_today: "Site Inspection Scheduled for Today",
-                      overdue_payment: "Outstanding Project Balance",
+                      overdue_payment: "Remaining Balance",
                       installation_payment_reminder: "Upcoming Payment Reminder",
                       order_cancellation_warning: "Cancellation Policy Reminder",
                       order_cancellation_cooldown: "7-Day Online Ordering Restriction",
@@ -9706,39 +9554,39 @@ function CustomerDashboard() {
                     return (
                       <article
                         key={order.notificationId}
-                        className={`rounded-2xl border p-3 shadow-sm transition-colors sm:p-5 ${
+                        className={`rounded-2xl border p-3 shadow-sm transition-colors sm:p-4 ${
                           isRead
                             ? darkMode ? "border-slate-700 bg-slate-800/60" : "border-slate-200 bg-white"
                             : darkMode ? "border-red-400/50 bg-slate-800/90" : "border-red-300/80 bg-red-50/40"
                         }`}
                       >
-                        <div className="flex gap-3 sm:gap-4">
-                          <div className={`flex h-10 w-10 shrink-0 items-center justify-center rounded-xl sm:h-12 sm:w-12 ${darkMode ? "bg-slate-700" : "bg-slate-100"} ${notificationIcon()}`}>
-                              {isPaymentNotification ? <CreditCard size={18} /> : isDelayNotification || isCancellationPolicyNotification ? <AlertTriangle size={18} /> : isSiteInspectionNotification || isInstallationNotification ? <CalendarDays size={18} /> : isContractNotification ? <FileText size={18} /> : status === "completed" ? <CheckCircle size={18} /> : <Bell size={18} />}
+                        <div className="flex gap-2.5 sm:gap-3">
+                          <div className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-xl sm:h-10 sm:w-10 ${darkMode ? "bg-slate-700" : "bg-slate-100"} ${notificationIcon()}`}>
+                              {isPaymentNotification ? <CreditCard size={16} /> : isDelayNotification || isCancellationPolicyNotification ? <AlertTriangle size={16} /> : isSiteInspectionNotification || isInstallationNotification ? <CalendarDays size={16} /> : isContractNotification ? <FileText size={16} /> : status === "completed" ? <CheckCircle size={16} /> : <Bell size={16} />}
                           </div>
 
                           <div className="min-w-0 flex-1">
                             <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
                               <div className="min-w-0 flex-1">
                                 <div className="flex flex-wrap items-center gap-2">
-                                  <h3 className={`text-sm font-bold break-words sm:text-base ${darkMode ? "text-white" : "text-slate-950"}`}>{order.title || paymentNotificationTitle || (isInstallationNotification ? ({ installation_up_next: "Installation Coming Up", installation_completed: "Installation Completed" }[order.notificationType]) : null) || product.name || "Project Update"}</h3>
+                                  <h3 className={`text-sm font-bold break-words ${darkMode ? "text-white" : "text-slate-950"}`}>{order.notificationType === "overdue_payment" ? "Remaining Balance" : order.title || paymentNotificationTitle || (isInstallationNotification ? ({ installation_up_next: "Installation Coming Up", installation_completed: "Installation Completed" }[order.notificationType]) : null) || product.name || "Project Update"}</h3>
                                   {!isRead && <span className="rounded-full bg-red-100 px-2 py-0.5 text-[9px] font-bold uppercase text-red-700">New</span>}
                                 </div>
-                                <p className={`mt-1 text-xs leading-5 sm:text-sm ${isRead ? darkMode ? "text-slate-400" : "text-slate-500" : darkMode ? "text-slate-200" : "text-slate-700"}`}>{renderAdminContactMessage(notificationMessage())}</p>
-                                <p className={`mt-2 text-[10px] font-medium uppercase tracking-wide sm:text-xs ${darkMode ? "text-slate-500" : "text-slate-400"}`}>{order.tracking}</p>
+                                <p className={`mt-1 text-xs leading-4 ${isRead ? darkMode ? "text-slate-400" : "text-slate-500" : darkMode ? "text-slate-200" : "text-slate-700"}`}>{renderAdminContactMessage(notificationMessage())}</p>
+                                <p className={`mt-1.5 text-[10px] font-medium uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-slate-400"}`}>{order.tracking}</p>
                               </div>
-                      <span className={`inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-[10px] font-semibold sm:text-xs ${getOrderStatusClasses(order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : order.status)}`}>
-                                {order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status)}
+                      <span className={`inline-flex w-fit shrink-0 items-center rounded-full px-2.5 py-1 text-[10px] font-semibold sm:text-xs ${getOrderStatusClasses(notificationStatusLabel || (order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : order.status))}`}>
+                                {notificationStatusLabel || (order.notificationType === "repair_request" ? order.repairProgressStatus : isDelayNotification ? "Delayed" : getOrderStatusLabel(order.status))}
                               </span>
                             </div>
 
-                            <div className={`mt-3 flex flex-wrap items-center justify-between gap-2 border-t pt-3 text-xs ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-100 text-slate-500"}`}>
+                            <div className={`mt-2 flex flex-wrap items-center justify-between gap-2 border-t pt-2 text-xs ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-100 text-slate-500"}`}>
                               <span className={isRead ? "text-slate-400" : darkMode ? "font-medium text-slate-300" : "font-medium text-slate-600"} title={formatDateTimeToMMMDDYYYY(order.notificationDate) || undefined}>
                                 {formatTimeAgo(order.notificationDate)}
                               </span>
                               <button
                                 onClick={() => openOrderDetailsFromNotification(order, order)}
-                                className={`inline-flex items-center gap-1 rounded-lg px-2.5 py-1.5 font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "text-red-300 hover:bg-red-950/40" : "text-red-700 hover:bg-red-50"}`}
+                                className={`inline-flex items-center gap-1 rounded-lg px-2 py-1 font-semibold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "text-red-300 hover:bg-red-950/40" : "text-red-700 hover:bg-red-50"}`}
                               >
                                 {order.notificationType === "repair_request" ? "View Repair" : "View Order"}
                                 <ArrowUpRight size={14} aria-hidden="true" />
@@ -9749,6 +9597,14 @@ function CustomerDashboard() {
                       </article>
                     );
                   })}
+                {notificationTotalPages > 1 && <div className={`flex flex-col items-center justify-between gap-3 border-t pt-4 sm:flex-row ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
+                  <span className={`text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Showing {(currentNotificationPage - 1) * notificationPageSize + 1}–{Math.min(currentNotificationPage * notificationPageSize, sortedFilteredNotifications.length)} of {sortedFilteredNotifications.length}</span>
+                  <nav className="flex flex-wrap items-center justify-center gap-1.5" aria-label="Notification pages">
+                    <button type="button" onClick={() => setNotificationPage((page) => Math.max(1, page - 1))} disabled={currentNotificationPage === 1} aria-label="Previous notifications page" className={`inline-flex h-9 items-center gap-1 rounded-lg border px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}><ChevronLeft size={14} />Previous</button>
+                    {Array.from({ length: notificationTotalPages }, (_, index) => index + 1).map((page) => <button key={page} type="button" onClick={() => setNotificationPage(page)} aria-current={currentNotificationPage === page ? "page" : undefined} aria-label={`Notification page ${page}`} className={`h-9 min-w-9 rounded-lg border px-2.5 text-xs font-semibold ${currentNotificationPage === page ? "border-red-600 bg-red-600 text-white" : darkMode ? "border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>{page}</button>)}
+                    <button type="button" onClick={() => setNotificationPage((page) => Math.min(notificationTotalPages, page + 1))} disabled={currentNotificationPage === notificationTotalPages} aria-label="Next notifications page" className={`inline-flex h-9 items-center gap-1 rounded-lg border px-3 text-xs font-semibold disabled:cursor-not-allowed disabled:opacity-40 ${darkMode ? "border-slate-700 bg-slate-900 text-slate-300 hover:bg-slate-800" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-50"}`}>Next<ChevronRight size={14} /></button>
+                  </nav>
+                </div>}
               </div>
             )}
           </>

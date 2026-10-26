@@ -1,4 +1,5 @@
 import { Fragment, useEffect, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import {
   Search,
@@ -13,6 +14,7 @@ import {
   Ban,
   RotateCcw,
   CalendarDays,
+  Clock3,
   ClipboardList,
   Phone,
   Minus,
@@ -63,8 +65,10 @@ const getDefaultInspection = () => ({
   order_type: "online_order",
   siteAddress: "",
   inspection_date: "",
+  inspection_time: "",
   is_rush_order: false,
   estimated_installation_date: "",
+  estimated_installation_time: "",
   notes: "",
   site_notes: "",
   warranty_period: 90,
@@ -173,76 +177,241 @@ export const parseInspectionDateFromDisplay = (value) => {
   return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 };
 
-function MonthDayYearDateInput({ label, value, min, onChange, className }) {
-  const datePickerRef = useRef(null);
-  const isEditingRef = useRef(false);
-  const [displayValue, setDisplayValue] = useState(() => formatInspectionDateForDisplay(value));
+const formatScheduleTime = (value) => {
+  const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
+  if (!match) return "";
+  const hour = Number(match[1]);
+  return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
+};
+
+const getScheduleOverlap = (records, dateValue, timeValue, excludeRecordId = "") => {
+  if (!dateValue || !timeValue) return null;
+  const timeToMinutes = (value) => {
+    const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
+    return match ? Number(match[1]) * 60 + Number(match[2]) : null;
+  };
+  const candidateStart = timeToMinutes(timeValue);
+  if (candidateStart === null) return null;
+  const candidateEnd = candidateStart + 30;
+  for (const record of records || []) {
+    if (String(record?._id || record?.id || "") === String(excludeRecordId || "")) continue;
+    if (String(record?.status || "").toLowerCase() === "cancelled") continue;
+    const schedules = [
+      { date: record?.inspection_date, time: record?.inspection_time, label: "Inspection", duration: Number(record?.inspection_duration_minutes) + Number(record?.inspection_travel_minutes || 0) * 2 },
+      { date: record?.estimated_installation_date, time: record?.estimated_installation_time, label: "Installation", duration: Number(record?.estimated_installation_duration_minutes) },
+    ];
+    for (const schedule of schedules) {
+      if (!schedule.date || String(schedule.date).slice(0, 10) !== String(dateValue).slice(0, 10)) continue;
+      const bookedStart = timeToMinutes(schedule.time);
+      if (bookedStart === null) continue;
+      const bookedDuration = schedule.duration > 0 ? schedule.duration : 30;
+      if (candidateStart < bookedStart + bookedDuration && candidateEnd > bookedStart) {
+        return { label: schedule.label, time: schedule.time };
+      }
+    }
+  }
+  return null;
+};
+
+const getAvailableScheduleTimes = (records, dateValue, excludeRecordId = "") => {
+  const availableTimes = [];
+  for (let minute = 8 * 60; minute <= 17 * 60 && availableTimes.length < 3; minute += 30) {
+    const time = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
+    if (!getScheduleOverlap(records, dateValue, time, excludeRecordId)) availableTimes.push(time);
+  }
+  return availableTimes;
+};
+
+function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeChange, className, darkMode = false, scheduledRecords = [], excludeRecordId = "" }) {
+  const [isCalendarOpen, setIsCalendarOpen] = useState(false);
+  const [isTimeModalOpen, setIsTimeModalOpen] = useState(false);
+  const [draftTime, setDraftTime] = useState({ hour: 9, minute: 0, period: "AM" });
+  const [visibleMonth, setVisibleMonth] = useState(() => {
+    const initialDate = value ? new Date(`${value}T12:00:00`) : min ? new Date(`${min}T12:00:00`) : new Date();
+    return new Date(initialDate.getFullYear(), initialDate.getMonth(), 1);
+  });
 
   useEffect(() => {
-    if (!isEditingRef.current) setDisplayValue(formatInspectionDateForDisplay(value));
-  }, [value]);
+    if (!isCalendarOpen) return undefined;
+    const closeOnEscape = (event) => {
+      if (event.key !== "Escape") return;
+      if (isTimeModalOpen) setIsTimeModalOpen(false);
+      else setIsCalendarOpen(false);
+    };
+    window.addEventListener("keydown", closeOnEscape);
+    return () => window.removeEventListener("keydown", closeOnEscape);
+  }, [isCalendarOpen, isTimeModalOpen]);
 
-  const handleBlur = () => {
-    isEditingRef.current = false;
-    const parsedDate = parseInspectionDateFromDisplay(displayValue);
-    if (!displayValue) {
-      onChange("");
-      setDisplayValue("");
-      return;
+  const openCalendar = () => {
+    const initialDate = value ? new Date(`${value}T12:00:00`) : min ? new Date(`${min}T12:00:00`) : new Date();
+    setVisibleMonth(new Date(initialDate.getFullYear(), initialDate.getMonth(), 1));
+    setIsCalendarOpen(true);
+  };
+  const monthLabel = visibleMonth.toLocaleDateString("en-US", { month: "long", year: "numeric" });
+  const monthOffset = (new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1).getDay() + 6) % 7;
+  const calendarDays = Array.from({ length: 42 }, (_, index) => new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), index - monthOffset + 1));
+  const dateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
+  const scheduledDateKeys = (field) => new Set(scheduledRecords.map((record) => {
+    const raw = record?.[field];
+    if (!raw) return "";
+    const match = String(raw).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? "" : dateKey(parsed);
+  }).filter(Boolean));
+  const inspectionDates = scheduledDateKeys("inspection_date");
+  const installationDates = scheduledDateKeys("estimated_installation_date");
+  const minimumDate = min ? new Date(`${min}T00:00:00`) : null;
+  const calendarSurface = darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900";
+  const calendarMuted = darkMode ? "text-slate-400" : "text-slate-500";
+  const combinedValue = [formatInspectionDateForDisplay(value), formatScheduleTime(timeValue)].filter(Boolean).join(" at ");
+  const todayDate = new Date();
+  const todayKey = dateKey(todayDate);
+  const selectedDateSummary = value
+    ? new Date(`${value}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" })
+    : "Choose a date";
+  const draftTimeValue = `${String(draftTime.period === "PM" ? (draftTime.hour % 12) + 12 : draftTime.hour % 12).padStart(2, "0")}:${String(draftTime.minute).padStart(2, "0")}`;
+  const timeConflict = getScheduleOverlap(scheduledRecords, value, draftTimeValue, excludeRecordId);
+  const availableTimes = timeConflict ? getAvailableScheduleTimes(scheduledRecords, value, excludeRecordId) : [];
+  const openTimeModal = () => {
+    const match = String(timeValue || "").match(/^(\d{2}):(\d{2})$/);
+    if (match) {
+      const hour = Number(match[1]);
+      setDraftTime({ hour: hour % 12 || 12, minute: Number(match[2]), period: hour >= 12 ? "PM" : "AM" });
+    } else {
+      setDraftTime({ hour: 9, minute: 0, period: "AM" });
     }
-    if (parsedDate && (!min || parsedDate >= min)) {
-      onChange(parsedDate);
-      setDisplayValue(formatInspectionDateForDisplay(parsedDate));
-      return;
-    }
-    setDisplayValue(formatInspectionDateForDisplay(value));
+    setIsTimeModalOpen(true);
+  };
+  const saveDraftTime = () => {
+    const hour24 = draftTime.period === "PM" ? (draftTime.hour % 12) + 12 : draftTime.hour % 12;
+    onTimeChange(`${String(hour24).padStart(2, "0")}:${String(draftTime.minute).padStart(2, "0")}`);
+    setIsTimeModalOpen(false);
   };
 
   return (
     <div className="relative">
       <input
         type="text"
-        inputMode="numeric"
-        placeholder="MM-DD-YYYY"
-        value={displayValue}
-        onChange={(event) => {
-          const nextValue = event.target.value;
-          isEditingRef.current = true;
-          setDisplayValue(nextValue);
-          const parsedDate = parseInspectionDateFromDisplay(nextValue);
-          if (!nextValue || (parsedDate && (!min || parsedDate >= min))) onChange(parsedDate);
-        }}
-        onBlur={handleBlur}
+        readOnly
+        placeholder="Select date and time"
+        value={combinedValue}
+        onClick={openCalendar}
         aria-label={label}
-        className={`${className} pr-11`}
+        className={`${className} cursor-pointer pr-11`}
       />
       <button
         type="button"
         onClick={() => {
-          const picker = datePickerRef.current;
-          if (!picker) return;
-          if (typeof picker.showPicker === "function") picker.showPicker();
-          else picker.click();
+          openCalendar();
         }}
         aria-label={`Choose ${label.toLowerCase()}`}
         className="absolute right-2 top-1/2 inline-flex h-8 w-8 -translate-y-1/2 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500"
       >
         <CalendarDays size={17} aria-hidden="true" />
       </button>
-      <input
-        ref={datePickerRef}
-        type="date"
-        value={value || ""}
-        min={min}
-        onChange={(event) => {
-          isEditingRef.current = false;
-          onChange(event.target.value);
-          setDisplayValue(formatInspectionDateForDisplay(event.target.value));
-        }}
-        tabIndex={-1}
-        aria-hidden="true"
-        className="pointer-events-none absolute right-3 top-1/2 h-px w-px -translate-y-1/2 opacity-0"
-      />
+      {isCalendarOpen && createPortal(
+        <div className="fixed inset-0 z-[180] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsCalendarOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-label={`Choose ${label.toLowerCase()}`} className={`w-full max-w-[380px] overflow-hidden rounded-2xl border shadow-2xl ${calendarSurface}`}>
+            <header className={`flex items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              <div>
+                <p className={`text-[10px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-red-300" : "text-red-700"}`}>{label}</p>
+                <h2 className="mt-1 text-lg font-bold">Select date and time</h2>
+              </div>
+              <button type="button" onClick={() => setIsCalendarOpen(false)} aria-label="Close date picker" className={`flex size-9 items-center justify-center rounded-lg ${darkMode ? "text-slate-300 hover:bg-slate-800" : "text-slate-500 hover:bg-slate-100"}`}><X size={18} /></button>
+            </header>
+            <div className="p-5">
+              <div className="mb-4 grid grid-cols-[36px_1fr_auto_36px] items-center gap-2">
+                <button type="button" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))} aria-label="Previous month" className={`flex size-9 items-center justify-center rounded-lg border ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}><ChevronLeft size={17} /></button>
+                <p className="text-center text-sm font-bold">{monthLabel}</p>
+                <button type="button" onClick={() => { setVisibleMonth(new Date(todayDate.getFullYear(), todayDate.getMonth(), 1)); onChange(todayKey); }} className={`rounded-md px-2 py-1 text-xs font-bold transition ${darkMode ? "text-red-300 hover:bg-slate-800" : "text-red-700 hover:bg-red-50"}`}>Today</button>
+                <button type="button" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() + 1, 1))} aria-label="Next month" className={`flex size-9 items-center justify-center rounded-lg border ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}><ChevronRight size={17} /></button>
+              </div>
+              <div className={`mb-2 grid grid-cols-7 text-center text-[10px] font-bold uppercase ${calendarMuted}`}>{["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"].map((day) => <span key={day} className="py-2">{day}</span>)}</div>
+              <div className={`mb-3 flex flex-wrap items-center justify-center gap-x-4 gap-y-1 text-[11px] ${calendarMuted}`} aria-label="Calendar schedule legend">
+                <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-500" aria-hidden="true" />Inspection date</span>
+                <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-blue-600" aria-hidden="true" />Installation date</span>
+              </div>
+              <div className="grid grid-cols-7 gap-1">
+                {calendarDays.map((date) => {
+                  const key = dateKey(date);
+                  const isCurrentMonth = date.getMonth() === visibleMonth.getMonth();
+                  const isSelected = value === key;
+                  const isToday = key === dateKey(new Date());
+                  const isDisabled = Boolean(minimumDate && date < minimumDate);
+                  const hasInspection = inspectionDates.has(key);
+                  const hasInstallation = installationDates.has(key);
+                  return <button key={key} type="button" disabled={isDisabled} onClick={() => onChange(key)} aria-current={isToday ? "date" : undefined} aria-label={`${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${isToday ? ", today" : ""}${hasInspection ? ", inspection scheduled" : ""}${hasInstallation ? ", installation scheduled" : ""}`} className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-25 ${isSelected ? "border-red-700 bg-red-700 font-bold text-white shadow-sm" : isToday ? darkMode ? "border-slate-500 bg-slate-800 font-bold text-white" : "border-slate-300 bg-slate-50 font-bold text-slate-900" : "border-transparent"} ${!isSelected && isCurrentMonth ? darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-red-50" : ""} ${!isCurrentMonth ? `${calendarMuted} opacity-50 hover:bg-slate-500/10` : ""}`}>
+                    {date.getDate()}
+                    {(hasInspection || hasInstallation) && <span className="absolute bottom-1 flex items-center gap-1" aria-hidden="true">
+                      {hasInspection && <span className={`size-1.5 rounded-full ${isSelected ? "bg-white" : "bg-amber-500"}`} />}
+                      {hasInstallation && <span className={`size-1.5 rounded-full ${isSelected ? "bg-white/70" : "bg-blue-600"}`} />}
+                    </span>}
+                  </button>;
+                })}
+              </div>
+              <div className={`mt-4 flex items-center justify-between gap-4 border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                <span className={`text-sm font-semibold ${calendarMuted}`}>Time</span>
+                <button type="button" disabled={!value} onClick={openTimeModal} className={`inline-flex h-10 min-w-32 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-white hover:bg-slate-50"}`}>
+                  <Clock3 size={15} aria-hidden="true" />{timeValue ? formatScheduleTime(timeValue) : "Choose time"}
+                </button>
+              </div>
+              <div className={`mt-4 flex items-center justify-between gap-3 border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                <div aria-live="polite">
+                  <p className={`text-sm font-semibold ${value ? darkMode ? "text-slate-100" : "text-slate-900" : calendarMuted}`}>{selectedDateSummary}</p>
+                  <p className={`mt-0.5 text-xs ${calendarMuted}`}>{timeValue ? formatScheduleTime(timeValue) : value ? "Choose a time" : "Date and time not selected"}</p>
+                </div>
+                <div className="flex shrink-0 items-center gap-2">
+                  {value && <button type="button" onClick={() => { onChange(""); onTimeChange(""); setIsCalendarOpen(false); }} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}>Clear</button>}
+                  <button type="button" onClick={() => setIsCalendarOpen(false)} className="rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800">Done</button>
+                </div>
+              </div>
+            </div>
+          </section>
+        </div>,
+        document.body
+      )}
+      {isTimeModalOpen && createPortal(
+        <div className="fixed inset-0 z-[200] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsTimeModalOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-labelledby="schedule-time-title" className={`w-full max-w-[420px] overflow-hidden rounded-2xl border shadow-2xl ${calendarSurface}`}>
+            <header className={`flex items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              <div className="flex items-center gap-3">
+                <span className={`flex size-10 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-50 text-red-700"}`}><Clock3 size={18} aria-hidden="true" /></span>
+                <div><p className={`text-[10px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-red-300" : "text-red-700"}`}>{label}</p><h2 id="schedule-time-title" className="mt-1 text-lg font-bold">Select time</h2></div>
+              </div>
+              <button type="button" onClick={() => setIsTimeModalOpen(false)} aria-label="Close time picker" className={`flex size-9 items-center justify-center rounded-lg ${darkMode ? "text-slate-300 hover:bg-slate-800" : "text-slate-500 hover:bg-slate-100"}`}><X size={18} /></button>
+            </header>
+            <div className="p-4 sm:p-5">
+              <div className={`mb-4 rounded-xl border p-3 text-center ${darkMode ? "border-slate-700 bg-slate-950/60" : "border-slate-200 bg-slate-50"}`}>
+                <p className={`text-[10px] font-bold uppercase tracking-wide ${calendarMuted}`}>Selected time</p>
+                <p className="mt-1 text-2xl font-bold tabular-nums">{draftTime.hour}:{String(draftTime.minute).padStart(2, "0")} {draftTime.period}</p>
+              </div>
+              <label className={`block text-xs font-semibold ${calendarMuted}`}>Choose a time
+                <input type="time" step="60" value={draftTimeValue} onChange={(event) => {
+                  const [hourText, minuteText] = event.target.value.split(":");
+                  if (!hourText || !minuteText) return;
+                  const hour24 = Number(hourText);
+                  setDraftTime({ hour: hour24 % 12 || 12, minute: Number(minuteText), period: hour24 >= 12 ? "PM" : "AM" });
+                }} aria-label="Choose time" className={`mt-1.5 h-12 w-full rounded-lg border px-3 text-base font-semibold ${darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`} />
+              </label>
+              {timeConflict && <div role="alert" className={`mt-3 rounded-lg border p-3 text-xs ${darkMode ? "border-amber-500/40 bg-amber-500/10 text-amber-100" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
+                <p className="font-semibold">This time overlaps a scheduled {timeConflict.label.toLowerCase()} at {formatScheduleTime(timeConflict.time)}.</p>
+                <p className="mt-1">Choose another time to avoid a schedule conflict.</p>
+                {availableTimes.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{availableTimes.map((time) => <button key={time} type="button" onClick={() => {
+                  const [hourText, minuteText] = time.split(":");
+                  const hour24 = Number(hourText);
+                  setDraftTime({ hour: hour24 % 12 || 12, minute: Number(minuteText), period: hour24 >= 12 ? "PM" : "AM" });
+                }} className={`rounded-md border px-2.5 py-1.5 font-semibold ${darkMode ? "border-amber-400/50 bg-slate-900 hover:bg-slate-800" : "border-amber-400 bg-white hover:bg-amber-100"}`}>{formatScheduleTime(time)}</button>)}</div>}
+              </div>}
+              <footer className={`mt-5 flex justify-end gap-2 border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+                <button type="button" onClick={() => setIsTimeModalOpen(false)} className={`rounded-lg border px-4 py-2.5 text-xs font-semibold ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}>Cancel</button>
+                <button type="button" disabled={Boolean(timeConflict)} onClick={saveDraftTime} className="rounded-lg bg-red-700 px-4 py-2.5 text-xs font-semibold text-white hover:bg-red-800 disabled:cursor-not-allowed disabled:opacity-50">Set time</button>
+              </footer>
+            </div>
+          </section>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
@@ -1921,8 +2090,10 @@ function SiteInspection() {
       customer_phone: payload.phone,
       estimation_mode: "auto",
       inspection_date: toApiDate(payload.inspection_date),
+      inspection_time: payload.inspection_time || "",
       is_rush_order: payload.is_rush_order === true,
       estimated_installation_date: toApiDate(payload.estimated_installation_date),
+      estimated_installation_time: payload.estimated_installation_time || "",
       ...buildWarrantyPayload(payload.warranty_period, payload.custom_warranty_days),
       warranty_assignment_mode: (payload.items || []).length > 1 && payload.warranty_assignment_mode === "per_product"
         ? "per_product"
@@ -2196,13 +2367,14 @@ function SiteInspection() {
 
   const computeTotals = () => {
     const totalArea = (newInspection.items || []).reduce((sum, item) => sum + (Number(item.area) || 0), 0);
-    const totalEstimate = Math.round(
+    const productEstimate = Math.round(
       (newInspection.items || []).reduce((sum, item) => {
         if (!normalizeProductId(item.product_id)) return sum;
         if (item.estimation_mode === "manual") return sum + (Number(item.manual_estimated_total) || calculateRowSubtotal(item));
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
+    const totalEstimate = productEstimate;
     return { totalArea, totalEstimate };
   };
 
@@ -2211,13 +2383,14 @@ function SiteInspection() {
       return { totalArea: 0, totalEstimate: 0 };
     }
     const totalArea = (editInspection.items || []).reduce((sum, item) => sum + (Number(item.area) || 0), 0);
-    const totalEstimate = Math.round(
+    const productEstimate = Math.round(
       (editInspection.items || []).reduce((sum, item) => {
         if (!normalizeProductId(item.product_id)) return sum;
         if (item.estimation_mode === "manual") return sum + (Number(item.manual_estimated_total) || calculateRowSubtotal(item));
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
+    const totalEstimate = productEstimate;
     return { totalArea, totalEstimate };
   };
 
@@ -2452,7 +2625,7 @@ function SiteInspection() {
   };
 
   const getCustomerTypeLabel = (inspection = {}) => {
-    return isOnlineInspection(inspection) ? "Online Customer" : "Walk-in Customer";
+    return isOnlineInspection(inspection) ? "Website Order" : "Walk-in Customer";
   };
 
   const generateContractData = (order) => {
@@ -2878,8 +3051,10 @@ function SiteInspection() {
         payment_terms: inspection.payment_terms || "",
         agreed_payment_date: normalizeDateInputValue(inspection.agreed_payment_date),
         inspection_date: normalizeDateInputValue(inspection.inspection_date),
+        inspection_time: inspection.inspection_time || "",
         is_rush_order: inspection.is_rush_order === true || customerSelectedRush,
         estimated_installation_date: normalizeDateInputValue(getEstimatedInstallationDate(inspection)),
+        estimated_installation_time: inspection.estimated_installation_time || "",
         warranty_period: normalizedWarrantyPeriod,
         warranty_assignment_mode: inspection.warranty_assignment_mode === "per_product" ? "per_product" : "same",
         warranty_status: inspection.warranty_status || "",
@@ -2922,7 +3097,7 @@ function SiteInspection() {
       setEditInspection(nextEditInspection);
     } else {
       // fallback: open an empty editor
-      const nextEditInspection = { id: orderId, inspection_date: "", is_rush_order: false, inspection_notes: "", issues_found: "", inspection_status: "pending" };
+      const nextEditInspection = { id: orderId, inspection_date: "", inspection_time: "", is_rush_order: false, inspection_notes: "", issues_found: "", inspection_status: "pending", estimated_installation_date: "", estimated_installation_time: "" };
       editInspectionBaselineRef.current = createUnsavedSnapshot(nextEditInspection);
       setManualOverrideLocked(true);
       setEditInspection(nextEditInspection);
@@ -3309,11 +3484,13 @@ function SiteInspection() {
         }),
         manual_override: editInspection.manual_override || "",
         inspection_date: toApiDate(editInspection.inspection_date),
+        inspection_time: editInspection.inspection_time || "",
         is_rush_order: editInspection.is_rush_order === true,
         inspection_notes: editInspection.inspection_notes || undefined,
         issues_found: editInspection.issues_found || undefined,
         inspection_status: editInspection.inspection_date ? "scheduled" : editInspection.inspection_status || undefined,
         estimated_installation_date: toApiDate(editInspection.estimated_installation_date),
+        estimated_installation_time: editInspection.estimated_installation_time || "",
         payment_terms: editInspection.payment_terms || undefined,
         required_downpayment_amount: resolveRequiredPaymentAmount(
           editInspection.payment_terms,
@@ -3486,7 +3663,6 @@ function SiteInspection() {
   const visibleInspections = isMobile ? prioritizedList : paginatedList;
   const visibleRecordStart = prioritizedList.length === 0 ? 0 : (currentPageIndex - 1) * pageSize + 1;
   const visibleRecordEnd = Math.min(currentPageIndex * pageSize, prioritizedList.length);
-
   useEffect(() => {
     if (!highlightedNotificationRecordId) return;
     const targetIndex = prioritizedList.findIndex((inspection) => String(inspection._id || inspection.id) === highlightedNotificationRecordId);
@@ -3938,10 +4114,10 @@ function SiteInspection() {
                   </button>
                 ))}
                 <div aria-label="Order priority legend" className={`ml-auto flex w-full flex-nowrap items-center justify-between gap-1 rounded-xl border px-2 py-2 text-[9px] font-semibold whitespace-nowrap sm:w-auto sm:justify-start sm:gap-3 sm:px-3 sm:text-xs ${darkMode ? "border-slate-700 bg-slate-900/50 text-slate-300" : "border-slate-200 bg-white text-slate-600"}`}>
-                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-slate-400" : "bg-slate-500"}`} aria-hidden="true" />Standard Order</span>
-                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className="size-2 shrink-0 rounded-full bg-red-600 sm:size-3" aria-hidden="true" />Rush Order</span>
-                  <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5" title="Customer is under an online ordering cancellation cooldown"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-amber-400" : "bg-amber-600"}`} aria-hidden="true" />Restricted Account</span>
-                </div>
+                    <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-slate-400" : "bg-slate-500"}`} aria-hidden="true" />Standard Order</span>
+                    <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5"><span className="size-2 shrink-0 rounded-full bg-red-600 sm:size-3" aria-hidden="true" />Rush Order</span>
+                    <span className="inline-flex shrink-0 items-center gap-1 sm:gap-1.5" title="Customer is under an online ordering cancellation cooldown"><span className={`size-2 shrink-0 rounded-full sm:size-3 ${darkMode ? "bg-amber-400" : "bg-amber-600"}`} aria-hidden="true" />Restricted Account</span>
+                  </div>
               </div>
             </div>
 
@@ -4005,8 +4181,10 @@ function SiteInspection() {
                         const createdDate = formatDateToMMMDDYYYY(inspection.createdAt) || "—";
                         const createdTime = inspection.createdAt ? new Date(inspection.createdAt).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }) : "";
                         const inspectionDate = formatDateToMMMDDYYYY(inspection.inspection_date) || "—";
+                        const inspectionTime = formatScheduleTime(inspection.inspection_time);
                         const installDateValue = getEstimatedInstallationDate(inspection);
                         const installDate = formatDateToMMMDDYYYY(installDateValue) || "—";
+                        const installationTime = formatScheduleTime(inspection.estimated_installation_time);
                         const total = getFinalProjectCost(inspection) || (Array.isArray(inspection.items)
                           ? inspection.items.reduce((sum, item) => sum + getInspectionItemTotal(item), 0)
                           : 0);
@@ -4036,8 +4214,8 @@ function SiteInspection() {
                             <td className="px-2 py-3 text-[13px] font-semibold text-slate-800 dark:text-slate-200">{customerTypeLabel}</td>
                             <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200"><span className="line-clamp-2 break-words">{siteAddress}</span></td>
                             <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{createdDate}<div className="mt-1 text-[12px] font-medium text-slate-700 dark:text-slate-300">{createdTime}</div></td>
-                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{inspectionDate}</td>
-                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{installDate}</td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{inspectionDate}{inspectionTime && <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{inspectionTime}</div>}</td>
+                            <td className="px-2 py-3 text-[13px] font-medium text-slate-800 dark:text-slate-200">{installDate}{installationTime && <div className="mt-1 text-xs text-slate-500 dark:text-slate-400">{installationTime}</div>}</td>
                             <td className="px-1 py-3"><span className={`inline-flex items-center gap-1 rounded-full px-2 py-1 text-[10px] font-semibold ${progressColor}`}>{statusDisplay === "Need to be Called" && <Phone size={12} aria-hidden="true" />}{statusDisplay}</span></td>
                             <td className="px-1 py-3 rounded-r-xl text-left text-[12px] font-bold text-slate-900 dark:text-slate-100">{formatCurrency(total)}</td>
                             <td style={{ width: showInspectionActions ? "220px" : "56px", minWidth: showInspectionActions ? "220px" : "56px" }} className="py-3 pl-1 pr-2 text-left">
@@ -4065,6 +4243,8 @@ function SiteInspection() {
                 const inspectionDate = formatDateToMMMDDYYYY(inspection.inspection_date) || "—";
                 const installDateValue = getEstimatedInstallationDate(inspection);
                 const installDate = formatDateToMMMDDYYYY(installDateValue) || "—";
+                const inspectionTime = formatScheduleTime(inspection.inspection_time);
+                const installationTime = formatScheduleTime(inspection.estimated_installation_time);
                 const statusDisplay = getInspectionStatusDisplay(inspection);
                 const total = getFinalProjectCost(inspection) || (Array.isArray(inspection.items) ? inspection.items.reduce((sum, item) => sum + getInspectionItemTotal(item), 0) : 0);
                 const isRestrictedCustomer = isRestrictedCustomerOrder(inspection, restrictionClock);
@@ -4091,11 +4271,11 @@ function SiteInspection() {
                     <div className={`mt-3 grid grid-cols-2 gap-2 text-xs ${darkMode ? "text-slate-300" : "text-gray-600"}`}>
                       <div>
                         <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Inspection</p>
-                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{inspectionDate}</p>
+                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{inspectionDate}{inspectionTime && <span className={`ml-1 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{inspectionTime}</span>}</p>
                       </div>
                       <div>
                         <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Install</p>
-                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{installDate}</p>
+                        <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{installDate}{installationTime && <span className={`ml-1 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{installationTime}</span>}</p>
                       </div>
                       <div className="col-span-2">
                         <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-gray-400"}`}>Estimated Total</p>
@@ -4282,14 +4462,20 @@ function SiteInspection() {
                         <MonthDayYearDateInput
                           label="Inspection date"
                           value={newInspection.inspection_date}
+                          timeValue={newInspection.inspection_time}
                           min={today}
+                          onTimeChange={(value) => handleInspectionFieldChange("inspection_time", value)}
                           onChange={(value) => {
                             handleInspectionFieldChange("inspection_date", value);
+                            if (!value) handleInspectionFieldChange("inspection_time", "");
                             if (getInstallationDateError(value, newInspection.estimated_installation_date)) {
                               handleInspectionFieldChange("estimated_installation_date", "");
+                              handleInspectionFieldChange("estimated_installation_time", "");
                             }
                           }}
                           className={fieldClass}
+                          darkMode={darkMode}
+                          scheduledRecords={inspections}
                         />
                         {errors.inspection_date && <p className="mt-2 text-xs text-red-400">{errors.inspection_date}</p>}
                       </div>
@@ -4299,9 +4485,16 @@ function SiteInspection() {
                         <MonthDayYearDateInput
                           label="Estimated installation date"
                           value={newInspection.estimated_installation_date || ""}
+                          timeValue={newInspection.estimated_installation_time}
                           min={getMinimumInstallationDate(newInspection.inspection_date)}
-                          onChange={(value) => handleInspectionFieldChange("estimated_installation_date", value)}
+                          onTimeChange={(value) => handleInspectionFieldChange("estimated_installation_time", value)}
+                          onChange={(value) => {
+                            handleInspectionFieldChange("estimated_installation_date", value);
+                            if (!value) handleInspectionFieldChange("estimated_installation_time", "");
+                          }}
                           className={fieldClass}
+                          darkMode={darkMode}
+                          scheduledRecords={inspections}
                         />
                         {errors.estimated_installation_date && <p className="mt-2 text-xs text-red-400">{errors.estimated_installation_date}</p>}
                       </div>
@@ -4314,6 +4507,7 @@ function SiteInspection() {
                         </div>
                       </div>
                     </div>
+
 
                     {newInspection.items.length > 1 && (
                       <div className="mt-6">
@@ -4914,6 +5108,8 @@ function SiteInspection() {
             const inspectionDate = viewInspection.inspection_date ? formatDateToMMDDYYYY(viewInspection.inspection_date) : "—";
             const installDateValue = getEstimatedInstallationDate(viewInspection);
             const installDate = installDateValue ? formatDateToMMDDYYYY(installDateValue) : "—";
+            const inspectionTime = formatScheduleTime(viewInspection.inspection_time);
+            const installationTime = formatScheduleTime(viewInspection.estimated_installation_time);
             const orderReference = viewInspection.order_number || viewInspection.tracking || viewInspection.contract_number || `SI-ORD-${String(orderId || "NEW").slice(-10).toUpperCase()}`;
             const contractExists = hasExistingContract(viewInspection);
             const awaitingContractSignoff = isAwaitingContractSignoff(viewInspection);
@@ -5117,12 +5313,12 @@ function SiteInspection() {
                       <div className="mt-5 grid grid-cols-1 gap-5 md:grid-cols-3">
                         <div>
                           <div className={`mb-2 text-[11px] font-black uppercase tracking-[0.18em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Inspection Date</div>
-                          <div className={`text-base font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{inspectionDate}</div>
+                          <div className={`text-base font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{inspectionDate}{inspectionTime && <span className={`ml-2 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{inspectionTime}</span>}</div>
                         </div>
 
                         <div>
                           <div className={`mb-2 text-[11px] font-black uppercase tracking-[0.18em] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Est. Installation Date</div>
-                          <div className={`text-base font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{installDate}</div>
+                          <div className={`text-base font-medium ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{installDate}{installationTime && <span className={`ml-2 text-sm ${darkMode ? "text-slate-400" : "text-slate-500"}`}>{installationTime}</span>}</div>
                         </div>
 
                         <div className="flex flex-wrap items-center justify-start gap-2 md:justify-end">
@@ -5434,14 +5630,21 @@ function SiteInspection() {
                         <MonthDayYearDateInput
                           label="Inspection date"
                           value={editInspection.inspection_date || ""}
+                          timeValue={editInspection.inspection_time}
                           min={today}
+                          onTimeChange={(value) => handleEditChange("inspection_time", value)}
                           onChange={(value) => {
                             handleEditChange("inspection_date", value);
+                            if (!value) handleEditChange("inspection_time", "");
                             if (getInstallationDateError(value, editInspection.estimated_installation_date)) {
                               handleEditChange("estimated_installation_date", "");
+                              handleEditChange("estimated_installation_time", "");
                             }
                           }}
                           className={fieldClass}
+                          darkMode={darkMode}
+                          scheduledRecords={inspections}
+                          excludeRecordId={editInspection.id}
                         />
                         {errors.inspection_date && <p className="mt-2 text-xs text-red-400">{errors.inspection_date}</p>}
                       </div>
@@ -5451,9 +5654,17 @@ function SiteInspection() {
                         <MonthDayYearDateInput
                           label="Estimated installation date"
                           value={editInspection.estimated_installation_date || ""}
+                          timeValue={editInspection.estimated_installation_time}
                           min={getMinimumInstallationDate(editInspection.inspection_date)}
-                          onChange={(value) => handleEditChange("estimated_installation_date", value)}
+                          onTimeChange={(value) => handleEditChange("estimated_installation_time", value)}
+                          onChange={(value) => {
+                            handleEditChange("estimated_installation_date", value);
+                            if (!value) handleEditChange("estimated_installation_time", "");
+                          }}
                           className={fieldClass}
+                          darkMode={darkMode}
+                          scheduledRecords={inspections}
+                          excludeRecordId={editInspection.id}
                         />
                         {errors.estimated_installation_date && <p className="mt-2 text-xs text-red-400">{errors.estimated_installation_date}</p>}
                       </div>
@@ -5466,6 +5677,7 @@ function SiteInspection() {
                         </div>
                       </div>
                     </div>
+
 
                     {editInspection.items.length > 1 && (
                       <div className="mt-6">

@@ -256,6 +256,8 @@ const OrderItemSchema = new mongoose.Schema(
       type: [mongoose.Schema.Types.Mixed],
       default: [],
     },
+    progress_notes: { type: String, trim: true, maxlength: 4000, default: "" },
+    progress_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
   },
   { _id: false }
 );
@@ -540,9 +542,19 @@ const OrderSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    inspection_time: {
+      type: String,
+      trim: true,
+      default: "",
+    },
     estimated_installation_date: {
       type: Date,
       default: null,
+    },
+    estimated_installation_time: {
+      type: String,
+      trim: true,
+      default: "",
     },
     inspection_notes: {
       type: String,
@@ -573,6 +585,7 @@ const OrderSchema = new mongoose.Schema(
             },
             completed: { type: Boolean, default: false },
             date: { type: Date, default: null },
+            completionNote: { type: String, trim: true, maxlength: 1000, default: "" },
             delayReason: { type: String, trim: true, default: "" },
             delayExpectedResolution: { type: Date, default: null },
             delayNotes: { type: String, trim: true, default: "" },
@@ -623,6 +636,7 @@ const OrderSchema = new mongoose.Schema(
                     },
                     completed: { type: Boolean, default: false },
                     date: { type: Date, default: null },
+                    completionNote: { type: String, trim: true, maxlength: 1000, default: "" },
                     images: { type: [String], default: [] },
                   },
                   { _id: false }
@@ -636,6 +650,8 @@ const OrderSchema = new mongoose.Schema(
       ],
       default: [],
     },
+    progress_notes: { type: String, trim: true, maxlength: 4000, default: "" },
+    progress_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
     contract_terms: {
       type: String,
       trim: true,
@@ -894,6 +910,7 @@ const OrderSchema = new mongoose.Schema(
   },
   {
     timestamps: true,
+    optimisticConcurrency: true,
   }
 );
 

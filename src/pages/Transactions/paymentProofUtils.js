@@ -185,7 +185,7 @@ export const getPaymentSummary = (order = {}) => {
     } else if (paidCents < requiredCents) {
       status = { key: "partial_downpayment", label: "Partial Downpayment" };
     } else if (paidCents <= requiredCents) {
-      status = { key: "downpayment", label: "Downpayment Completed" };
+      status = { key: "downpayment", label: "Downpayment Paid" };
     } else {
       status = { key: "partial", label: "Partial Payment" };
     }

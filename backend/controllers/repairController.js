@@ -388,9 +388,13 @@ export const scheduleRepair = async (req, res) => {
   if (!["customer_accepted", "admin_approved", "scheduled"].includes(repair.status)) return res.status(409).json({ success: false, message: "Approve the warranty claim or receive quotation acceptance before scheduling." });
   const startValue = text(req.body?.startDate || req.body?.date, 10);
   const finishValue = text(req.body?.finishDate || req.body?.startDate || req.body?.date, 10);
+  const manilaDateParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const manilaDateValues = Object.fromEntries(manilaDateParts.map(({ type, value }) => [type, value]));
+  const todayInManila = `${manilaDateValues.year}-${manilaDateValues.month}-${manilaDateValues.day}`;
   const startDate = /^\d{4}-\d{2}-\d{2}$/.test(startValue) ? new Date(`${startValue}T12:00:00.000Z`) : new Date(NaN);
   const finishDate = /^\d{4}-\d{2}-\d{2}$/.test(finishValue) ? new Date(`${finishValue}T12:00:00.000Z`) : new Date(NaN);
   if (Number.isNaN(startDate.getTime()) || Number.isNaN(finishDate.getTime()) || startDate.toISOString().slice(0, 10) !== startValue || finishDate.toISOString().slice(0, 10) !== finishValue || finishDate < startDate) return res.status(400).json({ success: false, message: "Choose valid start and finish dates. Finish date cannot be before start date." });
+  if (startValue < todayInManila) return res.status(400).json({ success: false, message: "Repair schedules cannot start in the past." });
   repair.schedule = { date: startDate, startDate, finishDate, notes: text(req.body?.notes, 1200) };
   repair.status = "scheduled";
   event(repair, "scheduled", `Repair scheduled from ${startDate.toLocaleDateString("en-PH")} through ${finishDate.toLocaleDateString("en-PH")}.${repair.schedule.notes ? ` ${repair.schedule.notes}` : ""}`, req.user);

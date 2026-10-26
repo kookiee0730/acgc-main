@@ -212,7 +212,7 @@ describe("getPaymentSummary", () => {
   });
 
   it("shows downpayment once the required amount is met", () => {
-    expect(getPaymentSummary({ ...order, amount_paid: 10000 }).status.label).toBe("Downpayment Completed");
+    expect(getPaymentSummary({ ...order, amount_paid: 10000 }).status.label).toBe("Downpayment Paid");
   });
 
   it("shows partial after additional payment beyond the downpayment", () => {
@@ -242,7 +242,7 @@ describe("getPaymentSummary", () => {
     });
 
     expect(summary.totalAmount).toBe(20000);
-    expect(summary.status.label).toBe("Downpayment Completed");
+    expect(summary.status.label).toBe("Downpayment Paid");
   });
 
   it("uses the default downpayment when legacy fields contain zero", () => {

@@ -11,7 +11,6 @@ import {
 } from "lucide-react";
 import { getAdminOrders, getAdminOrder, updateOrderStatus } from "@/api/orders";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
-import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getFinalProjectCost } from "@/lib/orderPricing";
 import { recordActivity } from "@/lib/activityLog";
 import { useAuth } from "@/contexts/AuthContext";
@@ -181,16 +180,6 @@ function Dashboard() {
   const [contractPage, setContractPage] = useState(1);
   const contractsPerPage = 5;
   const [chartProgress, setChartProgress] = useState(0);
-  const [currentDateTime, setCurrentDateTime] = useState(() => new Date());
-
-  useEffect(() => {
-    const clock = window.setInterval(() => {
-      setCurrentDateTime(new Date());
-    }, 1000);
-
-    return () => window.clearInterval(clock);
-  }, []);
-
   const showToast = (message, type = "success") => {
     setToast({ open: true, message, type });
     setTimeout(() => {
@@ -549,15 +538,6 @@ function Dashboard() {
   const chartRadius = 78;
   const chartCircumference = 2 * Math.PI * chartRadius;
   let chartOffset = 0;
-  const dashboardDate = formatDateToMMMDDYYYY(currentDateTime);
-  const dashboardTime = currentDateTime.toLocaleTimeString(undefined, {
-    hour: "numeric",
-    minute: "2-digit",
-    second: "2-digit",
-  });
-  const dashboardDay = currentDateTime.toLocaleDateString(undefined, {
-    weekday: "long",
-  });
   const recentTransactionsPerPage = 5;
   const recentTransactions = orders.filter(isUntransferredSiteInspection).sort((a, b) => {
     const dateA = new Date(a.created_at || a.createdAt || a.updatedAt || 0).getTime();
@@ -603,15 +583,7 @@ function Dashboard() {
             <AdminPageHeader
               title="Dashboard"
               description="Manage inspections, projects, warranties and products from one administrative workspace."
-              className="h-full min-h-[280px]"
-              statsClassName="grid-cols-1 lg:grid-cols-3 gap-2 sm:gap-3"
-              compactStats
-              statsBelow
-              stats={[
-                { label: "Date", value: dashboardDate, color: "text-blue-100" },
-                { label: "Time", value: dashboardTime, color: "text-emerald-300" },
-                { label: "Day", value: dashboardDay, color: "text-amber-300" },
-              ]}
+              className="h-full"
             />
 
             <div className={`h-full rounded-3xl p-6 shadow-lg ${darkMode ? "bg-slate-800 text-slate-100" : "bg-white text-gray-900"}`}>

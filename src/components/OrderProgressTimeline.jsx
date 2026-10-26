@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   Camera,
   ClipboardCheck,
@@ -14,7 +14,7 @@ import {
   X,
 } from "lucide-react";
 import { API_BASE } from "@/api/client";
-import { buildBatchProductTimelineStages } from "@/lib/orderTimeline";
+import { buildBatchProductTimelineStages, isInstallationDeadlineOverdue } from "@/lib/orderTimeline";
 
 export const getOrderItemImageSource = (item) => {
   const product = item?.product_id && typeof item.product_id === "object"
@@ -194,6 +194,11 @@ export default function OrderProgressTimeline({
   fallbackImage = "",
 }) {
   const [photoGallery, setPhotoGallery] = useState(null);
+  const [, setTimelineClock] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setTimelineClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const items = Array.isArray(order?.items) ? order.items : [];
   const normalizedStatus = String(order?.status || "").toLowerCase();
 
@@ -213,6 +218,7 @@ export default function OrderProgressTimeline({
         const isBatchOrder = items.length > 1;
         const progressSteps = buildCustomerOrderTimelineSteps(order, item, itemIndex);
         const delayedSteps = progressSteps.filter((step) => step.status === "delayed");
+        const projectOverdue = isInstallationDeadlineOverdue(order);
         const image = normalizeOrderImageUrl(
           getItemImage?.(item) || getOrderItemImageSource(item) || fallbackImage
         );
@@ -239,6 +245,12 @@ export default function OrderProgressTimeline({
             </div>
 
             <div className="mt-4 w-full">
+              {projectOverdue && (
+                <div className="mb-3 flex items-center gap-2 rounded-lg border border-rose-200 bg-rose-50 px-3 py-2 text-xs font-semibold text-rose-800 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200" role="status">
+                  <AlertTriangle size={15} aria-hidden="true" className="shrink-0" />
+                  <span>Project Overdue · estimated installation date has passed</span>
+                </div>
+              )}
               <ol className="flex w-full items-start gap-0 max-[560px]:flex-col">
                 {progressSteps.map((step, stepIndex) => {
                   const isCompleted = step.done || (!isBatchOrder && normalizedStatus === "completed" && step.key === "completed");
@@ -363,8 +375,8 @@ export default function OrderProgressTimeline({
                       <AlertTriangle size={15} aria-hidden="true" className="mt-0.5 shrink-0 text-rose-600" />
                       <div className="min-w-0">
                         <p className="font-medium">{step.label} is delayed</p>
-                        <p className="mt-1 break-words dark:text-rose-200">{step.delayReason || step.notes || "A delay has been reported."}</p>
-                        <p className="mt-1 dark:text-rose-300">Expected resolution: {step.delayExpectedResolution || "Not set"}</p>
+                        <p className="mt-1 break-words dark:text-rose-200">{step.deadlineDelayed ? "The estimated installation date has passed." : step.delayReason || step.notes || "A delay has been reported."}</p>
+                        {!step.deadlineDelayed && <p className="mt-1 dark:text-rose-300">Expected resolution: {step.delayExpectedResolution || "Not set"}</p>}
                       </div>
                     </div>
                   ))}

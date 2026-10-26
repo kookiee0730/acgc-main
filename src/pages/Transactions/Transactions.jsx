@@ -37,7 +37,7 @@ import { recordActivity } from "@/lib/activityLog";
 import ProfileAvatar from "../../components/ui/ProfileAvatar";
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import { getCustomerPaymentProof, getPaymentSummary, getSavedPaymentTermsLabel, getUnresolvedPaymentProofRecords, isPaymentProofConfirmed, validateCustomerPaymentAmount } from "./paymentProofUtils";
-import { getPaymentStatusBadgeClassName, getPaymentStatusLabel, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
+import { getAdminPaymentStatusLabel, getPaymentStatusBadgeClassName, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { uploadAdminPaymentDocument, uploadFiles } from "@/api/uploads";
 import { API_BASE } from "@/api/client";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
@@ -1340,7 +1340,7 @@ function Transactions() {
     { label: "Total Revenue", value: formatCurrency(financialTotals.revenue), detail: "33.33% target profit margin", color: "text-rose-300" },
     { label: "Total Collected", value: formatCurrency(financialTotals.collected), color: "text-emerald-300" },
     { label: "Pending Balance", value: formatCurrency(financialTotals.pending), color: "text-amber-200" },
-    { label: "Completed Projects", value: completedProjects.length.toLocaleString(), color: "text-indigo-300" },
+    { label: "Completed Projects", value: completedProjects.length.toLocaleString(), color: "text-emerald-300" },
     { label: "Average Customer Rating", value: `${averageRating.toFixed(1)} / 5 (${validRatings.length})`, color: "text-orange-300" },
   ];
   const filteredFeedbackOrders = feedbackOrders.filter((order) => {
@@ -2111,7 +2111,7 @@ function Transactions() {
                 return (
               <div className="flex items-center justify-between gap-3 text-sm">
                 <span className={darkMode ? "font-medium text-slate-300" : "font-medium text-slate-600"}>Payment Status Preview</span>
-                <span className={`${statusBadgeBaseClassName} ${getPaymentStatusBadgeClassName(preview.status.key, darkMode)}`}>{getPaymentStatusLabel(preview.status)}</span>
+                <span className={`${statusBadgeBaseClassName} ${getPaymentStatusBadgeClassName(preview.status.key, darkMode)}`}>{getAdminPaymentStatusLabel(preview.status)}</span>
               </div>
                 );
               })()}
@@ -2326,13 +2326,14 @@ function Transactions() {
                       const paymentSummary = getPaymentSummary(order);
                       const amountVal = paymentSummary.totalAmount;
                       const paidAmount = paymentSummary.paidAmount;
+                      const paymentProgress = amountVal > 0 ? Math.min(Math.max((paidAmount / amountVal) * 100, 0), 100) : 0;
                       const amount = hidePaymentAmounts ? "••••••" : `₱${Number(amountVal || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
                       const inspectionLabel = productLabel;
                       const orderType = order.order_type === "walk_in_customer" ? "Walk-in" : "Website Order";
                       const paymentMethod = order.payment_method || (order.acceptance_method === "online" ? "Online" : "Cash");
                       const installDate = order.estimated_installation_date ? formatDateToMMDDYYYY(order.estimated_installation_date) : "—";
                       const projectCategory = isCompletedProject(order) ? "Completed" : "In Progress";
-                      const statusLabel = getPaymentStatusLabel(paymentSummary.status);
+                      const statusLabel = getAdminPaymentStatusLabel(paymentSummary.status);
                       const isFullyPaid = paymentSummary.status.key === "paid";
                       const showNeedsConfirmation = (order.payment_records || []).length > 0
                         ? getUnresolvedPaymentProofRecords(order).length > 0
@@ -2399,14 +2400,23 @@ function Transactions() {
                             </>
                           ) : (
                             <>
-                              <td className="p-4">{renderClientCell(order, customerName)}</td>
-                              <td className="p-4"><div className="font-semibold text-slate-900">{inspectionLabel}</div><div className="text-xs text-slate-500">Order ID: {order.tracking || order._id || order.id || "—"}</div></td>
+                              <td className="p-4"><div className="max-w-[180px]"><p className="truncate text-sm font-semibold text-slate-800">{customerName}</p><p className="mt-1 truncate text-xs text-slate-500">{order.customer?.email || order.customer_email || ""}</p></div></td>
+                              <td className="p-4"><div className="font-semibold text-slate-900">{inspectionLabel}</div></td>
                               <td className="p-4 font-bold text-slate-900">{formatCurrency((Number(amountVal) || 0) * 0.3333)}</td>
-                              <td className="p-4"><div className="font-bold text-emerald-600">{hidePaymentAmounts ? "••••••" : `₱${paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</div><div className="text-xs text-slate-500">of {amount}</div></td>
+                              <td className="p-4">
+                                <div className="font-bold text-emerald-600">{hidePaymentAmounts ? "••••••" : `₱${paidAmount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}</div>
+                                <div className="text-xs text-slate-500">of {amount}</div>
+                                {!hidePaymentAmounts && <div className="mt-2 flex items-center gap-2">
+                                  <div role="progressbar" aria-label="Payment progress" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(paymentProgress)} className={`h-1.5 min-w-16 flex-1 overflow-hidden rounded-full ${darkMode ? "bg-slate-700" : "bg-slate-200"}`}>
+                                    <div className="h-full rounded-full bg-emerald-500 transition-[width]" style={{ width: `${paymentProgress}%` }} />
+                                  </div>
+                                  <span className="shrink-0 text-[10px] font-semibold text-slate-500">{Math.round(paymentProgress)}%</span>
+                                </div>}
+                              </td>
                               <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${paymentMethod === "Online" ? (darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-50 text-rose-700") : (darkMode ? "border border-emerald-400/40 bg-emerald-500/15 text-emerald-300" : "bg-emerald-50 text-emerald-700")}`}>{paymentMethod}</span></td>
                               <td className="p-4"><span className="inline-flex rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs font-semibold text-slate-600">{orderType}</span></td>
                               <td className="p-4 text-sm text-slate-600">{installDate}</td>
-                              <td className="p-4"><span className={`inline-flex rounded-md px-3 py-1 text-xs font-semibold ${projectCategory === "Completed" ? "bg-rose-50 text-rose-700" : "bg-violet-50 text-violet-700"}`}>{projectCategory}</span></td>
+                              <td className="p-4"><span className={`inline-flex rounded-md px-3 py-1 text-xs font-semibold ${projectCategory === "Completed" ? "bg-emerald-50 text-emerald-700 dark:bg-emerald-500/15 dark:text-emerald-300" : "bg-violet-50 text-violet-700"}`}>{projectCategory}</span></td>
                               {activeTable === "receipts" && <td className="p-4"><span className={`inline-flex rounded-full px-3 py-1 text-xs font-semibold ${getWarrantyStatusClass(warrantyStatus)}`}>{warrantyStatus}</span></td>}
                               <td className="p-4"><div className="flex flex-col items-start gap-1.5"><span className={`${statusBadgeBaseClassName} ${getPaymentStatusBadgeClassName(isFullyPaid ? "paid" : paymentSummary.status.key, darkMode)}`}>{statusLabel}</span>{showNeedsConfirmation && (<span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-semibold ${darkMode ? "border border-rose-400/40 bg-rose-500/15 text-rose-300" : "bg-rose-100 text-rose-700"}`}><span aria-hidden="true">🔔</span>Needs Confirmation</span>)}</div></td>
                               <td
@@ -2481,10 +2491,9 @@ function Transactions() {
                       <div className="min-w-0">
                         <p className="truncate text-sm font-bold text-slate-900">{productLabel}</p>
                         <p className="mt-1 text-xs text-slate-500">{customerName}</p>
-                        <p className="mt-1 break-all text-[10px] text-slate-500">Order ID: {order.tracking || order._id || order.id || "—"}</p>
                       </div>
                       <span className={`${statusBadgeBaseClassName} text-[10px] ${getPaymentStatusBadgeClassName(isFullyPaid ? "paid" : paymentSummary.status.key, darkMode)}`}>
-                        {isFullyPaid ? "Fully Paid" : getPaymentStatusLabel(paymentSummary.status)}
+                        {isFullyPaid ? "Fully Paid" : getAdminPaymentStatusLabel(paymentSummary.status)}
                       </span>
                     </div>
                     <div className="mt-3 grid grid-cols-2 gap-2 text-xs text-slate-600">
@@ -2665,7 +2674,7 @@ function Transactions() {
                           <option value="all">All Payment Status</option>
                           <option value="pending">Pending</option>
                           <option value="partial_downpayment">Partial Downpayment</option>
-                          <option value="downpayment">Downpayment Completed</option>
+                          <option value="downpayment">Paid</option>
                           <option value="partial">Partial Payment</option>
                           <option value="paid">Fully Paid</option>
                         </select>
@@ -2820,7 +2829,7 @@ function Transactions() {
                       <div><span className="text-xs text-slate-500">Remaining shortfall</span><p className="mt-1 font-bold text-amber-600">{formatCurrency(lowDownpaymentWarning.remainingDownpayment)}</p></div>
                       <div><span className="text-xs text-slate-500">Remaining project balance</span><p className="mt-1 font-bold">{formatCurrency(lowDownpaymentWarning.remainingProjectBalance)}</p></div>
                     </div>
-                    <p className={`rounded-lg px-3 py-2 text-xs ${darkMode ? "bg-amber-500/10 text-amber-200" : "bg-amber-50 text-amber-900"}`}>The configured downpayment remains unchanged. Approval verifies only the submitted amount; it does not mark the downpayment completed.</p>
+                    <p className={`rounded-lg px-3 py-2 text-xs ${darkMode ? "bg-amber-500/10 text-amber-200" : "bg-amber-50 text-amber-900"}`}>The configured downpayment remains unchanged. Approval verifies only the submitted amount; it does not mark the downpayment as paid.</p>
                     <label htmlFor="downpayment-seller-approval-party" className="block text-xs font-bold">Seller or authorized approving party <span className="text-red-500">(required)</span></label>
                     <input
                       id="downpayment-seller-approval-party"

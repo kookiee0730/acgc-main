@@ -28,6 +28,7 @@ import {
   uploadPrivatePaymentDocumentBuffer,
 } from "../config/cloudinary.js";
 import { getPaymentDocumentType } from "../services/paymentDocuments.js";
+import { attachOrderScheduleOverdue } from "../services/orderScheduleOverdue.js";
 import {
   getOrderPaymentAmounts,
   getOrderPaymentStatus,
@@ -65,6 +66,33 @@ const getPhilippineDateKey = (value) => {
   }).formatToParts(date);
   const values = Object.fromEntries(parts.map(({ type, value: partValue }) => [type, partValue]));
   return `${values.year}-${values.month}-${values.day}`;
+};
+
+const clearGeneratedRescheduleDelay = (stages, resolvedAt = new Date()) => {
+  let changed = false;
+  (stages || []).forEach((stage) => {
+    if (stage?.delayReason !== "Installation rescheduled"
+      || stage?.delayNotes !== "Installation date changed in Progress Monitor.") return;
+    const stageKey = String(stage.key || stage.name || "").toLowerCase().replace(/[\s-]+/g, "_");
+    const isSchedulingStage = stageKey.includes("schedul");
+    const isAcceptedSchedule = isSchedulingStage && stage.customerResponse === "accepted";
+    stage.status = isAcceptedSchedule ? "done" : stage.installationStartedAt ? "in_progress" : "pending";
+    stage.completed = isAcceptedSchedule;
+    stage.delayReason = "";
+    stage.delayExpectedResolution = null;
+    stage.delayReportedAt = null;
+    stage.delayReportedBy = "";
+    stage.delayNotes = "";
+    stage.delayHistory = (stage.delayHistory || []).map((entry) => (
+      entry.reason === "Installation rescheduled"
+        && entry.notes === "Installation date changed in Progress Monitor."
+        && !entry.resolvedAt
+        ? { ...entry, status: "resolved", resolvedAt }
+        : entry
+    ));
+    changed = true;
+  });
+  return changed;
 };
 
 const getPhilippineDateRange = (value) => {
@@ -687,8 +715,16 @@ export const listOrders = async (req, res) => {
       .populate("items.product_id", "image_url image images name product_name category product_type unit pricing_method unit_price base_price price_per_sqft price_per_blade blade_count blade_glass_types sell_blades_only sell_with_frame blade_frame_types allow_custom_frame_size custom_frame_price minimum_blades maximum_blades customer_can_choose_blade_count default_blade_glass_type default_sale_mode default_frame_type show_price_per_blade customization customization_fee extra_charges size_limits estimated_price estimated_price_override estimated_area width height measurement_unit standard_size")
       .lean();
 
+    orders.forEach(attachOrderScheduleOverdue);
+
     if (req.user.role === "customer" && orders.length > 0) {
       orders.forEach((order) => {
+        delete order.progress_notes;
+        delete order.progress_audit;
+        (order.items || []).forEach((item) => {
+          delete item.progress_notes;
+          delete item.progress_audit;
+        });
         (order.payment_records || []).forEach((record) => {
           record.supporting_documents = (record.supporting_documents || []).map((document) => ({
             _id: document._id,
@@ -866,10 +902,17 @@ export const createOrderAsAdmin = async (req, res) => {
       contract_number,
       contract_signed_date,
       inspection_date,
+      inspection_time,
       estimated_installation_date,
+      estimated_installation_time,
       inspection_notes,
       is_rush_order,
     } = req.body;
+
+    const isValidScheduleTime = (value) => value === undefined || value === null || value === "" || /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value));
+    if (!isValidScheduleTime(inspection_time) || !isValidScheduleTime(estimated_installation_time)) {
+      return res.status(400).json({ success: false, message: "Inspection and installation times must use a valid 24-hour time." });
+    }
 
     if (req.body.manual_override !== undefined && req.body.manual_override !== null && String(req.body.manual_override).trim() !== ""
       && (!Number.isFinite(Number(req.body.manual_override)) || Number(req.body.manual_override) < 0)) {
@@ -978,8 +1021,10 @@ export const createOrderAsAdmin = async (req, res) => {
       inspection_status: hasSignedWalkInContract ? "completed" : inspection_date ? "scheduled" : "pending",
       inspection_completed_at: hasSignedWalkInContract ? walkInSignedAt : null,
       inspection_date: inspection_date ? new Date(inspection_date) : null,
+      inspection_time: inspection_time || "",
       is_rush_order: is_rush_order === true,
       estimated_installation_date: estimated_installation_date ? new Date(estimated_installation_date) : null,
+      estimated_installation_time: estimated_installation_time || "",
       inspection_notes: inspection_notes || "",
       // Walk-in specific
       acceptance_method: hasSignedWalkInContract ? "walk_in_signed_contract" : isWalkInCustomer ? "walk_in_pending_contract" : "online",
@@ -1054,7 +1099,7 @@ export const trackOrder = async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized to view this order" });
     }
 
-    res.json({ success: true, order });
+    res.json({ success: true, order: attachOrderScheduleOverdue(order) });
   } catch (error) {
     console.error("Track order error:", error);
     res.status(500).json({ success: false, message: "Unable to track order", error: error.message });
@@ -1115,8 +1160,8 @@ export const getAdminOrders = async (req, res) => {
       "customer customer_name customer_email customer_phone has_account_on_website shipping_address items total_amount estimated_cost final_project_cost manual_override",
       "payment_terms downpayment_amount required_downpayment_amount amount_paid payment_status payment_records payment_proof_amount payment_proof_submitted_at payment_proof_confirmed_at payment_proof_file_name payment_proof_file_url payment_method transaction_number",
       "status cancellation_reason customer_cancellation_count_at_cancel is_rush_order order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
-      "tracking inspection_status inspection_completed_at inspection_date estimated_installation_date inspection_notes issues_found",
-      "progress progress_stages attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
+      "tracking inspection_status inspection_completed_at inspection_date inspection_time estimated_installation_date estimated_installation_time inspection_notes issues_found",
+      "progress progress_stages progress_notes progress_audit attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
     ].join(" ");
     const moduleFields = {
       dashboard: [
@@ -1125,7 +1170,7 @@ export const getAdminOrders = async (req, res) => {
       ].join(" "),
       notifications: [
         "customer customer_name customer_email customer_phone items total_amount final_project_cost",
-        "status cancellation_reason customer_cancellation_count_at_cancel order_type contract_status contractStatus contractSentAt payment_status payment_records payment_proof_amount payment_proof_submitted_at tracking inspection_status inspection_date createdAt updatedAt",
+        "status cancellation_reason customer_cancellation_count_at_cancel order_type contract_status contractStatus contractSentAt payment_status payment_records payment_proof_amount payment_proof_submitted_at tracking inspection_status inspection_date inspection_time estimated_installation_date estimated_installation_time createdAt updatedAt",
       ].join(" "),
       transactions: baseFields,
       site_inspection: baseFields,
@@ -1148,6 +1193,8 @@ export const getAdminOrders = async (req, res) => {
       query,
       limitValue ? Order.countDocuments(filter) : Promise.resolve(undefined),
     ]);
+
+    orders.forEach(attachOrderScheduleOverdue);
 
     res.json({
       success: true,
@@ -1177,7 +1224,7 @@ export const getAdminOrderById = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
 
-    res.json({ success: true, order });
+    res.json({ success: true, order: attachOrderScheduleOverdue(order) });
   } catch (error) {
     console.error("Get admin order error:", error);
     res.status(500).json({ success: false, message: "Unable to fetch order", error: error.message });
@@ -2681,7 +2728,7 @@ export const respondToInstallationSchedule = async (req, res) => {
         const installationStage = Array.isArray(order.progress_stages)
           ? order.progress_stages.find((stage) => {
               const stageKey = (stage.key || stage.name || "").toString().toLowerCase().replace(/\s+/g, "_");
-              return stageKey === "installation";
+              return stageKey === "installation" || stageKey.startsWith("installation_");
             })
           : null;
         if (installationStage && !installationStage.completed && installationStage.status !== "in_progress") {
@@ -2727,7 +2774,7 @@ export const respondToInstallationSchedule = async (req, res) => {
       const installationStage = Array.isArray(order.progress_stages)
         ? order.progress_stages.find((stage) => {
             const stageKey = (stage.key || stage.name || "").toString().toLowerCase().replace(/\s+/g, "_");
-            return stageKey === "installation";
+            return stageKey === "installation" || stageKey.startsWith("installation_");
           })
         : null;
       if (installationStage && !installationStage.completed) {
@@ -2776,7 +2823,12 @@ export const updateOrderInspection = async (req, res) => {
     }
 
     const { orderId } = req.params;
-    const { inspection_status, inspection_date, estimated_installation_date, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode, is_rush_order } = req.body;
+    const { inspection_status, inspection_date, inspection_time, estimated_installation_date, estimated_installation_time, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode, is_rush_order } = req.body;
+
+    const isValidScheduleTime = (value) => value === undefined || value === null || value === "" || /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value));
+    if (!isValidScheduleTime(inspection_time) || !isValidScheduleTime(estimated_installation_time)) {
+      return res.status(400).json({ success: false, message: "Inspection and installation times must use a valid 24-hour time." });
+    }
 
     if (manual_override !== undefined && manual_override !== null && String(manual_override).trim() !== ""
       && (!Number.isFinite(Number(manual_override)) || Number(manual_override) < 0)) {
@@ -2794,6 +2846,7 @@ export const updateOrderInspection = async (req, res) => {
         updateData.inspection_status = "scheduled";
       }
     }
+    if (inspection_time !== undefined) updateData.inspection_time = inspection_time || "";
     if (estimated_installation_date !== undefined) {
       const parsedInstallationDate = estimated_installation_date ? new Date(estimated_installation_date) : null;
       if (parsedInstallationDate && Number.isNaN(parsedInstallationDate.getTime())) {
@@ -2801,6 +2854,7 @@ export const updateOrderInspection = async (req, res) => {
       }
       updateData.estimated_installation_date = parsedInstallationDate;
     }
+    if (estimated_installation_time !== undefined) updateData.estimated_installation_time = estimated_installation_time || "";
     if (inspection_notes !== undefined) updateData.inspection_notes = inspection_notes;
     if (issues_found !== undefined) updateData.issues_found = issues_found;
     if (shipping_address !== undefined) updateData.shipping_address = normalizeAddress(shipping_address || "");
@@ -2984,6 +3038,18 @@ export const updateOrderInspection = async (req, res) => {
 
     const previousProjectTotal = getFinalProjectCost(order);
     Object.assign(order, updateData);
+    if (estimated_installation_date !== undefined) {
+      const nextInstallationDate = order.estimated_installation_date
+        ? new Date(order.estimated_installation_date).getTime()
+        : null;
+      if (nextInstallationDate !== previousInstallationDate) {
+        const resolvedAt = new Date();
+        if (clearGeneratedRescheduleDelay(order.progress_stages, resolvedAt)) order.markModified("progress_stages");
+        (order.items || []).forEach((item, itemIndex) => {
+          if (clearGeneratedRescheduleDelay(item.progress_stages, resolvedAt)) order.markModified(`items.${itemIndex}.progress_stages`);
+        });
+      }
+    }
     if (optionalChargeChanges.length > 0) {
       const actor = req.user || {};
       order.price_change_history = order.price_change_history || [];
@@ -3008,7 +3074,7 @@ export const updateOrderInspection = async (req, res) => {
     order.payment_status = getOrderPaymentStatus(order);
     await order.save();
 
-    res.json({ success: true, order });
+    res.json({ success: true, order: attachOrderScheduleOverdue(order) });
     const currentInstallationDate = order.estimated_installation_date
       ? new Date(order.estimated_installation_date).getTime()
       : null;
@@ -3070,6 +3136,69 @@ export const updateOrderProgress = async (req, res) => {
     const previousStages = isItemProgressUpdate && order.items[itemIndex].progress_stages?.length
       ? order.items[itemIndex].progress_stages
       : order.progress_stages || [];
+    if (req.body.expectedUpdatedAt && order.updatedAt
+      && new Date(req.body.expectedUpdatedAt).getTime() !== new Date(order.updatedAt).getTime()) {
+      return res.status(409).json({ success: false, message: "This project was updated by someone else. Reload it and review the latest progress before saving." });
+    }
+    const correctionReason = String(req.body.correctionReason || "").trim();
+    const auditTarget = isItemProgressUpdate ? order.items[itemIndex] : order;
+    const auditEvents = [];
+    const actor = req.user || {};
+    const actorName = [actor.first_name, actor.last_name].filter(Boolean).join(" ") || actor.name || actor.email || "Staff";
+    if (typeof req.body.progress_notes === "string") {
+      if (req.body.progress_notes.length > 4000) return res.status(400).json({ success: false, message: "Additional notes must be 4,000 characters or fewer." });
+      const nextNotes = req.body.progress_notes.trim();
+      const previousNotes = String(auditTarget.progress_notes || "");
+      if (nextNotes !== previousNotes) {
+        auditTarget.progress_notes = nextNotes;
+        auditEvents.push({ type: "notes_updated", at: new Date(), by: actor._id || null, byName: actorName });
+      }
+    }
+    if (Array.isArray(stages)) {
+      const wasDone = (stage) => Boolean(stage?.completed) || ["done", "completed"].includes(String(stage?.status || "").toLowerCase());
+      const oldByIdentity = new Map(previousStages.map((stage, index) => [String(stage.key || stage.name || index), stage]));
+      for (const [index, nextStage] of stages.entries()) {
+        const identity = String(nextStage.key || nextStage.name || index);
+        const prior = oldByIdentity.get(identity);
+        const nowDone = wasDone(nextStage);
+        if (nowDone && !wasDone(prior)) {
+          const earlierIncomplete = previousStages.slice(0, index).find((stage) => !wasDone(stage));
+          if (earlierIncomplete) {
+            return res.status(409).json({ success: false, message: `Complete ${earlierIncomplete.name || "the previous stage"} before completing ${nextStage.name || "this stage"}.` });
+          }
+          const incompleteSub = (nextStage.subStages || []).find((sub) => !wasDone(sub));
+          if (incompleteSub) return res.status(409).json({ success: false, message: `Complete all sub-stages before completing ${nextStage.name || "this stage"}.` });
+          for (const sub of nextStage.subStages || []) {
+            const previousSub = (prior?.subStages || []).find((entry) => entry.name === sub.name);
+            if (wasDone(sub) && !wasDone(previousSub) && !(sub.images || []).length) {
+              return res.status(400).json({ success: false, message: `Add proof photos before completing ${sub.name || "the sub-stage"}.` });
+            }
+          }
+          auditEvents.push({ type: "stage_completed", stageKey: identity, stageName: nextStage.name || "Stage", note: nextStage.completionNote || "", at: new Date(), by: actor._id || null, byName: actorName });
+        }
+        if (!nowDone && wasDone(prior)) {
+          const hasLaterDone = previousStages.slice(index + 1).some(wasDone);
+          const hasDoneSubstage = (prior?.subStages || []).some(wasDone);
+          if (!correctionReason) return res.status(400).json({ success: false, message: "Enter a correction reason before undoing a saved completion." });
+          if (hasLaterDone || hasDoneSubstage) return res.status(409).json({ success: false, message: "This stage has completed dependent work. Correct the later stage or sub-stage first." });
+          auditEvents.push({ type: "stage_completion_reverted", stageKey: identity, stageName: nextStage.name || "Stage", reason: correctionReason, at: new Date(), by: actor._id || null, byName: actorName });
+        }
+        const priorSubs = new Map((prior?.subStages || []).map((sub) => [sub.name, sub]));
+        for (const sub of nextStage.subStages || []) {
+          const previousSub = priorSubs.get(sub.name);
+          if (wasDone(sub) && !wasDone(previousSub)) {
+            if (!(sub.images || []).length) return res.status(400).json({ success: false, message: `Add proof photos before completing ${sub.name || "the sub-stage"}.` });
+            auditEvents.push({ type: "substage_completed", stageKey: identity, stageName: nextStage.name || "Stage", subStageName: sub.name || "Sub-stage", note: sub.completionNote || "", at: new Date(), by: actor._id || null, byName: actorName });
+          }
+          if (!wasDone(sub) && wasDone(previousSub)) {
+            if (!correctionReason) return res.status(400).json({ success: false, message: "Enter a correction reason before undoing a saved completion." });
+            const laterSubDone = (prior?.subStages || []).some((entry) => entry.name !== sub.name && wasDone(entry));
+            if (laterSubDone || previousStages.slice(index + 1).some(wasDone)) return res.status(409).json({ success: false, message: "This sub-stage has completed dependent work. Correct that work first." });
+            auditEvents.push({ type: "substage_completion_reverted", stageKey: identity, stageName: nextStage.name || "Stage", subStageName: sub.name || "Sub-stage", reason: correctionReason, at: new Date(), by: actor._id || null, byName: actorName });
+          }
+        }
+      }
+    }
     const previousDelayEventKeys = new Set(previousStages.flatMap((stage, index) =>
       (stage.delayHistory || []).map((entry) => getDelayEventKey(stage, entry, index))
     ));
@@ -3115,6 +3244,7 @@ export const updateOrderProgress = async (req, res) => {
         status: ["pending", "in_progress", "done", "delayed", "on_hold"].includes(s.status) ? s.status : s.completed ? "done" : "pending",
         completed: !!s.completed,
         date: s.date ? new Date(s.date) : null,
+        completionNote: String(s.completionNote || "").slice(0, 1000),
         delayReason: s.delayReason || "",
         delayExpectedResolution: s.delayExpectedResolution ? new Date(s.delayExpectedResolution) : null,
         delayNotes: s.delayNotes || "",
@@ -3155,6 +3285,7 @@ export const updateOrderProgress = async (req, res) => {
                 : "pending",
               completed: !!sub.completed,
               date: sub.date ? new Date(sub.date) : null,
+              completionNote: String(sub.completionNote || "").slice(0, 1000),
               images: Array.isArray(sub.images) ? sub.images : [],
             }))
           : [],
@@ -3211,22 +3342,7 @@ export const updateOrderProgress = async (req, res) => {
 
         if (scheduleStage) {
           scheduleStage.proposedInstallationDate = requestedInstallationDate;
-          if (isRescheduled) {
-            const reportedAt = new Date();
-            const reason = "Installation rescheduled";
-            const notes = "Installation date changed in Progress Monitor.";
-            scheduleStage.status = "delayed";
-            scheduleStage.completed = false;
-            scheduleStage.delayReason = reason;
-            scheduleStage.delayExpectedResolution = requestedInstallationDate;
-            scheduleStage.delayReportedAt = reportedAt;
-            scheduleStage.delayReportedBy = req.user?.email || "";
-            scheduleStage.delayNotes = notes;
-            scheduleStage.delayHistory = [
-              ...(scheduleStage.delayHistory || []),
-              { reason, expectedResolution: requestedInstallationDate, notes, reportedAt, reportedBy: req.user?.email || "", status: "delayed", resolvedAt: null },
-            ];
-          }
+          if (isRescheduled) clearGeneratedRescheduleDelay([scheduleStage]);
         }
       }
 
@@ -3347,6 +3463,11 @@ export const updateOrderProgress = async (req, res) => {
       }
     }
 
+    if (auditEvents.length) {
+      auditTarget.progress_audit = [...(auditTarget.progress_audit || []), ...auditEvents].slice(-500);
+      auditTarget.markModified?.("progress_audit");
+    }
+
     await order.save();
 
     const notificationStages = isItemProgressUpdate
@@ -3411,9 +3532,12 @@ export const updateOrderProgress = async (req, res) => {
       }
     }
 
-    res.json({ success: true, order });
+    res.json({ success: true, order: attachOrderScheduleOverdue(order) });
   } catch (error) {
     console.error("Update order progress error:", error);
+    if (error?.name === "VersionError") {
+      return res.status(409).json({ success: false, message: "This project changed while you were saving. Reload it and review the latest progress." });
+    }
     res.status(500).json({ success: false, message: "Unable to update order progress", error: error.message });
   }
 };

@@ -4,7 +4,7 @@
   "description": "",
   "main": "server.js",
   "scripts": {
-    "test": "node --test services/adminRecoverySecurity.test.js services/backupCrypto.test.js services/backupRecoverySecurity.test.js services/frontendUrl.test.js services/orderEmails.test.js services/passwordPolicy.test.js services/transactionWorkbook.test.js controllers/reportController.test.js",
+    "test": "node --test services/adminRecoverySecurity.test.js services/backupCrypto.test.js services/backupRecoverySecurity.test.js services/frontendUrl.test.js services/orderEmails.test.js services/orderScheduleOverdue.test.js services/passwordPolicy.test.js services/transactionWorkbook.test.js controllers/reportController.test.js",
     "start": "node server.js",
     "dev": "nodemon --quiet server.js",
     "verify:cloudinary": "node scripts/verify-cloudinary.js",

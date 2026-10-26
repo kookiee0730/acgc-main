@@ -25,7 +25,7 @@ import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import { recordActivity } from "@/lib/activityLog";
-import { buildBatchProductTimelineStages, calculateStageProgressPercent } from "@/lib/orderTimeline";
+import { buildBatchProductTimelineStages, calculateStageProgressPercent, isInstallationDeadlineOverdue } from "@/lib/orderTimeline";
 
 const normalizeStageStatus = (value) =>
   String(value ?? "")
@@ -123,6 +123,9 @@ export const getProjectStatus = (order, stages = order?.progress_stages ?? []) =
     });
     if (allCompleted) return "Completed";
   }
+
+  const projectTimelineOrder = { ...order, progress_stages: stages, items: [{ progress_stages: stages }] };
+  if (isInstallationDeadlineOverdue(projectTimelineOrder)) return "Delayed";
 
   if (hasDelayedStage(stages)) return "Delayed";
 
@@ -238,6 +241,8 @@ const buildProjectRows = (order) => {
       `${order.customer?.first_name || ""} ${order.customer?.last_name || ""}`.trim() ||
       "Unknown";
 
+    const projectTimelineOrder = { ...order, progress_stages: stages, items: [{ progress_stages: stages }] };
+
     return {
       id: item?._id || item?.id || `${orderId}-item-${index}`,
       orderId,
@@ -252,8 +257,9 @@ const buildProjectRows = (order) => {
       installation: formatDateToMMMDDYYYY(order.estimated_installation_date) || "TBD",
       estimated_installation_date: order.estimated_installation_date,
       progress: stages.length > 0
-        ? calculateStageProgressPercent(buildBatchProductTimelineStages(order, item || { progress_stages: stages }, index))
+        ? calculateStageProgressPercent(buildBatchProductTimelineStages(order, item || { progress_stages: stages }, index, { applyDeadlineDelay: false }))
         : itemProgress ?? mapProgressFromStatus(order.status, order.progress),
+      isOverdue: isInstallationDeadlineOverdue(projectTimelineOrder),
       stages,
       status: getProjectStatus(order, stages),
       statusKey: order.status,
@@ -264,10 +270,19 @@ const buildProjectRows = (order) => {
       createdAt: order.createdAt,
       updatedAt: order.updatedAt,
       contract_terms: order.contract_terms,
+      progress_notes: item?.progress_notes ?? order.progress_notes ?? "",
+      progress_audit: item?.progress_audit ?? order.progress_audit ?? [],
       rawOrder: order,
       itemIndex: index,
     };
   });
+};
+
+const getCurrentStageName = (stages = []) => {
+  const list = Array.isArray(stages) ? stages : [];
+  const active = list.find((stage) => !stage.completed && String(stage.status || "").toLowerCase() === "in_progress");
+  const next = active || list.find((stage) => !stage.completed && !["done", "completed"].includes(String(stage.status || "").toLowerCase()));
+  return next?.name || (list.length && list.every((stage) => stage.completed) ? "All stages complete" : "Not started");
 };
 
 const isSameProjectRow = (currentProject, targetProject) => {
@@ -338,6 +353,19 @@ function ProgressMonitor() {
 
   const [projectList, setProjectList] = useState([]);
   const [projectLoading, setProjectLoading] = useState(false);
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      setProjectList((current) => current.map((project) => {
+        const order = { ...(project.rawOrder || project), progress_stages: project.stages, items: [{ progress_stages: project.stages }] };
+        const isOverdue = isInstallationDeadlineOverdue(order);
+        const status = getProjectStatus(order, project.stages);
+        return isOverdue === project.isOverdue && status === project.status
+          ? project
+          : { ...project, isOverdue, status };
+      }));
+    }, 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const projectStatusOptions = [
     "All",
     "Pending",
@@ -474,6 +502,9 @@ function ProgressMonitor() {
           status: updatedProject.status,
           estimated_installation_date: updatedProject.installation,
           stages: updatedProject.stages,
+          progress_notes: updatedProject.progress_notes || "",
+          expectedUpdatedAt: updatedProject.rawOrder?.updatedAt || "",
+          correctionReason: updatedProject.correctionReason || "",
           proof_images: [],
           ...(updatedProject.rawOrder?.items?.length > 1 ? { itemIndex: updatedProject.itemIndex } : {}),
         });
@@ -488,6 +519,8 @@ function ProgressMonitor() {
           updatedProject = {
             ...updatedProject,
             rawOrder: savedOrder,
+            progress_notes: savedItem?.progress_notes ?? savedOrder.progress_notes ?? "",
+            progress_audit: savedItem?.progress_audit ?? savedOrder.progress_audit ?? [],
             statusKey: savedOrder.status,
             contract_status: savedOrder.contract_status,
             payment_status: savedOrder.payment_status,
@@ -905,6 +938,8 @@ function ProgressMonitor() {
                             })()}
                           </div>
                           <span className="font-semibold text-sm">{project.progress}%</span>
+                          <p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Current: {getCurrentStageName(project.stages)}</p>
+                          {project.isOverdue && <span className={`mt-1 inline-flex rounded-full px-2 py-0.5 text-[10px] font-bold ${darkMode ? "bg-rose-950/60 text-rose-200" : "bg-rose-100 text-rose-800"}`}>Project Overdue</span>}
                         </td>
                         {statusFilter === "All" && <td className="p-4"><span className={`rounded-full px-3 py-1 ${darkMode ? "bg-slate-800 text-slate-200" : "bg-gray-100 text-slate-700"}`}>{project.status}</span></td>}
                         <td className="py-3 pl-4 pr-6">
@@ -916,7 +951,7 @@ function ProgressMonitor() {
                               <button onClick={() => setStartConfirm(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
                                 <Play size={18} />
                               </button>
-                            ) : Number(project.progress) < 100 && (
+                            ) : (
                               <button onClick={() => { setSelectedProject(project); setShowEditModal(true); }} className={`rounded-lg p-2 ${darkMode ? "bg-amber-950/60 text-amber-300 hover:bg-amber-900/70" : "bg-yellow-100 text-yellow-600"}`}>
                                 <Pencil size={18} />
                               </button>
@@ -966,6 +1001,8 @@ function ProgressMonitor() {
                     <div>
                       <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-gray-400"}`}>Progress</p>
                       <p className={`mt-1 font-semibold ${darkMode ? "text-slate-100" : "text-gray-900"}`}>{project.progress}%</p>
+                      <p className={`mt-1 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Current: {getCurrentStageName(project.stages)}</p>
+                      {project.isOverdue && <p className="mt-1 text-[11px] font-semibold text-rose-700 dark:text-rose-300">Project Overdue</p>}
                     </div>
                     <div>
                       <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-gray-400"}`}>Inspection</p>
@@ -984,7 +1021,7 @@ function ProgressMonitor() {
                       <button onClick={() => setStartConfirm(project)} disabled={startingProjectId === project.id} className={`rounded-lg p-2 disabled:cursor-wait disabled:opacity-50 ${darkMode ? "bg-emerald-950/60 text-emerald-300 hover:bg-emerald-900/70" : "bg-emerald-100 text-emerald-700"}`} title="Start project at Cutting" aria-label={`Start ${project.product} at Cutting`}>
                         <Play size={18} />
                       </button>
-                    ) : Number(project.progress) < 100 && (
+                    ) : (
                       <button onClick={() => { setSelectedProject(project); setShowEditModal(true); }} className={`rounded-lg p-2 ${darkMode ? "bg-amber-950/60 text-amber-300 hover:bg-amber-900/70" : "bg-yellow-100 text-yellow-600"}`}>
                         <Pencil size={18} />
                       </button>

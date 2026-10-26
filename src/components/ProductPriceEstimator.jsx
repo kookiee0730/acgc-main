@@ -298,7 +298,9 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
         </div>
       ))}
 
-      <label className="mt-4 block">
+      <div className={isBladeEstimator ? "mt-4 grid gap-4 sm:grid-cols-2 sm:items-stretch" : "contents"}>
+      <div className={isBladeEstimator ? "min-w-0 space-y-3" : "contents"}>
+      <label className={isBladeEstimator ? "block" : "mt-4 block"}>
         <span className={labelClass}>Quantity</span>
         <input
           type="number"
@@ -311,7 +313,7 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
       </label>
 
       {isBladeEstimator && (
-        <div className={compact ? "mt-4 space-y-3" : `mt-4 space-y-3 rounded-lg border p-3 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-slate-50"}`}>
+        <div className={compact ? "space-y-3" : `${isBladeEstimator ? "" : "mt-4 "}space-y-3 rounded-lg border p-3 ${darkMode ? "border-slate-700 bg-slate-800" : "border-slate-200 bg-slate-50"}`}>
           <label className="block">
             <span className={labelClass}>Glass type</span>
             <select value={form.blade_glass_type || selectedGlass?.name || ""} onChange={(event) => updateForm({ blade_glass_type: event.target.value })} className={fieldClass}>
@@ -372,8 +374,11 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
         </div>
       )}
 
+      </div>
+      <div className={isBladeEstimator ? "min-w-0 flex h-full flex-col gap-4" : "contents"}>
+
       {(product.extra_charges || []).some((charge) => charge.is_optional && charge.is_active !== false) && (
-        <div className="mt-4 space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3">
+        <div className={`${isBladeEstimator ? "" : "mt-4 "}space-y-2 rounded-lg border border-slate-200 bg-slate-50 p-3`}>
           <p className={labelClass}>Optional charges</p>
           {(product.extra_charges || []).map((charge, index) => {
             if (!charge.is_optional || charge.is_active === false) return null;
@@ -403,7 +408,7 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
       )}
 
       {hasEstimate ? (
-        <div className={`mt-4 space-y-3 text-sm ${textClass}`} aria-live="polite">
+        <div className={`${isBladeEstimator ? "flex flex-1 flex-col justify-between " : "mt-4 "}space-y-3 text-sm ${textClass}`} aria-live="polite">
           <div className="flex items-center justify-between gap-3">
             <span className="inline-flex items-center gap-2"><Ruler size={13} aria-hidden="true" />{isBladeEstimator ? "Blades" : isMeterEstimator ? "Length" : isPieceEstimator ? "Quantity" : "Area"}</span>
             <span className={`font-bold ${strongClass}`}>{isBladeEstimator ? bladeCount : result?.areaDisplay || "N/A"}</span>
@@ -434,9 +439,11 @@ function ProductPriceEstimator({ product, form, onFormChange, darkMode = false, 
         </div>
       )}
 
-      <p className={`mt-2 text-[11px] font-medium leading-4 ${darkMode ? "text-slate-500" : "text-slate-500"}`}>
+      <p className={`${isBladeEstimator ? "" : "mt-2 "}text-[11px] font-medium leading-4 ${darkMode ? "text-slate-500" : "text-slate-500"}`}>
         Final pricing is subject to negotiation during shop discussion or on-site inspection.
       </p>
+      </div>
+      </div>
     </section>
   );
 }

@@ -56,7 +56,7 @@ export const getOrderStatusClasses = (status) => {
   const normalized = normalizeOrderStatus(status);
   switch (normalized) {
     case "completed":
-      return "bg-red-50 text-red-700 border border-red-200";
+      return "bg-emerald-50 text-emerald-700 border border-emerald-200 dark:bg-emerald-500/15 dark:text-emerald-300 dark:border-emerald-500/30";
     case "awaiting contract sign off":
     case "contract sent":
       return "bg-sky-50 text-sky-800 border border-sky-200";

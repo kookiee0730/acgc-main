@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildBatchProductTimelineStages, buildOrderTimelineStages, calculateStageProgressPercent } from "./orderTimeline";
+import { buildBatchProductTimelineStages, buildOrderTimelineStages, calculateStageProgressPercent, isInstallationDeadlineOverdue } from "./orderTimeline";
 import { buildCustomerOrderTimelineSteps, formatOrderItemMeasurements, getOrderItemImageSource, getVisibleCompletedStageSubStages } from "../components/OrderProgressTimeline";
 import { buildStartedProgressStages, getProjectStatus } from "../pages/ProgressMonitor/ProgressMonitor";
 
@@ -299,5 +299,57 @@ describe("buildBatchProductTimelineStages", () => {
       "pending",
     ]);
     expect(calculateStageProgressPercent(stages)).toBe(60);
+  });
+});
+
+describe("automatic installation deadline delay", () => {
+  const deadline = "2026-10-29T00:00:00.000Z";
+  const dueDay = new Date("2026-10-29T04:00:00.000Z");
+  const order = (overrides = {}) => ({
+    status: "processing",
+    contract_status: "accepted",
+    estimated_installation_date: deadline,
+    ...overrides,
+  });
+
+  it("marks every unfinished production stage delayed on the deadline without delaying Completed", () => {
+    const stages = buildBatchProductTimelineStages(order(), { progress_stages: makeStages([], "fabrication") }, 0, { now: dueDay });
+    expect(stages.map(({ status }) => status)).toEqual(["delayed", "delayed", "delayed", "delayed", "pending"]);
+  });
+
+  it("preserves completed stages and their dates while delaying unfinished stages", () => {
+    const savedStages = makeStages(["cutting", "assembly"], "fabrication");
+    savedStages[0].date = "2026-10-20T12:00:00.000Z";
+    const stages = buildBatchProductTimelineStages(order(), { progress_stages: savedStages }, 0, { now: dueDay });
+    expect(stages.slice(0, 2).map(({ status }) => status)).toEqual(["completed", "completed"]);
+    expect(stages.slice(2, 4).map(({ status }) => status)).toEqual(["delayed", "delayed"]);
+    expect(stages[0].date).toContain("Oct-20-2026");
+  });
+
+  it("removes derived delay when the deadline changes to a future date", () => {
+    const updatedOrder = order({ estimated_installation_date: "2026-11-05T00:00:00.000Z" });
+    expect(isInstallationDeadlineOverdue(updatedOrder, dueDay)).toBe(false);
+    expect(buildBatchProductTimelineStages(updatedOrder, { progress_stages: makeStages([], "fabrication") }, 0, { now: dueDay })
+      .map(({ status }) => status)).toEqual(["pending", "pending", "in-progress", "pending", "pending"]);
+  });
+
+  it("keeps unfinished stages delayed when the changed deadline is still past", () => {
+    const updatedOrder = order({ estimated_installation_date: "2026-10-28T00:00:00.000Z" });
+    expect(isInstallationDeadlineOverdue(updatedOrder, dueDay)).toBe(true);
+  });
+
+  it("clears active deadline delay when the project is complete", () => {
+    expect(isInstallationDeadlineOverdue(order({ status: "completed" }), dueDay)).toBe(false);
+  });
+
+  it("derives the same deadline status after reloading and does not change actual progress", () => {
+    const persistedOrder = order();
+    const item = { progress_stages: makeStages([], "fabrication") };
+    const firstView = buildBatchProductTimelineStages(persistedOrder, item, 0, { now: dueDay });
+    const reloadedView = buildBatchProductTimelineStages({ ...persistedOrder }, { ...item }, 0, { now: dueDay });
+    const progressStages = buildBatchProductTimelineStages(persistedOrder, item, 0, { now: dueDay, applyDeadlineDelay: false });
+    expect(reloadedView.map(({ status }) => status)).toEqual(firstView.map(({ status }) => status));
+    expect(calculateStageProgressPercent(firstView)).toBe(calculateStageProgressPercent(progressStages));
+    expect(item.progress_stages.map(({ status }) => status)).toEqual(["pending", "pending", "in_progress", "pending"]);
   });
 });

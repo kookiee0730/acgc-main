@@ -17,6 +17,11 @@ const getValidImages = (images) => (Array.isArray(images) ? images.filter(isVali
 
 export default function OrderTimeline({ order, onOrderChange, audience = "customer", onViewContract = null, darkMode = false }) {
   const [photoGallery, setPhotoGallery] = useState(null);
+  const [, setDeadlineClock] = useState(Date.now());
+  useEffect(() => {
+    const timer = window.setInterval(() => setDeadlineClock(Date.now()), 60_000);
+    return () => window.clearInterval(timer);
+  }, []);
   const [scheduleActionLoading, setScheduleActionLoading] = useState(false);
   const [scheduleActionError, setScheduleActionError] = useState("");
   const [scheduleActionMessage, setScheduleActionMessage] = useState("");

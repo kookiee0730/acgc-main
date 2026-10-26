@@ -36,7 +36,7 @@ const stagesFor = (order) => [
 const installationStagesFor = (order) => stagesFor(order).filter((stage) => {
   const key = String(stage?.key || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const name = String(stage?.name || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  return key === "installation" || name === "installation";
+  return [key, name].some((value) => value === "installation" || value.startsWith("installation_"));
 });
 
 const stageIsComplete = (stage) => (
@@ -81,7 +81,7 @@ const getEligibleReminder = (order, now) => {
       return {
         type: "overdue_payment",
         eventKey: `overdue_payment:${reminderPeriod}`,
-        title: "Outstanding Project Balance",
+        title: "Remaining Balance",
         message: `Installation is complete for order ${order.tracking || order._id}. Your remaining balance is PHP ${remainingAmount.toLocaleString("en-PH", { minimumFractionDigits: 2 })}. Please review your payment details.`,
         stageKey: "installation",
         stageName: "Installation",

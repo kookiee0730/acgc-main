@@ -273,17 +273,6 @@ function Sidebar({ forceRender = false }) {
             onIntent={() => prefetchAdminRoute("/transactions")}
           />}
 
-          {canViewStaffModule("repair_management") && <MenuItem
-            to="/repair-requests"
-            icon={<Wrench size={17} />}
-            label="Repair Management"
-            badge={badges.repairManagement}
-            isOpen={isOpen}
-            active={location.pathname === "/repair-requests"}
-            darkMode={darkMode}
-            onIntent={() => prefetchAdminRoute("/repair-requests")}
-          />}
-
           {canViewStaffModule("progress_monitoring") && <MenuItem
             to="/progress-monitor"
             icon={<ChartNoAxesCombined size={20} />}
@@ -293,6 +282,17 @@ function Sidebar({ forceRender = false }) {
             active={location.pathname === "/progress-monitor"}
             darkMode={darkMode}
             onIntent={() => prefetchAdminRoute("/progress-monitor")}
+          />}
+
+          {canViewStaffModule("repair_management") && <MenuItem
+            to="/repair-requests"
+            icon={<Wrench size={17} />}
+            label="Repair Management"
+            badge={badges.repairManagement}
+            isOpen={isOpen}
+            active={location.pathname === "/repair-requests"}
+            darkMode={darkMode}
+            onIntent={() => prefetchAdminRoute("/repair-requests")}
           />}
 
           {canViewStaffModule("product_management") && <MenuItem

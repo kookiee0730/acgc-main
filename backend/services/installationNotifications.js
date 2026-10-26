@@ -1,7 +1,7 @@
 const isInstallationStage = (stage) => {
   const key = String(stage?.key || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const name = String(stage?.name || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  return key === "installation" || name === "installation";
+  return [key, name].some((value) => value === "installation" || value.startsWith("installation_"));
 };
 
 const isStageInProgress = (stage) =>
@@ -20,7 +20,7 @@ const getStageIdentity = (stage, index) => String(stage?.key || stage?.name || i
 export const isInstallationProgressStage = (stage) => {
   const key = String(stage?.key || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
   const name = String(stage?.name || "").trim().toLowerCase().replace(/[\s-]+/g, "_");
-  return key === "installation" || name === "installation";
+  return [key, name].some((value) => value === "installation" || value.startsWith("installation_"));
 };
 
 export const buildInstallationNotificationEvents = (stages, { itemIndex = null, productName = "" } = {}) => {

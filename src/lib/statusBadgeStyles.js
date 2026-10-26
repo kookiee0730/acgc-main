@@ -4,6 +4,14 @@ export const getPaymentStatusLabel = (status = {}) => (
   status.key === "pending" ? "Awaiting Payment" : status.label || "Unknown"
 );
 
+export const getAdminPaymentStatusLabel = (status = {}) => (
+  status.key === "downpayment"
+    ? "Paid"
+    : status.key === "pending"
+      ? "Awaiting"
+      : getPaymentStatusLabel(status)
+);
+
 export const getPaymentStatusBadgeClassName = (statusKey, darkMode = false) => {
   const palettes = {
     paid: darkMode

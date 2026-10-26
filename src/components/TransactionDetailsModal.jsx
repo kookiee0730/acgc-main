@@ -2,9 +2,16 @@ import { useEffect, useRef, useState } from "react";
 import { XCircle } from "lucide-react";
 import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getPaymentSummary } from "@/pages/Transactions/paymentProofUtils";
-import { getContractSignoffBadgeClassName, getPaymentStatusBadgeClassName, getPaymentStatusLabel, isAwaitingContractSignoff, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
+import { getAdminPaymentStatusLabel, getContractSignoffBadgeClassName, getPaymentStatusBadgeClassName, isAwaitingContractSignoff, statusBadgeBaseClassName } from "@/lib/statusBadgeStyles";
 import { getOrderRepairHistory } from "@/api/repairs";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
+
+const formatScheduleTime = (value) => {
+  const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
+  if (!match) return "";
+  const hour = Number(match[1]);
+  return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
+};
 
 const getInstallationCompletionDate = (order, item = null) => {
   const stages = item?.progress_stages?.length
@@ -150,6 +157,9 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
   const contractNo = order.contract_number || order.contractId || order.tracking || order._id || "N/A";
   const createdDate = order.createdAt || order.updatedAt || order.contract_date || new Date();
   const inspectionDate = formatDateToMMMDDYYYY(order.inspection_date) || "TBD";
+  const inspectionTime = formatScheduleTime(order.inspection_time);
+  const estimatedInstallationDate = formatDateToMMMDDYYYY(order.estimated_installation_date) || "TBD";
+  const estimatedInstallationTime = formatScheduleTime(order.estimated_installation_time);
   const paymentTermsText = order.payment_terms || "50% downpayment, 50% upon completion";
   const hasBatchItems = previewItems.length > 1;
   const getPreviewItemWarranty = (item) => {
@@ -234,7 +244,7 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
         <div ref={contentRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain bg-slate-100 p-3">
           <div className="mb-3 flex flex-wrap gap-2">
             <span className={`${statusBadgeBaseClassName} text-[10px] ${getPaymentStatusBadgeClassName(paymentSummary.status.key, darkMode)}`}>
-              {getPaymentStatusLabel(paymentSummary.status)}
+              {getAdminPaymentStatusLabel(paymentSummary.status)}
             </span>
             <span className={`${statusBadgeBaseClassName} text-[10px] ${awaitingContractSignoff ? getContractSignoffBadgeClassName(darkMode) : darkMode ? "border-blue-400/30 bg-blue-500/10 text-blue-200" : "border-blue-200 bg-blue-100 text-blue-700"}`}>{projectStatus}</span>
             <span className="rounded-md border border-slate-200 bg-white px-2 py-1 text-[10px] font-semibold text-slate-700">{orderType}</span>
@@ -289,7 +299,8 @@ function TransactionDetailsModal({ order, onClose, onViewContract, scrollToWarra
                 <div className="space-y-2 text-[13px] text-slate-700">
                   <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Contract No.</span><span className="font-semibold text-slate-800">{contractNo}</span></div>
                   <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Date Created</span><span className="font-semibold text-slate-800">{formatDateToMMMDDYYYY(createdDate)}</span></div>
-                  <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Inspection Date</span><span className="font-semibold text-slate-800">{inspectionDate}</span></div>
+                  <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Inspection Date</span><span className="font-semibold text-slate-800">{inspectionDate}{inspectionTime && <span className="ml-1 text-xs font-medium text-slate-500">{inspectionTime}</span>}</span></div>
+                  <div className="flex items-center justify-between gap-4 border-b border-slate-200 pb-2"><span className="text-slate-600">Est. Installation Date</span><span className="font-semibold text-slate-800">{estimatedInstallationDate}{estimatedInstallationTime && <span className="ml-1 text-xs font-medium text-slate-500">{estimatedInstallationTime}</span>}</span></div>
                 </div>
               </div>
 
