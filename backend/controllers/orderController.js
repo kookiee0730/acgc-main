@@ -641,6 +641,12 @@ const sanitizeOrderItems = (items = []) => {
     const estimation_mode = item.estimation_mode === "manual" ? "manual" : "auto";
     const manual_estimated_total = Number(item.manual_estimated_total) || 0;
     const customized = Boolean(incomingDimensions.customized ?? item.customized ?? item.is_estimate);
+    const normalizedProductCharges = normalizeProjectCharges(item.additional_project_charges || []);
+    if (normalizedProductCharges.error) {
+      const error = new Error(normalizedProductCharges.error);
+      error.statusCode = 400;
+      throw error;
+    }
 
     return {
       product_id: normalizeProductId(item.product_id) || normalizeProductId(item._id) || null,
@@ -674,6 +680,7 @@ const sanitizeOrderItems = (items = []) => {
       customization: Boolean(item.customization),
       customization_fee: Number(item.customization_fee) || 0,
       extra_charges: Array.isArray(item.extra_charges) ? item.extra_charges : [],
+      additional_project_charges: normalizedProductCharges.charges,
       size_limits: item.size_limits || {},
       line_total: Number(item.line_total) || 0,
       unit: item.unit || "piece",
@@ -708,24 +715,22 @@ const sanitizeOrderItems = (items = []) => {
 const getItemAmountValue = (item) => {
   if (!item) return 0;
 
+  let itemAmount = 0;
   if (Number(item.line_total) > 0) {
-    return Number(item.line_total);
+    itemAmount = Number(item.line_total);
+  } else if (item.is_estimate && Number(item.estimated_price || item.manual_estimated_total || 0) > 0) {
+    itemAmount = Number(item.estimated_price || item.manual_estimated_total || 0);
+  } else {
+    const quantity = Number(item.quantity || 1) || 1;
+    const unitPrice = Number(item.unit_price || 0) || 0;
+    const area = Number(item.area || 0) || 0;
+    const productRate = Number(item.price_per_sqft || item.product?.price_per_sqft || 0) || 0;
+    itemAmount = productRate > 0 && area > 0 ? productRate * area : unitPrice * quantity;
   }
 
-  if (item.is_estimate && Number(item.estimated_price || item.manual_estimated_total || 0) > 0) {
-    return Number(item.estimated_price || item.manual_estimated_total || 0);
-  }
-
-  const quantity = Number(item.quantity || 1) || 1;
-  const unitPrice = Number(item.unit_price || 0) || 0;
-  const area = Number(item.area || 0) || 0;
-  const productRate = Number(item.price_per_sqft || item.product?.price_per_sqft || 0) || 0;
-
-  if (productRate > 0 && area > 0) {
-    return productRate * area;
-  }
-
-  return unitPrice > 0 ? unitPrice * quantity : 0;
+  const productCharges = (Array.isArray(item.additional_project_charges) ? item.additional_project_charges : [])
+    .reduce((sum, charge) => sum + Math.max(0, Number(charge.amount) || 0), 0);
+  return itemAmount + productCharges;
 };
 
 // Reprice against the current catalog when creating a new order. The returned
@@ -863,9 +868,13 @@ export const listOrders = async (req, res) => {
       orders.forEach((order) => {
         delete order.progress_notes;
         delete order.progress_audit;
+        delete order.protected_project_notes;
+        delete order.progress_activity_notes;
         (order.items || []).forEach((item) => {
           delete item.progress_notes;
           delete item.progress_audit;
+          delete item.protected_project_notes;
+          delete item.progress_activity_notes;
         });
         (order.payment_records || []).forEach((record) => {
           record.supporting_documents = (record.supporting_documents || []).map((document) => ({
@@ -1260,7 +1269,20 @@ export const trackOrder = async (req, res) => {
       return res.status(403).json({ success: false, message: "Not authorized to view this order" });
     }
 
-    res.json({ success: true, order: attachOrderScheduleOverdue(order) });
+    const responseOrder = order.toObject();
+    if (!req.user || !["admin", "super_admin", "skilled_worker"].includes(req.user.role)) {
+      delete responseOrder.progress_notes;
+      delete responseOrder.progress_audit;
+      delete responseOrder.protected_project_notes;
+      delete responseOrder.progress_activity_notes;
+      (responseOrder.items || []).forEach((item) => {
+        delete item.progress_notes;
+        delete item.progress_audit;
+        delete item.protected_project_notes;
+        delete item.progress_activity_notes;
+      });
+    }
+    res.json({ success: true, order: attachOrderScheduleOverdue(responseOrder) });
   } catch (error) {
     console.error("Track order error:", error);
     res.status(500).json({ success: false, message: "Unable to track order", error: error.message });
@@ -1322,7 +1344,7 @@ export const getAdminOrders = async (req, res) => {
       "payment_terms downpayment_amount required_downpayment_amount amount_paid payment_status payment_records payment_proof_amount payment_proof_submitted_at payment_proof_confirmed_at payment_proof_file_name payment_proof_file_url payment_method transaction_number",
       "status cancellation_reason customer_cancellation_count_at_cancel is_rush_order order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
       "tracking inspection_status inspection_completed_at inspection_date inspection_time inspection_duration_minutes inspection_travel_minutes estimated_installation_date estimated_installation_time installation_duration_minutes inspection_notes issues_found",
-      "progress progress_stages progress_notes progress_audit attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
+      "progress progress_stages progress_notes progress_audit protected_project_notes progress_activity_notes project_delay attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
     ].join(" ");
     const moduleFields = {
       dashboard: [
@@ -1803,7 +1825,6 @@ export const updateOrderStatus = async (req, res) => {
         const priorRequest = order.payment_records.find((entry) => entry.request_id === requestId);
         if (priorRequest) return res.json({ success: true, duplicate: true, order });
         const reason = String(payment_record_action.reason || "").trim();
-        if (!reason) return res.status(400).json({ success: false, message: "Provide an admin note for recording a payment on behalf of the customer." });
         if (reason.length > 1000) return res.status(400).json({ success: false, message: "Admin notes must be 1000 characters or fewer." });
         const paymentMethod = String(payment_record_action.payment_method || payment_method || "").trim();
         if (!paymentMethod || paymentMethod.length > 60) return res.status(400).json({ success: false, message: "Provide a valid payment method." });
@@ -3351,6 +3372,118 @@ export const updateOrderInspection = async (req, res) => {
   }
 };
 
+const getProgressActor = (user = {}) => ({
+  id: user._id || user.id || null,
+  name: [user.first_name, user.last_name].filter(Boolean).join(" ") || user.name || user.email || "Staff",
+  role: user.role || "staff",
+});
+
+export const updateProjectDelay = async (req, res) => {
+  try {
+    if (! ["admin", "super_admin"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Administrator access required." });
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const actor = getProgressActor(req.user);
+    const delay = order.project_delay || { is_delayed: false, history: [] };
+    const history = Array.isArray(delay.history) ? delay.history : [];
+    const action = req.body.action;
+    const requestId = String(req.body.requestId || "").slice(0, 100);
+    if (requestId && history.some((entry) => entry.requestId === requestId || entry.resolutionRequestId === requestId)) return res.json({ success: true, order, duplicate: true });
+    const allStages = [ ...(order.progress_stages || []), ...(order.items || []).flatMap((item) => item.progress_stages || []) ];
+    const isComplete = String(order.status || "").toLowerCase() === "completed" || (allStages.length > 0 && allStages.every((stage) => Boolean(stage.completed) || ["done", "completed"].includes(String(stage.status || "").toLowerCase())));
+    const now = new Date();
+    if (action === "mark_delayed") {
+      if (isComplete) return res.status(409).json({ success: false, message: "A completed project cannot be marked as delayed." });
+      if (delay.is_delayed) return res.status(409).json({ success: false, message: "This project already has an active delay." });
+      const reason = String(req.body.reason || "").trim();
+      if (!reason) return res.status(400).json({ success: false, message: "Enter a reason for the delay." });
+      if (reason.length > 2000) return res.status(400).json({ success: false, message: "Delay reason must be 2,000 characters or fewer." });
+      const proposedDate = req.body.proposedRevisedDate ? new Date(req.body.proposedRevisedDate) : null;
+      if (proposedDate && Number.isNaN(proposedDate.getTime())) return res.status(400).json({ success: false, message: "Enter a valid proposed date." });
+      const entry = { id: new mongoose.Types.ObjectId().toString(), requestId, action, reason, proposedRevisedDate: proposedDate, status: "active", at: now, by: actor.id, byName: actor.name, byRole: actor.role, emailStatus: "queued" };
+      order.project_delay = { ...delay, is_delayed: true, reason, proposed_revised_installation_date: proposedDate, reportedAt: now, reportedBy: actor.id, reportedByName: actor.name, reportedByRole: actor.role, history: [...history, entry] };
+      order.markModified("project_delay");
+      order.progress_audit = [...(order.progress_audit || []), { type: "project_marked_delayed", at: now, by: actor.id, byName: actor.name, byRole: actor.role, reason, proposedRevisedDate: proposedDate }].slice(-500);
+      await order.save();
+      let emailResult = { sent: false };
+      try { emailResult = await sendOrderNotification("project_delay", order, { reason, proposedDate, requestId }); }
+      catch (notificationError) { console.error("Project delay email notification failed:", notificationError); }
+      const savedHistory = [...(order.project_delay?.history || [])];
+      const deliveryStatus = emailResult.sent ? "sent" : emailResult.failed ? "failed" : "missing_recipient";
+      if (savedHistory.length) savedHistory[savedHistory.length - 1] = { ...savedHistory.at(-1), emailStatus: deliveryStatus, emailAttemptedAt: new Date() };
+      order.project_delay = { ...order.project_delay, history: savedHistory };
+      order.markModified("project_delay");
+      await order.save();
+      return res.json({ success: true, order });
+    }
+    if (action === "resolve_delay") {
+      if (!delay.is_delayed) return res.status(409).json({ success: false, message: "This project does not have an active delay." });
+      const currentEntryIndex = history.map((entry) => entry.status === "active").lastIndexOf(true);
+      if (currentEntryIndex >= 0) history[currentEntryIndex] = { ...history[currentEntryIndex], status: "resolved", resolutionRequestId: requestId, resolvedAt: now, resolvedBy: actor.id, resolvedByName: actor.name, resolvedByRole: actor.role };
+      order.project_delay = { ...delay, is_delayed: false, reason: "", proposed_revised_installation_date: null, resolvedAt: now, resolvedBy: actor.id, resolvedByName: actor.name, history };
+      order.markModified("project_delay");
+      order.progress_audit = [...(order.progress_audit || []), { type: "project_delay_resolved", at: now, by: actor.id, byName: actor.name, byRole: actor.role }].slice(-500);
+      await order.save();
+      let emailResult = { sent: false };
+      try { emailResult = await sendOrderNotification("project_delay_resolved", order, { requestId }); }
+      catch (notificationError) { console.error("Project delay resolution email failed:", notificationError); }
+      order.project_delay = { ...order.project_delay, resolutionEmailStatus: emailResult.sent ? "sent" : emailResult.failed ? "failed" : "missing_recipient", resolutionEmailAttemptedAt: new Date() };
+      order.markModified("project_delay");
+      await order.save();
+      return res.json({ success: true, order });
+    }
+    return res.status(400).json({ success: false, message: "Unsupported delay action." });
+  } catch (error) {
+    console.error("Failed to update project delay:", error);
+    return res.status(500).json({ success: false, message: "Unable to update the project delay." });
+  }
+};
+
+export const updateProtectedProjectNotes = async (req, res) => {
+  try {
+    if (!["admin", "super_admin"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Only authorized administrators can edit protected project notes." });
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const content = String(req.body.content || "").trim();
+    if (content.length > 4000) return res.status(400).json({ success: false, message: "Protected notes must be 4,000 characters or fewer." });
+    const actor = getProgressActor(req.user);
+    const now = new Date();
+    const previous = order.protected_project_notes || {};
+    order.protected_project_notes = { content, authorId: previous.authorId || actor.id, authorName: previous.authorName || actor.name, authorRole: previous.authorRole || actor.role, createdAt: previous.createdAt || now, updatedAt: now, updatedBy: actor.id, updatedByName: actor.name, updatedByRole: actor.role };
+    order.progress_audit = [...(order.progress_audit || []), { type: "protected_project_notes_updated", at: now, by: actor.id, byName: actor.name, byRole: actor.role, previousContent: String(previous.content || ""), updatedContent: content }].slice(-500);
+    order.markModified("protected_project_notes");
+    await order.save();
+    return res.json({ success: true, order });
+  } catch (error) {
+    console.error("Failed to update protected project notes:", error);
+    return res.status(500).json({ success: false, message: "Unable to save protected project notes." });
+  }
+};
+
+export const addProgressActivityNote = async (req, res) => {
+  try {
+    if (!["admin", "super_admin", "skilled_worker"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Staff access required." });
+    const order = await Order.findById(req.params.orderId);
+    if (!order) return res.status(404).json({ success: false, message: "Order not found." });
+    const content = String(req.body.content || "").trim();
+    if (!content) return res.status(400).json({ success: false, message: "Enter a note before saving." });
+    if (content.length > 2000) return res.status(400).json({ success: false, message: "Activity notes must be 2,000 characters or fewer." });
+    const requestId = String(req.body.requestId || "").slice(0, 100);
+    const notes = order.progress_activity_notes || [];
+    if (requestId && notes.some((note) => note.requestId === requestId)) return res.json({ success: true, order, duplicate: true });
+    const actor = getProgressActor(req.user);
+    const note = { id: new mongoose.Types.ObjectId().toString(), requestId, content, authorId: actor.id, authorName: actor.name, authorRole: actor.role, createdAt: new Date() };
+    order.progress_activity_notes = [...notes, note].slice(-1000);
+    order.progress_audit = [...(order.progress_audit || []), { type: "activity_note_added", at: note.createdAt, by: actor.id, byName: actor.name, byRole: actor.role, noteId: note.id }].slice(-500);
+    order.markModified("progress_activity_notes");
+    await order.save();
+    return res.json({ success: true, order, note });
+  } catch (error) {
+    console.error("Failed to add progress activity note:", error);
+    return res.status(500).json({ success: false, message: "Unable to add the activity note." });
+  }
+};
+
 export const updateOrderProgress = async (req, res) => {
   try {
     if (!["admin", "super_admin", "skilled_worker"].includes(req.user.role)) {
@@ -3401,27 +3534,36 @@ export const updateOrderProgress = async (req, res) => {
       && new Date(req.body.expectedUpdatedAt).getTime() !== new Date(order.updatedAt).getTime()) {
       return res.status(409).json({ success: false, message: "This project was updated by someone else. Reload it and review the latest progress before saving." });
     }
-    const correctionReason = String(req.body.correctionReason || "").trim();
     const auditTarget = isItemProgressUpdate ? order.items[itemIndex] : order;
     const auditEvents = [];
     const actor = req.user || {};
     const actorName = [actor.first_name, actor.last_name].filter(Boolean).join(" ") || actor.name || actor.email || "Staff";
-    if (typeof req.body.progress_notes === "string") {
-      if (req.body.progress_notes.length > 4000) return res.status(400).json({ success: false, message: "Additional notes must be 4,000 characters or fewer." });
-      const nextNotes = req.body.progress_notes.trim();
-      const previousNotes = String(auditTarget.progress_notes || "");
-      if (nextNotes !== previousNotes) {
-        auditTarget.progress_notes = nextNotes;
-        auditEvents.push({ type: "notes_updated", at: new Date(), by: actor._id || null, byName: actorName });
-      }
-    }
+    // Notes are managed by dedicated permission-checked endpoints.
     if (Array.isArray(stages)) {
       const wasDone = (stage) => Boolean(stage?.completed) || ["done", "completed"].includes(String(stage?.status || "").toLowerCase());
+      const sameDate = (first, second) => (!first && !second) || (Boolean(first) && Boolean(second) && new Date(first).getTime() === new Date(second).getTime());
+      const sameList = (first, second) => JSON.stringify(first || []) === JSON.stringify(second || []);
       const oldByIdentity = new Map(previousStages.map((stage, index) => [String(stage.key || stage.name || index), stage]));
+      const nextIdentities = new Set(stages.map((stage, index) => String(stage.key || stage.name || index)));
+      for (const [index, priorStage] of previousStages.entries()) {
+        const identity = String(priorStage.key || priorStage.name || index);
+        if (wasDone(priorStage) && !nextIdentities.has(identity)) {
+          return res.status(409).json({ success: false, message: "Completed stages cannot be removed through normal progress updates." });
+        }
+        const nextStage = stages.find((stage, nextIndex) => String(stage.key || stage.name || nextIndex) === identity);
+        if (nextStage && (priorStage.subStages || []).some((priorSub) => wasDone(priorSub) && !(nextStage.subStages || []).some((nextSub) => nextSub.name === priorSub.name))) {
+          return res.status(409).json({ success: false, message: "Completed sub-stages cannot be removed through normal progress updates." });
+        }
+      }
       for (const [index, nextStage] of stages.entries()) {
         const identity = String(nextStage.key || nextStage.name || index);
         const prior = oldByIdentity.get(identity);
         const nowDone = wasDone(nextStage);
+        if (wasDone(prior) && nowDone && (
+          !sameDate(prior.date, nextStage.date) ||
+          String(prior.completionNote || "") !== String(nextStage.completionNote || "") ||
+          !sameList(prior.images, nextStage.images)
+        )) return res.status(409).json({ success: false, message: "Saved completion dates, notes, and proof photos are locked." });
         if (nowDone && !wasDone(prior)) {
           const earlierIncomplete = previousStages.slice(0, index).find((stage) => !wasDone(stage));
           if (earlierIncomplete) {
@@ -3438,24 +3580,22 @@ export const updateOrderProgress = async (req, res) => {
           auditEvents.push({ type: "stage_completed", stageKey: identity, stageName: nextStage.name || "Stage", note: nextStage.completionNote || "", at: new Date(), by: actor._id || null, byName: actorName });
         }
         if (!nowDone && wasDone(prior)) {
-          const hasLaterDone = previousStages.slice(index + 1).some(wasDone);
-          const hasDoneSubstage = (prior?.subStages || []).some(wasDone);
-          if (!correctionReason) return res.status(400).json({ success: false, message: "Enter a correction reason before undoing a saved completion." });
-          if (hasLaterDone || hasDoneSubstage) return res.status(409).json({ success: false, message: "This stage has completed dependent work. Correct the later stage or sub-stage first." });
-          auditEvents.push({ type: "stage_completion_reverted", stageKey: identity, stageName: nextStage.name || "Stage", reason: correctionReason, at: new Date(), by: actor._id || null, byName: actorName });
+          return res.status(409).json({ success: false, message: "Completed stages cannot be reverted through normal progress updates." });
         }
         const priorSubs = new Map((prior?.subStages || []).map((sub) => [sub.name, sub]));
         for (const sub of nextStage.subStages || []) {
           const previousSub = priorSubs.get(sub.name);
+          if (wasDone(previousSub) && wasDone(sub) && (
+            !sameDate(previousSub.date, sub.date) ||
+            String(previousSub.completionNote || "") !== String(sub.completionNote || "") ||
+            !sameList(previousSub.images, sub.images)
+          )) return res.status(409).json({ success: false, message: "Saved sub-stage completion dates, notes, and proof photos are locked." });
           if (wasDone(sub) && !wasDone(previousSub)) {
             if (!(sub.images || []).length) return res.status(400).json({ success: false, message: `Add proof photos before completing ${sub.name || "the sub-stage"}.` });
             auditEvents.push({ type: "substage_completed", stageKey: identity, stageName: nextStage.name || "Stage", subStageName: sub.name || "Sub-stage", note: sub.completionNote || "", at: new Date(), by: actor._id || null, byName: actorName });
           }
           if (!wasDone(sub) && wasDone(previousSub)) {
-            if (!correctionReason) return res.status(400).json({ success: false, message: "Enter a correction reason before undoing a saved completion." });
-            const laterSubDone = (prior?.subStages || []).some((entry) => entry.name !== sub.name && wasDone(entry));
-            if (laterSubDone || previousStages.slice(index + 1).some(wasDone)) return res.status(409).json({ success: false, message: "This sub-stage has completed dependent work. Correct that work first." });
-            auditEvents.push({ type: "substage_completion_reverted", stageKey: identity, stageName: nextStage.name || "Stage", subStageName: sub.name || "Sub-stage", reason: correctionReason, at: new Date(), by: actor._id || null, byName: actorName });
+            return res.status(409).json({ success: false, message: "Completed sub-stages cannot be reverted through normal progress updates." });
           }
         }
       }

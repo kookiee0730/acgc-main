@@ -17,6 +17,8 @@ export const approveWarrantyClaim = (repairId, payload) => apiFetch(`/repairs/ad
 export const rejectWarrantyClaim = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/reject-warranty`, { method: "POST", body: JSON.stringify(payload) });
 export const issueRepairQuotation = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/quotation`, { method: "POST", body: JSON.stringify(payload) });
 export const reviewRepairPaymentProof = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/payment-proof/review`, { method: "POST", body: JSON.stringify(payload) });
+export const recordRepairPayment = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/payments`, { method: "POST", body: JSON.stringify(payload) });
+export const generateRepairReceipt = (repairId) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/receipt`, { method: "POST", body: JSON.stringify({}) });
 export const scheduleRepair = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/schedule`, { method: "POST", body: JSON.stringify(payload) });
 export const startRepair = (repairId) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/start`, { method: "POST", body: JSON.stringify({}) });
 export const completeRepair = (repairId, payload) => apiFetch(`/repairs/admin/requests/${encodeURIComponent(repairId)}/complete`, { method: "POST", body: JSON.stringify(payload) });

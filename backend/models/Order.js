@@ -110,6 +110,10 @@ const OrderItemSchema = new mongoose.Schema(
       type: [mongoose.Schema.Types.Mixed],
       default: [],
     },
+    additional_project_charges: {
+      type: [{ name: { type: String, trim: true, required: true }, amount: { type: Number, min: 0, required: true }, note: { type: String, trim: true, default: "" } }],
+      default: [],
+    },
     size_limits: {
       type: mongoose.Schema.Types.Mixed,
       default: {},
@@ -258,6 +262,8 @@ const OrderItemSchema = new mongoose.Schema(
     },
     progress_notes: { type: String, trim: true, maxlength: 4000, default: "" },
     progress_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    protected_project_notes: { type: mongoose.Schema.Types.Mixed, default: null },
+    progress_activity_notes: { type: [mongoose.Schema.Types.Mixed], default: [] },
   },
   { _id: false }
 );
@@ -559,6 +565,10 @@ const OrderSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    project_delay: {
+      type: mongoose.Schema.Types.Mixed,
+      default: () => ({ is_delayed: false, reason: "", proposed_revised_installation_date: null, history: [] }),
+    },
     project_additional_charges: {
       type: [{ name: { type: String, trim: true, required: true }, amount: { type: Number, min: 0, required: true }, note: { type: String, trim: true, default: "" } }],
       default: [],
@@ -659,6 +669,8 @@ const OrderSchema = new mongoose.Schema(
     },
     progress_notes: { type: String, trim: true, maxlength: 4000, default: "" },
     progress_audit: { type: [mongoose.Schema.Types.Mixed], default: [] },
+    protected_project_notes: { type: mongoose.Schema.Types.Mixed, default: null },
+    progress_activity_notes: { type: [mongoose.Schema.Types.Mixed], default: [] },
     contract_terms: {
       type: String,
       trim: true,

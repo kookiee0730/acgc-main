@@ -7,7 +7,7 @@ import {
   Play,
 } from "lucide-react";
 
-import { getAdminOrders, updateOrderProgress, updateOrderStatus } from "@/api/orders";
+import { getAdminOrders, updateOrderProgress, updateOrderStatus, updateProjectDelay, updateProtectedProjectNotes, addProgressActivityNote } from "@/api/orders";
 import { subscribeToRealtime } from "@/lib/realtimeEvents";
 import { formatDateToMMMDDYYYY } from "@/lib/dateUtils";
 import { getProgressColor } from "@/lib/utils";
@@ -261,6 +261,9 @@ const buildProjectRows = (order) => {
         ? calculateProjectProgressFromStages(stages)
         : itemProgress ?? mapProgressFromStatus(order.status, order.progress),
       isOverdue: isInstallationDeadlineOverdue(projectTimelineOrder),
+      project_delay: order.project_delay || { is_delayed: false, history: [] },
+      protected_project_notes: order.protected_project_notes || item?.protected_project_notes || null,
+      progress_activity_notes: order.progress_activity_notes || item?.progress_activity_notes || [],
       stages,
       status: getProjectStatus(order, stages),
       statusKey: order.status,
@@ -504,7 +507,6 @@ function ProgressMonitor() {
           estimated_installation_date: updatedProject.installation,
           estimated_installation_time: updatedProject.installationTime || "",
           stages: updatedProject.stages,
-          progress_notes: updatedProject.progress_notes || "",
           expectedUpdatedAt: updatedProject.rawOrder?.updatedAt || "",
           correctionReason: updatedProject.correctionReason || "",
           proof_images: [],
@@ -556,6 +558,36 @@ function ProgressMonitor() {
       console.error("Failed to save progress", err);
       throw err;
     }
+  };
+
+  const syncOrderAction = (project, order) => {
+    const updated = {
+      ...project,
+      rawOrder: order,
+      project_delay: order.project_delay || { is_delayed: false, history: [] },
+      protected_project_notes: order.protected_project_notes || null,
+      progress_activity_notes: order.progress_activity_notes || [],
+      progress_audit: order.progress_audit || project.progress_audit || [],
+    };
+    setProjectList((items) => items.map((item) => isSameProjectRow(item, project) ? { ...item, ...updated } : item));
+    setSelectedProject(updated);
+    return updated;
+  };
+  const handleProjectDelay = async (action, values) => {
+    const orderId = selectedProject?.orderId || selectedProject?.id;
+    if (!orderId) throw new Error("Order reference is missing.");
+    const response = await updateProjectDelay(orderId, { action, ...values, requestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}` });
+    if (response?.order) syncOrderAction(selectedProject, response.order);
+  };
+  const handleProtectedNotes = async (content) => {
+    const orderId = selectedProject?.orderId || selectedProject?.id;
+    const response = await updateProtectedProjectNotes(orderId, { content });
+    if (response?.order) syncOrderAction(selectedProject, response.order);
+  };
+  const handleAddActivityNote = async (content) => {
+    const orderId = selectedProject?.orderId || selectedProject?.id;
+    const response = await addProgressActivityNote(orderId, { content, requestId: globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}` });
+    if (response?.order) syncOrderAction(selectedProject, response.order);
   };
 
   const handleStartProject = async (project) => {
@@ -931,7 +963,7 @@ function ProgressMonitor() {
                         <td className="p-4">{project.clientType}</td>
                         <td className="p-4">{project.product}</td>
                         <td className="p-4">{project.inspection}</td>
-                        <td className="p-4">{project.installation}</td>
+                        <td className="p-4"><span>{project.installation}</span>{project.project_delay?.is_delayed && <div className="mt-1"><span className="inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900" title={project.project_delay.reason}>Delayed</span><p className="mt-1 max-w-48 text-xs text-amber-800">{project.project_delay.reason}</p></div>}</td>
                         <td className="p-4">
                           <div className={`h-3 w-full rounded-full ${darkMode ? "bg-slate-700" : "bg-gray-200"}`}>
                             {(() => {
@@ -1015,6 +1047,7 @@ function ProgressMonitor() {
                     <div>
                       <p className={`text-[10px] uppercase tracking-wide ${darkMode ? "text-slate-500" : "text-gray-400"}`}>Install</p>
                       <p className={`mt-1 font-medium ${darkMode ? "text-slate-200" : "text-gray-700"}`}>{project.installation}</p>
+                      {project.project_delay?.is_delayed && <><span className="mt-1 inline-flex rounded-full bg-amber-100 px-2 py-0.5 text-[10px] font-semibold text-amber-900">Delayed</span><p className="mt-1 text-[11px] text-amber-800 dark:text-amber-300">{project.project_delay.reason}</p></>}
                     </div>
                   </div>
                   <div className="mt-3 flex justify-end gap-2.5 pr-1">
@@ -1100,7 +1133,7 @@ function ProgressMonitor() {
           )}
 
           {showEditModal && selectedProject && (
-            <ProgressEditModal project={selectedProject} onClose={() => setShowEditModal(false)} onSave={handleSave} canUploadProgressPhoto={canUploadProgressPhoto} />
+            <ProgressEditModal project={selectedProject} onClose={() => setShowEditModal(false)} onSave={handleSave} canUploadProgressPhoto={canUploadProgressPhoto} canEditProtectedNotes={["admin", "super_admin"].includes(user?.role)} onProjectDelay={handleProjectDelay} onSaveProtectedNotes={handleProtectedNotes} onAddActivityNote={handleAddActivityNote} />
           )}
 
           {cancelConfirm.open && (

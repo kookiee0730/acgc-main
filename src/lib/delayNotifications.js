@@ -20,7 +20,7 @@ export const buildDelayNotifications = (order) => {
         productName: items[0]?.name || items[0]?.product_name || "Project",
       }));
 
-  return sources.flatMap(({ stage, itemIndex, stageIndex, productName }) => {
+  const stageNotifications = sources.flatMap(({ stage, itemIndex, stageIndex, productName }) => {
     const history = Array.isArray(stage.delayHistory) && stage.delayHistory.length > 0
       ? stage.delayHistory
       : isDelayed(stage)
@@ -59,6 +59,21 @@ export const buildDelayNotifications = (order) => {
         };
       });
   });
+  const projectDelayHistory = Array.isArray(order.project_delay?.history) ? order.project_delay.history : [];
+  const projectNotifications = projectDelayHistory.map((entry, index) => ({
+    ...order,
+    notificationType: "project_delay",
+    title: entry.status === "resolved" ? "Project delay resolved" : "Project delay reported",
+    notificationId: `${orderId}-project-delay-${entry.id || entry.requestId || entry.at || index}`,
+    notificationDate: entry.at || order.updatedAt || order.createdAt,
+    delayReportedAt: entry.at || order.updatedAt || order.createdAt,
+    delayStageName: "Project",
+    delayReason: entry.reason || "",
+    delayProposedDate: entry.proposedRevisedDate || null,
+    delayStatus: entry.status === "resolved" ? "Resolved" : "Delayed",
+    delayResolved: entry.status === "resolved",
+  }));
+  return [...stageNotifications, ...projectNotifications];
 };
 
 export const sortCustomerNotificationsNewestFirst = (first, second) => {

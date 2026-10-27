@@ -186,9 +186,11 @@ const getReviewCommentBody = (comment, tags) =>
 
 const getDelayNotificationMessage = (notification) => {
   const stageName = notification.delayStageName || "Project stage";
+  if (notification.delayResolved) return "The project delay has been resolved. Your completed progress remains unchanged.";
   const reason = notification.delayReason ? ` Reason: ${notification.delayReason}` : "";
   const expectedResolution = formatDateToMMMDDYYYY(notification.delayExpectedResolution);
-  const resolutionText = expectedResolution ? ` Expected resolution: ${expectedResolution}.` : "";
+  const proposedDate = formatDateToMMMDDYYYY(notification.delayProposedDate);
+  const resolutionText = expectedResolution ? ` Expected resolution: ${expectedResolution}.` : proposedDate ? ` Proposed revised date (pending confirmation): ${proposedDate}.` : "";
   return `${stageName} is delayed.${reason}${resolutionText}`;
 };
 
@@ -1029,6 +1031,8 @@ function CustomerDashboard() {
       payment_proof_submitted: "Payment proof submitted",
       payment_proof_approved: "Repair payment verified",
       payment_proof_rejected: "Payment proof needs correction",
+      payment_verified: "Repair payment verified",
+      receipt_issued: "Repair receipt issued",
       cancelled: "Quotation declined",
       scheduled: "Repair visit scheduled",
       in_progress: "Repair in progress",
@@ -1043,6 +1047,8 @@ function CustomerDashboard() {
       payment_proof_submitted: "Payment Review",
       payment_proof_approved: "Payment Verified",
       payment_proof_rejected: "Action Needed",
+      payment_verified: "Payment Verified",
+      receipt_issued: "Receipt Available",
       cancelled: "Cancelled",
       scheduled: "Scheduled",
       in_progress: "In Progress",
@@ -1063,12 +1069,14 @@ function CustomerDashboard() {
         quotation_issued: `A quotation of PHP ${Number(repair.quotation?.total || 0).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })} for ${productName} is ready for your review.`,
         customer_accepted: `You accepted the repair quotation${repair.payment?.method ? ` and selected ${String(repair.payment.method).replaceAll("_", " ")}` : ""}.`,
         payment_proof_submitted: "Your payment proof was submitted and is waiting for admin review.",
-        payment_proof_approved: "Your repair payment proof was verified by the admin.",
+        payment_proof_approved: entry.detail || "Your repair payment proof was verified by the admin.",
+        payment_verified: entry.detail || `An administrator verified your repair payment. Remaining balance: PHP ${Math.max(0, Number(repair.quotation?.total || 0) - Number(repair.payment?.verifiedAmount || 0)).toLocaleString("en-PH", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}.`,
+        receipt_issued: `Receipt ${repair.receipt?.number || repair.invoiceNumber || ""} is available for your repair.`,
         payment_proof_rejected: `Your payment proof needs correction. ${repair.payment?.proofRejectionReason || "Please review the request and submit a corrected proof."}`,
         cancelled: "You declined the repair quotation. This request is now closed.",
         scheduled: `Your repair visit is scheduled${repair.schedule?.date ? ` for ${new Date(repair.schedule.date).toLocaleString("en-PH")}` : ""}${repair.schedule?.technician ? ` with ${repair.schedule.technician}` : ""}.`,
         in_progress: `Work on your repair for ${productName} is in progress.`,
-        completed: `Your repair for ${productName} is complete${repair.invoiceNumber ? `. Receipt ${repair.invoiceNumber} is available` : ""}.`,
+        completed: `Your repair for ${productName} is complete${repair.receipt?.number ? `. Receipt ${repair.receipt.number} is available` : ""}.`,
       };
 
       return {
@@ -4785,7 +4793,7 @@ function CustomerDashboard() {
     setTrackingNumber("");
     setOrderFilter(targetOrders === myOrders ? "order" : "all");
     setOrderPage(orderIndex >= 0 ? Math.floor(orderIndex / ORDER_PAGE_SIZE) + 1 : 1);
-    const isDelayNotification = notification?.notificationType === "delay";
+    const isDelayNotification = ["delay", "project_delay"].includes(notification?.notificationType);
     const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(notification?.notificationType);
     const isSiteInspectionNotification = notification?.notificationType === "site_inspection_today";
     const isCancellationCooldownNotification = notification?.notificationType === "order_cancellation_cooldown";
@@ -5337,9 +5345,9 @@ function CustomerDashboard() {
                             const status = normalizeOrderStatusKey(order?.status);
                             const contractStatus = normalizeOrderStatusKey(order?.contract_status);
                             const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
-                            const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : null;
+                            const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : order.notificationType === "project_delay" ? order.delayStatus : null;
                             const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
-                            const isDelayNotification = order.notificationType === "delay";
+                            const isDelayNotification = ["delay", "project_delay"].includes(order.notificationType);
                             const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
                             const isSiteInspectionNotification = order.notificationType === "site_inspection_today";
                             const isCancellationCooldownNotification = order.notificationType === "order_cancellation_cooldown";
@@ -5404,7 +5412,7 @@ function CustomerDashboard() {
                               }
                               if (isDelayNotification) {
                                 return {
-                                  title: "Project delay reported",
+                                  title: order.title || (order.delayResolved ? "Project delay resolved" : "Project delay reported"),
                                   message: getDelayNotificationMessage(order),
                                   color: "text-amber-600",
                                 };
@@ -9442,9 +9450,9 @@ function CustomerDashboard() {
                     const status = normalizeOrderStatusKey(order?.status);
                     const contractStatus = normalizeOrderStatusKey(order?.contract_status);
                     const isPaymentNotification = ["payment", "payment_confirmed", "payment_amount_updated", "payment_rejected", "admin_payment_recorded", "downpayment_exception_approved", "downpayment_exception_pending", "payment_discrepancy", "payment_discrepancy_resolved", "overdue_payment", "installation_payment_reminder"].includes(order.notificationType);
-                    const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : null;
+                    const notificationStatusLabel = order.notificationType === "overdue_payment" ? "Payment Due" : order.notificationType === "project_delay" ? order.delayStatus : null;
                       const isPaymentConfirmationNotification = ["payment_confirmed", "payment_amount_updated", "admin_payment_recorded", "downpayment_exception_approved"].includes(order.notificationType);
-                    const isDelayNotification = order.notificationType === "delay";
+                    const isDelayNotification = ["delay", "project_delay"].includes(order.notificationType);
                       const isInstallationNotification = ["installation_up_next", "installation_completed"].includes(order.notificationType);
                     const isSiteInspectionNotification = order.notificationType === "site_inspection_today";
                     const isCancellationCooldownNotification = order.notificationType === "order_cancellation_cooldown";

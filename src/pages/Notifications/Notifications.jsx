@@ -191,6 +191,8 @@ export default function Notifications() {
               payment_proof_submitted: "Repair payment proof submitted",
               payment_proof_approved: "Repair payment verified",
               payment_proof_rejected: "Repair payment proof rejected",
+              payment_verified: "Repair payment verified",
+              receipt_issued: "Repair receipt issued",
               cancelled: "Repair quotation declined",
               scheduled: "Repair visit scheduled",
               in_progress: "Repair work started",

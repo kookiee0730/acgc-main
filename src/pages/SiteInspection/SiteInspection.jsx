@@ -10,6 +10,7 @@ import {
   Send,
   ChevronLeft,
   ChevronRight,
+  Eye,
   ShieldCheck,
   Ban,
   RotateCcw,
@@ -243,6 +244,7 @@ const getAvailableScheduleTimes = (records, dateValue, excludeRecordId = "", dur
 function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeChange, className, darkMode = false, scheduledRecords = [], excludeRecordId = "", durationMinutes = 30, businessHours = { open: "08:00", close: "18:00" } }) {
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isTimeModalOpen, setIsTimeModalOpen] = useState(false);
+  const [viewSchedulesDate, setViewSchedulesDate] = useState("");
   const [draftTime, setDraftTime] = useState({ hour: 9, minute: 0, period: "AM" });
   const [visibleMonth, setVisibleMonth] = useState(() => {
     const initialDate = value ? new Date(`${value}T12:00:00`) : min ? new Date(`${min}T12:00:00`) : new Date();
@@ -269,7 +271,7 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
   const monthOffset = (new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), 1).getDay() + 6) % 7;
   const calendarDays = Array.from({ length: 42 }, (_, index) => new Date(visibleMonth.getFullYear(), visibleMonth.getMonth(), index - monthOffset + 1));
   const dateKey = (date) => `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-  const scheduledDateKeys = (field) => new Set(scheduledRecords.map((record) => {
+  const scheduledDateKeys = (field) => new Set(scheduledRecords.filter((record) => !["cancelled", "canceled"].includes(String(record?.status || "").toLowerCase())).map((record) => {
     const raw = record?.[field];
     if (!raw) return "";
     const match = String(raw).match(/^(\d{4}-\d{2}-\d{2})/);
@@ -279,6 +281,24 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
   }).filter(Boolean));
   const inspectionDates = scheduledDateKeys("inspection_date");
   const installationDates = scheduledDateKeys("estimated_installation_date");
+  const getRecordDateKey = (raw) => {
+    if (!raw) return "";
+    const match = String(raw).match(/^(\d{4}-\d{2}-\d{2})/);
+    if (match) return match[1];
+    const parsed = new Date(raw);
+    return Number.isNaN(parsed.getTime()) ? "" : dateKey(parsed);
+  };
+  const scheduleDetails = (scheduledRecords || []).flatMap((record) => {
+    if (["cancelled", "canceled"].includes(String(record?.status || "").toLowerCase())) return [];
+    const customer = record?.customer_name || [record?.customer?.first_name, record?.customer?.last_name].filter(Boolean).join(" ") || record?.customer?.email || record?.customer_email || "Customer";
+    const project = (record?.items || []).map((item) => item?.name || item?.product_id?.name).filter(Boolean).join(", ") || "Project";
+    const identity = String(record?._id || record?.id || record?.tracking || `${customer}-${project}`);
+    return [
+      ...(record?.inspection_date ? [{ id: `${identity}-inspection`, date: getRecordDateKey(record.inspection_date), kind: "Inspection", time: record.inspection_time, duration: Number(record.inspection_duration_minutes) || 30, customer, project, address: record?.shipping_address || "" }] : []),
+      ...(record?.estimated_installation_date ? [{ id: `${identity}-installation`, date: getRecordDateKey(record.estimated_installation_date), kind: "Installation", time: record.estimated_installation_time, duration: Number(record.installation_duration_minutes) || 60, customer, project, address: record?.shipping_address || "" }] : []),
+    ];
+  });
+  const selectedDateSchedules = scheduleDetails.filter((entry) => entry.date === viewSchedulesDate);
   const now = new Date();
   const manilaDateParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
   const todayKey = `${manilaDateParts.find((part) => part.type === "year")?.value}-${manilaDateParts.find((part) => part.type === "month")?.value}-${manilaDateParts.find((part) => part.type === "day")?.value}`;
@@ -346,16 +366,23 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
         <CalendarDays size={17} aria-hidden="true" />
       </button>
       {isCalendarOpen && createPortal(
-        <div className="fixed inset-0 z-[180] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsCalendarOpen(false); }}>
-          <section role="dialog" aria-modal="true" aria-label={`Choose ${label.toLowerCase()}`} className={`w-full max-w-[380px] overflow-hidden rounded-2xl border shadow-2xl ${calendarSurface}`}>
-            <header className={`flex items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
-              <div>
-                <p className={`text-[10px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-red-300" : "text-red-700"}`}>{label}</p>
-                <h2 className="mt-1 text-lg font-bold">Select date and time</h2>
+        <div className="mobile-fullscreen-overlay fixed inset-0 z-[180] flex h-[100dvh] min-h-0 items-stretch justify-center overflow-hidden overscroll-contain bg-slate-950/60 p-0 backdrop-blur-sm sm:h-auto sm:min-h-screen sm:items-center sm:overflow-y-auto sm:p-5" onMouseDown={(event) => { if (event.target === event.currentTarget) setIsCalendarOpen(false); }}>
+          <section role="dialog" aria-modal="true" aria-label={`Choose ${label.toLowerCase()}`} className={`mobile-fullscreen-dialog flex h-full max-h-full min-h-0 w-full max-w-none flex-col overflow-hidden rounded-none border shadow-2xl sm:h-auto sm:max-h-[88dvh] sm:max-w-[min(96vw,1440px)] sm:rounded-3xl ${calendarSurface}`}>
+            <header className={`flex shrink-0 flex-col gap-2 border-b px-4 py-3 sm:px-6 sm:py-3.5 ${darkMode ? "border-slate-700 bg-[#0b2338]" : "border-slate-200 bg-slate-50"}`}>
+              <div className="flex items-start justify-between gap-4">
+                <div className="flex min-w-0 items-start gap-3">
+                  <span className={`mt-0.5 inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-xl ${darkMode ? "bg-red-500/15 text-red-300" : "bg-red-50 text-red-600"}`}><CalendarDays size={17} aria-hidden="true" /></span>
+                  <div className="min-w-0">
+                    <p className={`text-[9px] font-bold uppercase tracking-[0.16em] ${darkMode ? "text-red-300" : "text-red-600"}`}>{label}</p>
+                    <h2 className={`mt-0.5 text-lg font-bold leading-tight sm:text-xl ${darkMode ? "text-white" : "text-slate-900"}`}>Select date and time</h2>
+                    <p className={`mt-0.5 text-xs leading-4 sm:text-sm ${darkMode ? "text-slate-300" : "text-slate-600"}`}>Choose a date, review existing appointments, and set a time.</p>
+                  </div>
+                </div>
+                <button type="button" onClick={() => setIsCalendarOpen(false)} aria-label="Close date picker" className={`inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-800 text-slate-300 hover:bg-slate-700 hover:text-white" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100 hover:text-slate-900"}`}><X size={18} aria-hidden="true" /></button>
               </div>
-              <button type="button" onClick={() => setIsCalendarOpen(false)} aria-label="Close date picker" className={`flex size-9 items-center justify-center rounded-lg ${darkMode ? "text-slate-300 hover:bg-slate-800" : "text-slate-500 hover:bg-slate-100"}`}><X size={18} /></button>
             </header>
-            <div className="p-5">
+            <div className="grid min-h-0 flex-1 gap-5 overflow-y-auto overscroll-contain px-4 py-5 sm:px-7 lg:grid-cols-[minmax(0,1.5fr)_minmax(280px,0.75fr)]">
+              <div className="mx-auto w-full max-w-[820px]">
               <div className="mb-4 grid grid-cols-[36px_1fr_auto_36px] items-center gap-2">
                 <button type="button" onClick={() => setVisibleMonth(new Date(visibleMonth.getFullYear(), visibleMonth.getMonth() - 1, 1))} aria-label="Previous month" className={`flex size-9 items-center justify-center rounded-lg border ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}><ChevronLeft size={17} /></button>
                 <p className="text-center text-sm font-bold">{monthLabel}</p>
@@ -367,7 +394,7 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
                 <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-amber-500" aria-hidden="true" />Inspection date</span>
                 <span className="inline-flex items-center gap-1.5"><span className="size-2 rounded-full bg-blue-600" aria-hidden="true" />Installation date</span>
               </div>
-              <div className="grid grid-cols-7 gap-1">
+              <div className="grid grid-cols-7 gap-x-2 gap-y-1">
                 {calendarDays.map((date) => {
                   const key = dateKey(date);
                   const isCurrentMonth = date.getMonth() === visibleMonth.getMonth();
@@ -376,32 +403,73 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
                   const isDisabled = Boolean(minimumDate && date < minimumDate);
                   const hasInspection = inspectionDates.has(key);
                   const hasInstallation = installationDates.has(key);
-                  return <button key={key} type="button" disabled={isDisabled} onClick={() => { onChange(key); openTimeModal(value !== key); }} aria-current={isToday ? "date" : undefined} aria-label={`${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${isToday ? ", today" : ""}${hasInspection ? ", inspection scheduled" : ""}${hasInstallation ? ", installation scheduled" : ""}`} className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-25 ${isSelected ? "border-red-700 bg-red-700 font-bold text-white shadow-sm" : isToday ? darkMode ? "border-slate-500 bg-slate-800 font-bold text-white" : "border-slate-300 bg-slate-50 font-bold text-slate-900" : "border-transparent"} ${!isSelected && isCurrentMonth ? darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-red-50" : ""} ${!isCurrentMonth ? `${calendarMuted} opacity-50 hover:bg-slate-500/10` : ""}`}>
-                    {date.getDate()}
-                    {(hasInspection || hasInstallation) && <span className="absolute bottom-1 flex items-center gap-1" aria-hidden="true">
-                      {hasInspection && <span className={`size-1.5 rounded-full ${isSelected ? "bg-white" : "bg-amber-500"}`} />}
-                      {hasInstallation && <span className={`size-1.5 rounded-full ${isSelected ? "bg-white/70" : "bg-blue-600"}`} />}
-                    </span>}
-                  </button>;
+                  return <div key={key} className="relative">
+                    <button type="button" disabled={isDisabled} onClick={() => { onChange(key); openTimeModal(value !== key); }} aria-current={isToday ? "date" : undefined} aria-label={`${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${isToday ? ", today" : ""}${hasInspection ? ", inspection scheduled" : ""}${hasInstallation ? ", installation scheduled" : ""}`} className={`relative flex h-12 w-full items-center justify-center rounded-lg border text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-25 ${isSelected ? "border-red-700 bg-red-700 font-bold text-white shadow-sm" : isToday ? darkMode ? "border-slate-500 bg-slate-800 font-bold text-white" : "border-slate-300 bg-slate-50 font-bold text-slate-900" : "border-transparent"} ${!isSelected && isCurrentMonth ? darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-red-50" : ""} ${!isCurrentMonth ? `${calendarMuted} opacity-50 hover:bg-slate-500/10` : ""}`}>
+                      {date.getDate()}
+                      {isToday && <span className="absolute left-1 top-1 inline-block -scale-x-100 text-xs leading-none" aria-hidden="true">&#128204;</span>}
+                      {(hasInspection || hasInstallation) && <span className="absolute bottom-1 left-1/2 flex -translate-x-1/2 items-center gap-1" aria-hidden="true">
+                        {hasInspection && <span className={`rounded-full bg-amber-500 ${isSelected ? "size-2 ring-1 ring-white shadow-[0_0_0_1px_rgba(15,23,42,0.55)]" : "size-1.5"}`} />}
+                        {hasInstallation && <span className={`rounded-full bg-blue-600 ${isSelected ? "size-2 ring-1 ring-white shadow-[0_0_0_1px_rgba(15,23,42,0.55)]" : "size-1.5"}`} />}
+                      </span>}
+                    </button>
+                    {(hasInspection || hasInstallation) && <button type="button" onClick={(event) => { event.stopPropagation(); setViewSchedulesDate(key); }} aria-label={`View schedules for ${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}`} title="View schedules" className={`absolute right-0.5 top-0.5 z-10 flex size-6 items-center justify-center rounded-full border shadow-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-slate-600 bg-slate-900 text-slate-200 hover:bg-slate-700" : "border-slate-200 bg-white text-slate-600 hover:bg-slate-100"}`}><Eye size={14} aria-hidden="true" /></button>}
+                  </div>;
                 })}
               </div>
-              <div className={`mt-4 flex items-center justify-between gap-4 border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
-                <span className={`text-sm font-semibold ${calendarMuted}`}>Time</span>
-                <button type="button" disabled={!value} onClick={openTimeModal} className={`inline-flex h-10 min-w-32 items-center justify-center gap-2 rounded-lg border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-white hover:bg-slate-50"}`}>
-                  <Clock3 size={15} aria-hidden="true" />{timeValue ? formatScheduleTime(timeValue) : "Choose time"}
-                </button>
               </div>
-              <div className={`mt-4 flex items-center justify-between gap-3 border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
-                <div aria-live="polite">
-                  <p className={`text-sm font-semibold ${value ? darkMode ? "text-slate-100" : "text-slate-900" : calendarMuted}`}>{selectedDateSummary}</p>
-                  <p className={`mt-0.5 text-xs ${calendarMuted}`}>{timeValue ? formatScheduleTime(timeValue) : value ? "Choose a time" : "Date and time not selected"}</p>
+              <aside className={`flex flex-col justify-between rounded-xl border p-5 ${darkMode ? "border-slate-700 bg-slate-950/50" : "border-slate-200 bg-slate-50"}`}>
+                <div>
+                  <p className={`text-[10px] font-bold uppercase tracking-[0.14em] ${calendarMuted}`}>Selected appointment</p>
+                  <p className={`mt-2 text-lg font-bold ${value ? darkMode ? "text-slate-100" : "text-slate-900" : calendarMuted}`} aria-live="polite">{selectedDateSummary}</p>
+                  <div className={`mt-5 rounded-lg border p-4 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-white"}`}>
+                    <p className={`text-xs font-semibold ${calendarMuted}`}>Time</p>
+                    <button type="button" disabled={!value} onClick={openTimeModal} className={`mt-2 inline-flex h-11 w-full items-center justify-center gap-2 rounded-lg border px-3 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-slate-700 bg-slate-950 hover:bg-slate-800" : "border-slate-200 bg-white hover:bg-slate-50"}`}>
+                      <Clock3 size={15} aria-hidden="true" />{timeValue ? formatScheduleTime(timeValue) : "Choose time"}
+                    </button>
+                    <p className={`mt-2 text-xs ${calendarMuted}`}>{timeValue ? `Selected: ${formatScheduleTime(timeValue)}` : "Choose a start time for this appointment."}</p>
+                  </div>
                 </div>
-                <div className="flex shrink-0 items-center gap-2">
-                  {value && <button type="button" onClick={() => { onChange(""); onTimeChange(""); setIsCalendarOpen(false); }} className={`rounded-lg border px-3 py-2 text-xs font-semibold ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-200 hover:bg-slate-50"}`}>Clear</button>}
-                  <button type="button" onClick={() => setIsCalendarOpen(false)} className="rounded-lg bg-red-700 px-4 py-2 text-xs font-semibold text-white hover:bg-red-800">Done</button>
-                </div>
-              </div>
+              </aside>
             </div>
+            <footer className={`flex shrink-0 flex-wrap items-center justify-between gap-3 border-t px-4 py-3 sm:px-7 ${darkMode ? "border-slate-700 bg-slate-900" : "border-slate-200 bg-[#f1f2f0]"}`}>
+              <p className={`min-w-0 text-sm ${calendarMuted}`} aria-live="polite">{selectedDateSummary}{timeValue ? ` · ${formatScheduleTime(timeValue)}` : ""}</p>
+              <div className="flex shrink-0 items-center justify-end gap-2">
+                {value && <button type="button" onClick={() => { onChange(""); onTimeChange(""); setIsCalendarOpen(false); }} className={`rounded-lg border px-4 py-2.5 text-sm font-semibold ${darkMode ? "border-slate-700 hover:bg-slate-800" : "border-slate-300 bg-white hover:bg-slate-50"}`}>Clear</button>}
+                <button type="button" onClick={() => setIsCalendarOpen(false)} className="rounded-lg bg-red-700 px-5 py-2.5 text-sm font-semibold text-white hover:bg-red-800">Done</button>
+              </div>
+            </footer>
+          </section>
+        </div>,
+        document.body
+      )}
+      {viewSchedulesDate && createPortal(
+        <div className="fixed inset-0 z-[220] flex items-center justify-center bg-slate-950/65 p-4 backdrop-blur-sm" onMouseDown={(event) => { if (event.target === event.currentTarget) setViewSchedulesDate(""); }}>
+          <section role="dialog" aria-modal="true" aria-label="Schedules for selected date" className={`w-full max-w-[560px] overflow-hidden rounded-2xl border shadow-2xl ${calendarSurface}`}>
+            <header className={`flex items-center justify-between border-b px-5 py-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              <div>
+                <p className={`text-[10px] font-bold uppercase tracking-[0.15em] ${darkMode ? "text-red-300" : "text-red-700"}`}>Scheduled appointments</p>
+                <h2 className="mt-1 text-lg font-bold">{new Date(`${viewSchedulesDate}T12:00:00`).toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" })}</h2>
+              </div>
+              <button type="button" onClick={() => setViewSchedulesDate("")} aria-label="Close schedule details" className={`flex size-9 items-center justify-center rounded-lg ${darkMode ? "text-slate-300 hover:bg-slate-800" : "text-slate-500 hover:bg-slate-100"}`}><X size={18} /></button>
+            </header>
+            <div className="max-h-[65vh] space-y-3 overflow-y-auto p-5">
+              {selectedDateSchedules.map((entry) => (
+                <article key={entry.id} className={`rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-950/50" : "border-slate-200 bg-slate-50"}`}>
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <h3 className="font-bold">{entry.kind}</h3>
+                    <span className={`rounded-full px-2.5 py-1 text-xs font-semibold ${entry.kind === "Inspection" ? "bg-amber-100 text-amber-800" : "bg-blue-100 text-blue-800"}`}>{entry.time ? formatScheduleTime(entry.time) : "Time not set"}</span>
+                  </div>
+                  <p className={`mt-2 text-sm font-semibold ${darkMode ? "text-slate-200" : "text-slate-800"}`}>{entry.customer}</p>
+                  <p className={`mt-1 text-sm ${calendarMuted}`}>{entry.project}</p>
+                  <p className={`mt-1 text-xs ${calendarMuted}`}>Estimated duration: {entry.duration >= 60 ? `${Math.floor(entry.duration / 60)} hr${Math.floor(entry.duration / 60) === 1 ? "" : "s"}${entry.duration % 60 ? ` ${entry.duration % 60} min` : ""}` : `${entry.duration} min`}</p>
+                  {entry.address && <p className={`mt-2 text-xs ${calendarMuted}`}>{entry.address}</p>}
+                </article>
+              ))}
+              {!selectedDateSchedules.length && <p className={`py-8 text-center text-sm ${calendarMuted}`}>No appointments are scheduled for this date.</p>}
+            </div>
+            <footer className={`flex justify-end border-t p-4 ${darkMode ? "border-slate-700" : "border-slate-100"}`}>
+              <button type="button" onClick={() => setViewSchedulesDate("")} className="rounded-lg bg-red-700 px-4 py-2 text-sm font-semibold text-white hover:bg-red-800">Close</button>
+            </footer>
           </section>
         </div>,
         document.body
@@ -638,6 +706,9 @@ export const validateInspectionPayload = (payload = {}, { requireScheduleTimes =
   if (requireScheduleTimes && payload.estimated_installation_date && !payload.estimated_installation_time) nextErrors.estimated_installation_time = "Choose an installation start time.";
   if (payload.project_additional_charges?.some((charge) => (String(charge.name || "").trim() || String(charge.amount ?? "").trim()) && (!String(charge.name || "").trim() || String(charge.amount ?? "").trim() === "" || !Number.isFinite(Number(charge.amount)) || Number(charge.amount) < 0))) {
     nextErrors.project_additional_charges = "Each additional charge needs a description and a non-negative amount.";
+  }
+  if (payload.items?.some((item) => (item.additional_project_charges || []).some((charge) => (String(charge.name || "").trim() || String(charge.amount ?? "").trim()) && (!String(charge.name || "").trim() || String(charge.amount ?? "").trim() === "" || !Number.isFinite(Number(charge.amount)) || Number(charge.amount) < 0)))) {
+    nextErrors.additional_project_charges = "Each product charge needs a description and a non-negative amount.";
   }
   const installationDateError = getInstallationDateError(payload.inspection_date, payload.estimated_installation_date);
   if (installationDateError) nextErrors.estimated_installation_date = installationDateError;
@@ -1522,6 +1593,50 @@ function SiteInspection() {
     return calculateMeasurementSubtotal(item, product);
   };
 
+  const getItemAdditionalCharges = (item) => Array.isArray(item?.additional_project_charges) ? item.additional_project_charges : [];
+  const getItemAdditionalChargesTotal = (item) => getItemAdditionalCharges(item).reduce((sum, charge) => {
+    return String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== ""
+      ? sum + Math.max(0, Number(charge.amount) || 0)
+      : sum;
+  }, 0);
+  const renderItemAdditionalCharges = (item, index, onFieldChange) => {
+    const charges = getItemAdditionalCharges(item);
+    const chargesTotal = getItemAdditionalChargesTotal(item);
+    const updateCharges = (nextCharges) => onFieldChange(item.id, "additional_project_charges", nextCharges);
+    return <div className={`col-span-full overflow-hidden rounded-xl border ${darkMode ? "border-slate-700 bg-slate-900/60" : "border-slate-200 bg-white"}`}>
+      <div className={`flex flex-wrap items-center justify-between gap-3 border-b px-3 py-2.5 sm:px-4 ${darkMode ? "border-slate-700 bg-slate-800/70" : "border-slate-200 bg-slate-50"}`}>
+        <div className="flex min-w-0 items-center gap-2.5">
+          <span className={`flex size-8 shrink-0 items-center justify-center rounded-lg ${darkMode ? "bg-amber-400/10 text-amber-300" : "bg-amber-50 text-amber-700"}`}><FileText size={15} aria-hidden="true" /></span>
+          <div className="min-w-0">
+            <p className={`truncate text-xs font-bold ${darkMode ? "text-slate-100" : "text-slate-800"}`}>Product charges <span className="font-medium text-slate-500">· {item.name || `Product ${index + 1}`}</span></p>
+            <p className={`mt-0.5 text-[11px] ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional fees for this product only</p>
+          </div>
+        </div>
+        <button type="button" disabled={!normalizeProductId(item.product_id)} onClick={() => updateCharges([...charges, { name: "", amount: "", note: "" }])} className={`inline-flex min-h-9 items-center justify-center gap-1.5 rounded-lg border px-3 py-1.5 text-xs font-bold transition disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-amber-400/30 bg-amber-400/10 text-amber-200 hover:bg-amber-400/15" : "border-amber-200 bg-white text-amber-800 hover:bg-amber-50"}`}><Plus size={14} aria-hidden="true" />Add charge</button>
+      </div>
+      <div className="space-y-2.5 p-3 sm:p-4">
+        {!charges.length && <p className={`rounded-lg border border-dashed px-3 py-3 text-center text-xs ${darkMode ? "border-slate-700 text-slate-400" : "border-slate-200 text-slate-500"}`}>No extra charges for this product. Use <span className="font-semibold">Add charge</span> to include a confirmed fee.</p>}
+        {charges.map((charge, chargeIndex) => <div key={`${item.id}-product-charge-${chargeIndex}`} className={`grid items-center gap-2 rounded-lg border p-2 sm:grid-cols-[minmax(0,1fr)_180px_40px] ${darkMode ? "border-slate-700 bg-slate-950/40" : "border-slate-200 bg-slate-50/70"}`}>
+          <label className="min-w-0">
+            <span className={`mb-1 block text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Charge description</span>
+            <input aria-label={`Charge name for ${item.name || `product ${index + 1}`}`} placeholder="e.g. Special installation" value={charge.name || ""} onChange={(event) => updateCharges(charges.map((entry, i) => i === chargeIndex ? { ...entry, name: event.target.value } : entry))} className={`${fieldClass} min-h-10`} />
+          </label>
+          <label className="min-w-0">
+            <span className={`mb-1 block text-[10px] font-bold uppercase tracking-wide ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Amount</span>
+            <div className="relative">
+              <span className={`pointer-events-none absolute left-3 top-1/2 -translate-y-1/2 text-sm font-semibold ${darkMode ? "text-slate-400" : "text-slate-500"}`}>₱</span>
+              <input aria-label={`Charge amount for ${item.name || `product ${index + 1}`}`} type="number" min="0" step="0.01" placeholder="0.00" value={charge.amount ?? ""} onChange={(event) => updateCharges(charges.map((entry, i) => i === chargeIndex ? { ...entry, amount: event.target.value } : entry))} className={`${fieldClass} min-h-10 pl-7`} />
+            </div>
+          </label>
+          <button type="button" aria-label={`Remove charge for ${item.name || `product ${index + 1}`}`} title="Remove charge" onClick={() => updateCharges(charges.filter((_, i) => i !== chargeIndex))} className={`inline-flex size-10 items-center justify-center self-end rounded-lg border transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-red-400/30 bg-red-400/5 text-red-300 hover:bg-red-400/10" : "border-red-200 bg-white text-red-600 hover:bg-red-50"}`}><Trash2 size={15} aria-hidden="true" /></button>
+        </div>)}
+        {chargesTotal > 0 && <div className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 ${darkMode ? "bg-emerald-400/10 text-emerald-200" : "bg-emerald-50 text-emerald-800"}`}>
+          <span className="text-xs font-semibold">Total product charges</span>
+          <span className="text-sm font-extrabold tabular-nums">{formatCurrency(chargesTotal)}</span>
+        </div>}
+      </div>
+    </div>;
+  };
   const getInspectionProductForItem = (item) => {
     const productId = normalizeProductId(item.product_id);
     return products.find((candidate) => String(candidate._id || candidate.id) === productId) || null;
@@ -2116,6 +2231,7 @@ function SiteInspection() {
           customization_fee: Number(item.customization_fee) || 0,
           customization: Boolean(item.customization),
           extra_charges: item.extra_charges || [],
+          additional_project_charges: getItemAdditionalCharges(item).filter((charge) => String(charge.name || "").trim() || String(charge.amount ?? "").trim()).map((charge) => ({ name: String(charge.name || "").trim(), amount: Number(charge.amount), note: String(charge.note || "").trim() })),
           size_limits: item.size_limits || {},
           measurement_unit: item.measurement_unit || item.measurementUnit || item.dimensions?.unit || "in",
           width: Number(item.width) || 0,
@@ -2431,7 +2547,8 @@ function SiteInspection() {
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
-    const totalEstimate = productEstimate + (newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
+    const productCharges = (newInspection.items || []).reduce((sum, item) => sum + getItemAdditionalChargesTotal(item), 0);
+    const totalEstimate = productEstimate + productCharges + (newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
     return { totalArea, totalEstimate };
   };
 
@@ -2447,7 +2564,8 @@ function SiteInspection() {
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
-    const totalEstimate = productEstimate + (editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
+    const productCharges = (editInspection.items || []).reduce((sum, item) => sum + getItemAdditionalChargesTotal(item), 0);
+    const totalEstimate = productEstimate + productCharges + (editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
     return { totalArea, totalEstimate };
   };
 
@@ -2717,7 +2835,7 @@ function SiteInspection() {
       const width = Number(item.width) || 0;
       const height = Number(item.height) || 0;
       const area = Number(item.area) || Math.round(((width * height) / 144) * 100) / 100;
-      const amount = Number(item.line_total) || (item.is_estimate && Number(item.estimated_price) ? Number(item.estimated_price) : quantity * unitPrice);
+      const amount = (Number(item.line_total) || (item.is_estimate && Number(item.estimated_price) ? Number(item.estimated_price) : quantity * unitPrice)) + getItemAdditionalChargesTotal(item);
       return {
         name: itemName,
         quantity,
@@ -2727,6 +2845,7 @@ function SiteInspection() {
         area,
         unitPrice,
         amount,
+        additionalProjectCharges: getItemAdditionalCharges(item).map((charge) => ({ name: charge.name || "Additional charge", amount: Number(charge.amount) || 0, note: charge.note || "" })),
         pricing_method: item.pricing_method || "",
         price_per_blade: Number(item.price_per_blade) || 0,
         blade_glass_type: item.blade_glass_type || "",
@@ -2801,7 +2920,7 @@ function SiteInspection() {
         setContractData(generateContractData(order));
         setContractNeedsRegeneration(false);
         setShowContractModal(true);
-        toast("Existing contract loaded. No duplicate contract was created.", { icon: "📄" });
+        toast("Existing contract loaded. No duplicate contract was created.", { icon: "\u{1F4C4}" });
         return;
       }
 
@@ -3607,6 +3726,7 @@ function SiteInspection() {
             customization_fee: Number(item.customization_fee) || 0,
             customization: Boolean(item.customization),
             extra_charges: item.extra_charges || [],
+            additional_project_charges: getItemAdditionalCharges(item).filter((charge) => String(charge.name || "").trim() || String(charge.amount ?? "").trim()).map((charge) => ({ name: String(charge.name || "").trim(), amount: Number(charge.amount), note: String(charge.note || "").trim() })),
             size_limits: item.size_limits || {},
             measurement_unit: item.measurement_unit || item.measurementUnit || item.dimensions?.unit || "in",
             width: Number(item.width) || 0,
@@ -4542,7 +4662,7 @@ function SiteInspection() {
                           }}
                           className={fieldClass}
                           darkMode={darkMode}
-                          scheduledRecords={inspections}
+                          scheduledRecords={rushOrderRecords}
                         />
                         <label className="mt-3 block text-xs font-semibold">Inspection duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={newInspection.inspection_duration_minutes} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleInspectionFieldChange("inspection_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.inspection_date && <p className="mt-2 text-xs text-red-400">{errors.inspection_date}</p>}
@@ -4564,7 +4684,7 @@ function SiteInspection() {
                           }}
                           className={fieldClass}
                           darkMode={darkMode}
-                          scheduledRecords={inspections}
+                          scheduledRecords={rushOrderRecords}
                         />
                         <label className="mt-3 block text-xs font-semibold">Installation duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={newInspection.installation_duration_minutes} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleInspectionFieldChange("installation_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.estimated_installation_date && <p className="mt-2 text-xs text-red-400">{errors.estimated_installation_date}</p>}
@@ -4582,7 +4702,7 @@ function SiteInspection() {
 
                     <section className={`mt-5 rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
                       <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className={`text-sm font-bold ${labelClass}`}>Additional project charges</h3><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional; add only charges confirmed for this project.</p></div><button type="button" onClick={() => handleInspectionFieldChange("project_additional_charges", [...(newInspection.project_additional_charges || []), { name: "", amount: "", note: "" }])} className="rounded-lg border px-3 py-2 text-xs font-semibold">Add charge</button></div>
-                      {(newInspection.project_additional_charges || []).map((charge, index) => <div key={`new-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="₱ Amount" value={charge.amount} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.filter((_, i) => i !== index))} className="rounded-lg border">×</button></div>)}
+                      {(newInspection.project_additional_charges || []).map((charge, index) => <div key={`new-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="Amount (PHP)" value={charge.amount} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.filter((_, i) => i !== index))} className="inline-flex size-9 items-center justify-center rounded-lg border border-red-200 bg-white text-red-600 transition hover:bg-red-50"><Trash2 size={15} aria-hidden="true" /></button></div>)}
                     </section>
 
                     {newInspection.items.length > 1 && (
@@ -4759,9 +4879,9 @@ function SiteInspection() {
                       {(newInspection.items || []).map((item, index) => {
                         const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
                         const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
-                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) + getItemAdditionalChargesTotal(item) : 0;
                         const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new") : null;
-                        if (bladeRow) return bladeRow;
+                        if (bladeRow) return <Fragment key={`new-blade-charge-${item.id}`}>{bladeRow}{renderItemAdditionalCharges(item, index, handleItemFieldChange)}</Fragment>;
                         return (
                           <div key={item.id} className={`m-0 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] items-start gap-2 border-b p-3 transition-colors ${hasSelectedRushCharge(item) ? darkMode ? "border-red-400/80 bg-red-500/20 hover:bg-red-500/30" : "border-red-500 bg-red-100 hover:bg-red-200" : darkMode ? "border-[#263040] bg-[#161c26] hover:bg-[#1b2230]" : "border-[#dde3ec] bg-white hover:bg-[#f6f8fb]"} ${index === (newInspection.items || []).length - 1 ? "last:border-b-0" : ""}`}>
                             <div className="flex flex-col items-start gap-2">
@@ -4830,6 +4950,7 @@ function SiteInspection() {
                               <div className="min-w-0 flex-1">{renderOptionalChargeOptions(item, handleItemFieldChange)}</div>
                               {hasSelectedRushCharge(item) && <span className={`inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${darkMode ? "border-red-300 bg-red-600 text-white" : "border-red-700 bg-red-600 text-white"}`}><span className="size-2 rounded-full bg-white" aria-hidden="true" />Rush</span>}
                             </div>}
+                            {renderItemAdditionalCharges(item, index, handleItemFieldChange)}
                             {newInspection.items.length > 1 && newInspection.warranty_assignment_mode === "per_product" && (
                               <div className={`col-span-full grid gap-3 border-t pt-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)] ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                                 <label className="min-w-0">
@@ -4881,9 +5002,9 @@ function SiteInspection() {
                       {(newInspection.items || []).map((item, index) => {
                         const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
                         const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
-                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) + getItemAdditionalChargesTotal(item) : 0;
                         const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleItemFieldChange, handleItemProductChange, removeItemRow, computeTotals(), "new-mobile") : null;
-                        if (bladeRow) return bladeRow;
+                        if (bladeRow) return <Fragment key={`new-mobile-blade-charge-${item.id}`}>{bladeRow}{renderItemAdditionalCharges(item, index, handleItemFieldChange)}</Fragment>;
                         const inputClasses = darkMode
                           ? "min-w-0 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-red-500"
                           : "min-w-0 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-red-500";
@@ -4913,6 +5034,7 @@ function SiteInspection() {
                               </select>
                               {renderBladeMeasurementOptions(item, handleItemFieldChange, index)}
                               {renderOptionalChargeOptions(item, handleItemFieldChange)}
+                              {renderItemAdditionalCharges(item, index, handleItemFieldChange)}
                                 {newInspection.items.length > 1 && newInspection.warranty_assignment_mode === "per_product" && (
                                   <div className="mt-3">
                                     <label className={labelClasses} htmlFor={`new-measurement-warranty-${index}`}>Warranty</label>
@@ -4993,10 +5115,11 @@ function SiteInspection() {
                     <button type="button" onClick={addItemRow} className={`mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 ${darkMode ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
                       <Plus size={15} aria-hidden="true" /> Add measurement
                     </button>
+                    {errors.additional_project_charges && <p role="alert" className="mt-2 text-xs font-medium text-red-600">{errors.additional_project_charges}</p>}
 
                     <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                       <div className={`text-right ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        {(newInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0))} additional charges</p>}
+                        {((newInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") || (newInspection.items || []).some((item) => getItemAdditionalChargesTotal(item) > 0)) && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0) + (newInspection.items || []).reduce((sum, item) => sum + getItemAdditionalChargesTotal(item), 0))} additional charges</p>}
                         <div className="text-lg font-black">Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeTotals().totalEstimate)}</span></div>
                       </div>
                     </div>
@@ -5005,7 +5128,7 @@ function SiteInspection() {
                   {newInspectionStep === 2 && <section className={`rounded-2xl p-3 sm:p-5 ${modalSectionClass}`}>
                     <h3 className={modalSectionTitleClass}>Payment Information</h3>
                     <div className={`mb-5 rounded-xl border px-4 py-3 text-sm font-medium ${darkMode ? "border-amber-500/30 bg-amber-500/10 text-amber-100" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
-                      <span className="mr-2 text-base">💡</span>
+                      <span className="mr-2 text-base">Tip:</span>
                       Business Policy: {isFullPaymentPlan(newInspection.payment_terms) ? "Full payment is required before project commences." : `Downpayment to be paid: ${formatCurrency(resolveRequiredPaymentAmount(newInspection.payment_terms, Number(newInspection.manual_override) || computeTotals().totalEstimate, newInspection.required_downpayment_amount))}.`}
                     </div>
 
@@ -5722,7 +5845,7 @@ function SiteInspection() {
                           }}
                           className={fieldClass}
                           darkMode={darkMode}
-                          scheduledRecords={inspections}
+                          scheduledRecords={rushOrderRecords}
                           excludeRecordId={editInspection.id}
                         />
                         <label className="mt-3 block text-xs font-semibold">Inspection duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={editInspection.inspection_duration_minutes ?? 30} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleEditChange("inspection_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
@@ -5745,7 +5868,7 @@ function SiteInspection() {
                           }}
                           className={fieldClass}
                           darkMode={darkMode}
-                          scheduledRecords={inspections}
+                          scheduledRecords={rushOrderRecords}
                           excludeRecordId={editInspection.id}
                         />
                         <label className="mt-3 block text-xs font-semibold">Installation duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={editInspection.installation_duration_minutes ?? 60} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleEditChange("installation_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
@@ -5764,7 +5887,7 @@ function SiteInspection() {
 
                     <section className={`mt-5 rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
                       <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className={`text-sm font-bold ${labelClass}`}>Additional project charges</h3><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional; add only charges confirmed for this project.</p></div><button type="button" onClick={() => handleEditChange("project_additional_charges", [...(editInspection.project_additional_charges || []), { name: "", amount: "", note: "" }])} className="rounded-lg border px-3 py-2 text-xs font-semibold">Add charge</button></div>
-                      {(editInspection.project_additional_charges || []).map((charge, index) => <div key={`edit-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="₱ Amount" value={charge.amount} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleEditChange("project_additional_charges", editInspection.project_additional_charges.filter((_, i) => i !== index))} className="rounded-lg border">×</button></div>)}
+                      {(editInspection.project_additional_charges || []).map((charge, index) => <div key={`edit-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="Amount (PHP)" value={charge.amount} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleEditChange("project_additional_charges", editInspection.project_additional_charges.filter((_, i) => i !== index))} className="inline-flex size-9 items-center justify-center rounded-lg border border-red-200 bg-white text-red-600 transition hover:bg-red-50"><Trash2 size={15} aria-hidden="true" /></button></div>)}
                     </section>
 
                     {editInspection.items.length > 1 && (
@@ -5953,9 +6076,9 @@ function SiteInspection() {
                       {(editInspection.items || []).map((item, index) => {
                         const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
                         const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
-                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) + getItemAdditionalChargesTotal(item) : 0;
                         const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit") : null;
-                        if (bladeRow) return bladeRow;
+                        if (bladeRow) return <Fragment key={`edit-blade-charge-${item.id || index}`}>{bladeRow}{renderItemAdditionalCharges(item, index, handleEditItemFieldChange)}</Fragment>;
                         return (
                           <div key={item.id || `${item.product_id || "row"}-${index}`} className={`m-0 grid min-w-[820px] grid-cols-[1.7fr_0.9fr_0.9fr_0.8fr_0.7fr_1fr_1fr_40px] items-start gap-2 border-b p-3 transition-colors ${hasSelectedRushCharge(item) ? darkMode ? "border-red-400/80 bg-red-500/20 hover:bg-red-500/30" : "border-red-500 bg-red-100 hover:bg-red-200" : darkMode ? "border-[#263040] bg-[#161c26] hover:bg-[#1b2230]" : "border-[#dde3ec] bg-white hover:bg-[#f6f8fb]"} ${index === (editInspection.items || []).length - 1 ? "last:border-b-0" : ""}`}>
                             <div className="flex flex-col items-start gap-2">
@@ -6032,6 +6155,7 @@ function SiteInspection() {
                               <div className="min-w-0 flex-1">{renderOptionalChargeOptions(item, handleEditItemFieldChange)}</div>
                               {hasSelectedRushCharge(item) && <span className={`inline-flex w-fit shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[10px] font-bold uppercase tracking-wide ${darkMode ? "border-red-300 bg-red-600 text-white" : "border-red-700 bg-red-600 text-white"}`}><span className="size-2 rounded-full bg-white" aria-hidden="true" />Rush</span>}
                             </div>}
+                            {renderItemAdditionalCharges(item, index, handleEditItemFieldChange)}
                             {editInspection.items.length > 1 && editInspection.warranty_assignment_mode === "per_product" && (
                               <div className={`col-span-full grid gap-3 border-t pt-3 sm:grid-cols-[minmax(0,1fr)_minmax(180px,0.8fr)] ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                                 <label className="min-w-0">
@@ -6085,9 +6209,9 @@ function SiteInspection() {
                       {(editInspection.items || []).map((item, index) => {
                         const hasSelectedProduct = Boolean(normalizeProductId(item.product_id));
                         const hasActiveProduct = products.some((product) => String(product._id || product.id) === normalizeProductId(item.product_id));
-                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) : 0;
+                        const rowSubtotal = hasSelectedProduct ? calculateRowSubtotal(item) + getItemAdditionalChargesTotal(item) : 0;
                         const bladeRow = hasSelectedProduct ? renderBladeMeasurementRow(item, index, handleEditItemFieldChange, handleEditItemProductChange, removeEditItemRow, computeEditTotals(), "edit-mobile") : null;
-                        if (bladeRow) return bladeRow;
+                        if (bladeRow) return <Fragment key={`edit-mobile-blade-charge-${item.id || index}`}>{bladeRow}{renderItemAdditionalCharges(item, index, handleEditItemFieldChange)}</Fragment>;
                         const inputClasses = darkMode
                           ? "min-w-0 w-full rounded-lg border border-slate-600 bg-[#122d42] px-3 py-2.5 text-sm text-slate-100 outline-none focus:border-red-500"
                           : "min-w-0 w-full rounded-lg border border-slate-200 bg-white px-3 py-2.5 text-sm text-slate-900 outline-none focus:border-red-500";
@@ -6117,6 +6241,7 @@ function SiteInspection() {
                               </select>
                               {renderBladeMeasurementOptions(item, handleEditItemFieldChange, index)}
                               {renderOptionalChargeOptions(item, handleEditItemFieldChange)}
+                              {renderItemAdditionalCharges(item, index, handleEditItemFieldChange)}
                               {editInspection.items.length > 1 && editInspection.warranty_assignment_mode === "per_product" && (
                                 <div className="mt-3">
                                   <label className={labelClasses} htmlFor={`edit-measurement-warranty-${index}`}>Warranty</label>
@@ -6189,10 +6314,11 @@ function SiteInspection() {
                     <button type="button" disabled={!editMeasurementsEnabled} onClick={addEditItemRow} className={`mt-4 inline-flex min-h-10 items-center justify-center gap-2 rounded-xl border px-3.5 py-2 text-sm font-bold transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-50 ${darkMode ? "border-red-500/40 bg-red-500/10 text-red-300 hover:bg-red-500/20" : "border-red-200 bg-red-50 text-red-700 hover:bg-red-100"}`}>
                       <Plus size={15} aria-hidden="true" /> Add measurement
                     </button>
+                    {errors.additional_project_charges && <p role="alert" className="mt-2 text-xs font-medium text-red-600">{errors.additional_project_charges}</p>}
 
                     <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
                       <div className={`text-right ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        {(editInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0))} additional charges</p>}
+                        {((editInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") || (editInspection.items || []).some((item) => getItemAdditionalChargesTotal(item) > 0)) && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0) + (editInspection.items || []).reduce((sum, item) => sum + getItemAdditionalChargesTotal(item), 0))} additional charges</p>}
                         <div className="text-lg font-black">Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeEditTotals().totalEstimate)}</span></div>
                       </div>
                     </div>
@@ -6204,7 +6330,7 @@ function SiteInspection() {
                     </h3>
 
                     <div className={`mb-5 rounded-xl border px-4 py-3 text-sm font-medium ${darkMode ? "border-amber-500/30 bg-amber-500/10 text-amber-100" : "border-amber-200 bg-amber-50 text-amber-700"}`}>
-                      <span className="mr-2 text-base">💡</span>
+                      <span className="mr-2 text-base">Tip:</span>
                       Business Policy: {isFullPaymentPlan(editInspection.payment_terms || "") ? "Full payment is required before project commences." : `Downpayment to be paid: ${formatCurrency(resolveRequiredPaymentAmount(editInspection.payment_terms, Number(editInspection.manual_override) || computeEditTotals().totalEstimate, editInspection.required_downpayment_amount))}.`}
                     </div>
 

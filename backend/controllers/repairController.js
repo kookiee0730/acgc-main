@@ -13,12 +13,57 @@ const money = (value, label = "Amount") => {
 };
 const statusError = (message, status = 409) => Object.assign(new Error(message), { status });
 const event = (repair, name, detail, actor) => repair.history.push({ event: name, detail: text(detail), actor: actor?.id || null, actorRole: actor?.role || "system" });
+const repairTotal = (repair) => Math.round(Math.max(0, Number(repair.quotation?.total) || 0) * 100) / 100;
+const verifiedRepairAmount = (repair) => {
+  const stored = Number(repair.payment?.verifiedAmount);
+  if (Number.isFinite(stored) && stored > 0) return Math.round(stored * 100) / 100;
+  const recordsTotal = (repair.payment?.records || []).reduce((sum, record) => sum + (Number(record.amount) || 0), 0);
+  if (recordsTotal > 0) return Math.round(recordsTotal * 100) / 100;
+  if (repair.payment?.proofReviewStatus === "approved" && repair.payment?.status === "received") return Math.round((Number(repair.payment.proofAmount) || Number(repair.completion?.amountPaid) || 0) * 100) / 100;
+  return 0;
+};
+const updateVerifiedPayment = (repair, actor, { amount, method, reference = "", source = "admin_recorded", proofUrl = "" }) => {
+  const total = repairTotal(repair);
+  const previous = verifiedRepairAmount(repair);
+  const next = Math.round((previous + amount) * 100) / 100;
+  const remaining = Math.max(0, Math.round((total - next) * 100) / 100);
+  if (amount <= 0) throw statusError("Payment amount must be greater than zero.", 400);
+  if (amount > Math.max(0, Math.round((total - previous) * 100) / 100)) throw statusError("Payment amount exceeds the remaining repair balance.", 400);
+  const verifiedAt = new Date();
+  repair.payment.records = [...(repair.payment.records || []), { id: new mongoose.Types.ObjectId().toString(), amount, method: text(method, 80), reference: text(reference, 180), source, proofUrl: text(proofUrl, 1200), verifiedAt, verifiedBy: actor.id || null, verifiedByRole: actor.role || "admin" }];
+  repair.payment.verifiedAmount = next;
+  repair.payment.method = text(method, 80);
+  repair.payment.status = remaining === 0 ? "paid" : next > 0 ? "partial" : "pending";
+  repair.payment.receivedAt = next > 0 ? verifiedAt : null;
+  repair.payment.verifiedAt = remaining === 0 ? verifiedAt : repair.payment.verifiedAt || null;
+  repair.payment.verifiedBy = remaining === 0 ? actor.id || null : repair.payment.verifiedBy || null;
+  repair.payment.verifiedByRole = remaining === 0 ? actor.role || "admin" : repair.payment.verifiedByRole || "";
+  return { total, paid: next, remaining, fullyPaid: remaining === 0, verifiedAt };
+};
+const isFullyPaidRepair = (repair) => {
+  if (repair.workflowType !== "paid" || verifiedRepairAmount(repair) < repairTotal(repair)) return false;
+  const currentVerification = repair.payment?.status === "paid" && Boolean(repair.payment?.verifiedAt && repair.payment?.verifiedBy);
+  const legacyAdminVerification = repair.payment?.status === "received" && repair.payment?.proofReviewStatus === "approved"
+    && Boolean(repair.payment?.proofReviewedAt)
+    && (repair.history || []).some((entry) => entry.event === "payment_proof_approved" && entry.actor);
+  return currentVerification || legacyAdminVerification;
+};
 const publicCustomer = (repair) => ({
   _id: repair._id, repairTrackingId: repair.repairTrackingId, order: repair.order, orderTracking: repair.orderTracking, productName: repair.productName,
   customerName: repair.customerName, customerEmail: repair.customerEmail, customerPhone: repair.customerPhone,
   issueDescription: repair.issueDescription, mediaUrls: repair.mediaUrls, installationDate: repair.installationDate, workflowType: repair.workflowType,
   warranty: repair.warranty, status: repair.status, inspection: repair.inspection, quotation: repair.quotation,
-  payment: repair.payment, schedule: repair.schedule, completion: repair.completion, invoiceNumber: repair.invoiceNumber,
+  payment: {
+    method: repair.payment?.method || "", status: repair.payment?.status || "pending", receivedAt: repair.payment?.receivedAt || null,
+    verifiedAmount: verifiedRepairAmount(repair), verifiedAt: repair.payment?.verifiedAt || null,
+    proofUrl: repair.payment?.proofUrl || "", proofFileName: repair.payment?.proofFileName || "", proofAmount: repair.payment?.proofAmount ?? null,
+    proofTransactionNumber: repair.payment?.proofTransactionNumber || "", proofSubmittedAt: repair.payment?.proofSubmittedAt || null,
+    proofReviewedAt: repair.payment?.proofReviewedAt || null, proofReviewStatus: repair.payment?.proofReviewStatus || "none",
+    proofRejectionReason: repair.payment?.proofRejectionReason || "",
+    records: (repair.payment?.records || []).map(({ amount, method, reference, source, verifiedAt }) => ({ amount, method, reference, source, verifiedAt })),
+  },
+  schedule: repair.schedule, completion: repair.completion, invoiceNumber: repair.invoiceNumber,
+  receipt: repair.receipt?.number ? { number: repair.receipt.number, issuedAt: repair.receipt.issuedAt, amountPaidAtIssue: repair.receipt.amountPaidAtIssue } : null,
   history: repair.history, requestedAt: repair.createdAt, updatedAt: repair.updatedAt,
 });
 const publicAdmin = (repair) => repair.toObject ? repair.toObject() : repair;
@@ -316,6 +361,7 @@ export const submitRepairPaymentProof = async (req, res) => {
   if (repair.workflowType !== "paid" || !["customer_accepted", "scheduled", "in_progress", "completed"].includes(repair.status)) {
     return res.status(409).json({ success: false, message: "Accept the repair quotation before submitting payment proof." });
   }
+  if (repair.payment.status === "paid" || isFullyPaidRepair(repair)) return res.status(409).json({ success: false, message: "This repair has already been verified as fully paid." });
   if (repair.payment.proofReviewStatus === "pending") return res.status(409).json({ success: false, message: "Your payment proof is awaiting review." });
 
   const proofUrl = text(req.body?.proofUrl, 1200);
@@ -333,7 +379,10 @@ export const submitRepairPaymentProof = async (req, res) => {
     return res.status(400).json({ success: false, message: "Upload a valid payment proof using the payment uploader." });
   }
   if (!proofFileName) return res.status(400).json({ success: false, message: "Payment proof filename is required." });
-  if (amount < Number(repair.quotation?.total || 0)) return res.status(400).json({ success: false, message: `The submitted amount must cover the full quotation of PHP ${Number(repair.quotation?.total || 0).toFixed(2)}.` });
+  const remaining = Math.max(0, Math.round((repairTotal(repair) - verifiedRepairAmount(repair)) * 100) / 100);
+  if (amount <= 0 || amount > remaining) return res.status(400).json({ success: false, message: `Enter an amount greater than zero and no more than the remaining balance of PHP ${remaining.toFixed(2)}.` });
+  if (transactionNumber && repair.payment.records?.some((record) => String(record.reference || "").trim() === transactionNumber)) return res.status(409).json({ success: false, message: "This transaction reference has already been recorded." });
+  if (repair.payment.records?.some((record) => record.proofUrl && record.proofUrl === proofUrl)) return res.status(409).json({ success: false, message: "This payment proof has already been verified." });
 
   repair.payment.proofUrl = proofUrl;
   repair.payment.proofFileName = proofFileName;
@@ -343,6 +392,7 @@ export const submitRepairPaymentProof = async (req, res) => {
   repair.payment.proofReviewedAt = null;
   repair.payment.proofReviewStatus = "pending";
   repair.payment.proofRejectionReason = "";
+  repair.payment.status = verifiedRepairAmount(repair) > 0 ? "partial" : "pending";
   event(repair, "payment_proof_submitted", `Customer submitted payment proof for PHP ${amount.toFixed(2)}${transactionNumber ? `, reference ${transactionNumber}` : ""}.`, req.user);
   await repair.save();
   void notifyAdmin(`Repair payment proof submitted: ${repair.productName}`, `${repair.customerName} submitted payment proof for repair ${repair.orderTracking}. Review the payment proof in the repair management queue.`);
@@ -350,36 +400,91 @@ export const submitRepairPaymentProof = async (req, res) => {
 };
 
 export const reviewRepairPaymentProof = async (req, res) => {
+  if (!["admin", "super_admin"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Only an administrator can verify repair payment proof." });
   const repair = await getRepair(req.params.repairId);
   if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
   if (repair.workflowType !== "paid" || repair.payment.proofReviewStatus !== "pending") return res.status(409).json({ success: false, message: "There is no pending repair payment proof to review." });
 
   const action = req.body?.action;
   if (action === "approve") {
-    if (Number(repair.payment.proofAmount || 0) < Number(repair.quotation?.total || 0)) return res.status(409).json({ success: false, message: "The submitted proof does not cover the full quotation." });
+    const proofAmount = money(repair.payment.proofAmount, "Verified payment amount");
+    const outstanding = Math.max(0, Math.round((repairTotal(repair) - verifiedRepairAmount(repair)) * 100) / 100);
+    if (proofAmount <= 0 || proofAmount > outstanding) return res.status(409).json({ success: false, message: "The submitted proof exceeds the remaining repair balance or has no payable amount." });
+    if (proofAmount >= outstanding && req.body?.confirmFullyPaid !== true) return res.status(400).json({ success: false, code: "CONFIRM_FULL_PAYMENT", message: "Confirm that the repair has been fully paid before verifying this payment." });
+    const method = text(req.body?.method || "Online payment", 80);
+    const result = updateVerifiedPayment(repair, req.user, { amount: proofAmount, method, reference: repair.payment.proofTransactionNumber, source: "customer_proof", proofUrl: repair.payment.proofUrl });
     repair.payment.proofReviewStatus = "approved";
     repair.payment.proofRejectionReason = "";
-    repair.payment.status = "received";
-    repair.payment.receivedAt = new Date();
     repair.payment.proofReviewedAt = new Date();
-    event(repair, "payment_proof_approved", `Payment proof approved for PHP ${Number(repair.payment.proofAmount).toFixed(2)}.`, req.user);
+    repair.payment.proofReviewedBy = req.user.id;
+    event(repair, "payment_proof_approved", `Payment proof verified for PHP ${proofAmount.toFixed(2)}. Verified total: PHP ${result.paid.toFixed(2)}; remaining balance: PHP ${result.remaining.toFixed(2)}.`, req.user);
   } else if (action === "reject") {
     const reason = text(req.body?.reason, 1200);
     if (!reason) return res.status(400).json({ success: false, message: "Provide a reason for rejecting this payment proof." });
     repair.payment.proofReviewStatus = "rejected";
     repair.payment.proofRejectionReason = reason;
-    repair.payment.status = "pending";
-    repair.payment.receivedAt = null;
+    repair.payment.status = verifiedRepairAmount(repair) >= repairTotal(repair) ? "paid" : verifiedRepairAmount(repair) > 0 ? "partial" : "pending";
     repair.payment.proofReviewedAt = new Date();
+    repair.payment.proofReviewedBy = req.user.id;
     event(repair, "payment_proof_rejected", `Payment proof rejected: ${reason}`, req.user);
   } else return res.status(400).json({ success: false, message: "Choose approve or reject." });
 
   await repair.save();
   const approved = action === "approve";
-  void quoteCustomer(repair, `Repair payment proof ${approved ? "approved" : "needs correction"}: ${repair.productName}`, approved
-    ? `Your payment proof for ${repair.productName} was verified. The repair team can continue with the service.`
+  void quoteCustomer(repair, `Repair payment proof ${approved ? "verified" : "needs correction"}: ${repair.productName}`, approved
+    ? `Your payment proof for ${repair.productName} was verified. Verified amount: PHP ${Number(repair.payment.proofAmount || 0).toFixed(2)}. Amount paid: PHP ${verifiedRepairAmount(repair).toFixed(2)} of PHP ${repairTotal(repair).toFixed(2)}. Remaining balance: PHP ${Math.max(0, repairTotal(repair) - verifiedRepairAmount(repair)).toFixed(2)}. Payment status: ${repair.payment.status}.`
     : `Your payment proof for ${repair.productName} could not be verified. Reason: ${repair.payment.proofRejectionReason} Please submit a corrected proof in your Warranty & Repair Service page.`);
   res.json({ success: true, repair: publicAdmin(repair) });
+};
+
+export const recordRepairPayment = async (req, res) => {
+  if (!["admin", "super_admin"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Administrator access is required to verify repair payments." });
+  const repair = await getRepair(req.params.repairId);
+  if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
+  if (repair.workflowType !== "paid" || !repair.quotation?.issuedAt) return res.status(409).json({ success: false, message: "Only quoted paid repairs can receive payment." });
+  const requestId = text(req.body?.requestId, 100);
+  if (!requestId) return res.status(400).json({ success: false, message: "A payment request reference is required." });
+  const existing = (repair.payment.records || []).find((record) => record.requestId === requestId);
+  if (existing) return res.json({ success: true, duplicate: true, repair: publicAdmin(repair) });
+  let amount;
+  try { amount = money(req.body?.amount, "Payment amount"); }
+  catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
+  const method = text(req.body?.method, 80);
+  const reference = text(req.body?.reference, 180);
+  if (!method) return res.status(400).json({ success: false, message: "Select the payment method." });
+  if (reference && repair.payment.records?.some((record) => String(record.reference || "").trim() === reference)) return res.status(409).json({ success: false, message: "This transaction reference has already been recorded." });
+  const remaining = Math.max(0, Math.round((repairTotal(repair) - verifiedRepairAmount(repair)) * 100) / 100);
+  if (amount <= 0 || amount > remaining) return res.status(400).json({ success: false, message: `Enter an amount greater than zero and no more than the remaining balance of PHP ${remaining.toFixed(2)}.` });
+  if (amount >= remaining && req.body?.confirmFullyPaid !== true) return res.status(400).json({ success: false, code: "CONFIRM_FULL_PAYMENT", message: "Confirm that the repair has been fully paid before verifying this payment." });
+  try {
+    const result = updateVerifiedPayment(repair, req.user, { amount, method, reference, source: "admin_recorded" });
+    const record = repair.payment.records.at(-1);
+    record.requestId = requestId;
+    event(repair, "payment_verified", `Administrator verified a payment of PHP ${amount.toFixed(2)} by ${method}. Paid: PHP ${result.paid.toFixed(2)} of PHP ${result.total.toFixed(2)}; remaining: PHP ${result.remaining.toFixed(2)}.`, req.user);
+    await repair.save();
+    void quoteCustomer(repair, `Repair payment updated: ${repair.productName}`, `ACGC verified PHP ${amount.toFixed(2)} for repair ${repair.repairTrackingId}. Total paid: PHP ${result.paid.toFixed(2)} of PHP ${result.total.toFixed(2)}. Remaining balance: PHP ${result.remaining.toFixed(2)}. Payment status: ${repair.payment.status}.`);
+    return res.json({ success: true, repair: publicAdmin(repair) });
+  } catch (error) {
+    return res.status(error.status || 400).json({ success: false, message: error.message || "Unable to record repair payment." });
+  }
+};
+
+export const generateRepairReceipt = async (req, res) => {
+  if (!["admin", "super_admin"].includes(req.user?.role)) return res.status(403).json({ success: false, message: "Only an administrator can issue a repair receipt." });
+  const repair = await getRepair(req.params.repairId);
+  if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
+  const warrantyEligible = repair.workflowType === "warranty" && repair.status === "completed" && repair.payment?.status === "not_required";
+  if (!warrantyEligible && !isFullyPaidRepair(repair)) return res.status(409).json({ success: false, message: "Receipt generation is unavailable until the administrator verifies that the repair has been fully paid." });
+  const reprinted = Boolean(repair.receipt?.number);
+  if (!repair.receipt?.number) {
+    const issuedAt = new Date();
+    const number = repair.invoiceNumber || `ACGC-R-${String(repair._id).slice(-8).toUpperCase()}`;
+    repair.receipt = { number, issuedAt, issuedBy: req.user.id, issuedByRole: req.user.role, amountPaidAtIssue: repair.workflowType === "warranty" ? 0 : verifiedRepairAmount(repair) };
+    repair.invoiceNumber = number;
+    event(repair, "receipt_issued", `Repair receipt ${number} issued for ${repair.workflowType === "warranty" ? "warranty-covered service" : `PHP ${verifiedRepairAmount(repair).toFixed(2)} verified payment`}.`, req.user);
+    await repair.save();
+  }
+  return res.json({ success: true, repair: publicAdmin(repair), reprinted });
 };
 
 export const scheduleRepair = async (req, res) => {
@@ -419,17 +524,19 @@ export const completeRepair = async (req, res) => {
   if (repair.status !== "in_progress") return res.status(409).json({ success: false, message: "Only an in-progress repair can be completed." });
   const notes = text(req.body?.notes);
   if (!notes) return res.status(400).json({ success: false, message: "Add completion notes." });
-  const amountPaid = repair.workflowType === "warranty" ? 0 : repair.payment.proofReviewStatus === "approved" ? Number(repair.payment.proofAmount || 0) : null;
+  const amountPaid = repair.workflowType === "warranty" ? 0 : verifiedRepairAmount(repair);
   const evidenceUrls = Array.isArray(req.body?.evidenceUrls) ? req.body.evidenceUrls.slice(0, 10).map((url) => text(url, 1200)).filter((url) => /^https:\/\//i.test(url)) : [];
   repair.completion = { notes, amountPaid, evidenceUrls, completedAt: new Date() };
   if (repair.workflowType === "warranty") {
     repair.payment.status = "not_required";
     repair.payment.receivedAt = null;
   }
-  repair.invoiceNumber = `ACGC-R-${String(repair._id).slice(-8).toUpperCase()}`;
   repair.status = "completed";
   event(repair, "completed", notes, req.user);
   await repair.save();
-  void quoteCustomer(repair, `Repair completed: ${repair.productName}`, `Your repair is complete. Invoice ${repair.invoiceNumber}. Quoted total: PHP ${Number(repair.quotation?.total || 0).toFixed(2)}.`);
+  const paymentMessage = repair.workflowType === "warranty"
+    ? "No payment is required for this warranty-covered repair."
+    : `Verified amount paid: PHP ${verifiedRepairAmount(repair).toFixed(2)} of PHP ${repairTotal(repair).toFixed(2)}. Any receipt will be issued by an administrator after full payment verification.`;
+  void quoteCustomer(repair, `Repair completed: ${repair.productName}`, `Your repair is complete. ${paymentMessage}`);
   res.json({ success: true, repair: publicAdmin(repair) });
 };

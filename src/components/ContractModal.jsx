@@ -224,6 +224,11 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
                       {bladeDetails.isBlade && bladeDetails.hasPriceOverride && (
                         <div className={`mt-1 text-[10px] font-normal ${darkMode ? "text-slate-300" : "text-slate-500"}`}>Product price override</div>
                       )}
+                      {(item.additionalProjectCharges || []).map((charge, chargeIndex) => (
+                        <div key={`item-charge-${index}-${chargeIndex}`} className={`mt-1 text-[9px] font-normal ${darkMode ? "text-amber-200" : "text-amber-800"}`}>
+                          + {charge.name}: {formatCurrency(charge.amount)}{charge.note ? ` · ${charge.note}` : ""}
+                        </div>
+                      ))}
                     </td>
                     <td className="px-3 py-3 text-center">{item.width || 0} x {item.height || 0} ({item.unit || sourceItem.measurement_unit || "in"})</td>
                     <td className="px-3 py-3 text-center">{item.quantity || 1}</td>

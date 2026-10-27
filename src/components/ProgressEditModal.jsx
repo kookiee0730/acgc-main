@@ -144,11 +144,14 @@ const normalizeProjectStages = (stageRows = []) => {
 };
 
 const initialStages = [];
+const getProtectedNotesContent = (project) => project.protected_project_notes
+  ? String(project.protected_project_notes.content || "")
+  : String(project.progress_notes || project.rawOrder?.progress_notes || "");
 
-export default function ProgressEditModal({ project, onClose, onSave, canUploadProgressPhoto = true }) {
+export default function ProgressEditModal({ project, onClose, onSave, canUploadProgressPhoto = true, canEditProtectedNotes = false, onProjectDelay, onSaveProtectedNotes, onAddActivityNote }) {
   const [progress, setProgress] = useState(project.progress || 0);
   const [status, setStatus] = useState(project.status || "Pending");
-  const [additionalNotes, setAdditionalNotes] = useState(project.progress_notes || project.rawOrder?.progress_notes || "");
+  const additionalNotes = project.progress_notes || project.rawOrder?.progress_notes || "";
   const [installationDate, setInstallationDate] = useState(() => {
     const value = project.estimated_installation_date || project.rawOrder?.estimated_installation_date;
     if (!value) return "";
@@ -192,6 +195,18 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const [removeSubStageIndex, setRemoveSubStageIndex] = useState(null);
   const [removeModalError, setRemoveModalError] = useState("");
   const [showMarkDoneConfirmation, setShowMarkDoneConfirmation] = useState(false);
+  const [showProjectDelayModal, setShowProjectDelayModal] = useState(false);
+  const [showDelayResolveModal, setShowDelayResolveModal] = useState(false);
+  const [projectDelayReason, setProjectDelayReason] = useState("");
+  const [projectProposedDate, setProjectProposedDate] = useState("");
+  const [projectDelayError, setProjectDelayError] = useState("");
+  const [showProjectDelayConfirm, setShowProjectDelayConfirm] = useState(false);
+  const [showProtectedNotesModal, setShowProtectedNotesModal] = useState(false);
+  const [protectedNotesDraft, setProtectedNotesDraft] = useState(() => getProtectedNotesContent(project));
+  const [activityNoteDraft, setActivityNoteDraft] = useState("");
+  const [showActivityNoteModal, setShowActivityNoteModal] = useState(false);
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [notesError, setNotesError] = useState("");
   const [stagePendingCompletion, setStagePendingCompletion] = useState(null);
   const [markDoneValidationError, setMarkDoneValidationError] = useState("");
   const [completionDateTime, setCompletionDateTime] = useState(() => {
@@ -241,6 +256,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStages(nextStages);
     setInstallationTime(initialInstallationTime);
+    setProtectedNotesDraft(getProtectedNotesContent(project));
     initialProgressSnapshot.current = createUnsavedSnapshot({
       progress: project.progress || 0,
       status: project.status || "Pending",
@@ -910,19 +926,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     setErrorMessage("");
   };
 
-  const undoUnsavedStageCompletion = (stageIndex) => {
-    const stage = stages[stageIndex];
-    if (!stage?.completed || stage.saved) return;
-    updateStage(stageIndex, {
-      status: stage.previousStatus || "pending",
-      completed: false,
-      date: null,
-      completionNote: "",
-      previousStatus: null,
-    });
-    setErrorMessage("");
-  };
-
   const buildPayloadStages = () => {
     const schedulingDone = stages.some(
       (stage) => stage.key === "installation_scheduling" && stage.completed
@@ -1031,7 +1034,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     }
     if (initial.installationTime !== installationTime) changes.push(`Estimated installation time: ${initial.installationTime || "Not set"} → ${installationTime || "Not set"}`);
     if (initial.status !== status) changes.push(`Project status: ${initial.status} → ${status}`);
-    if (initial.additionalNotes !== additionalNotes) changes.push("Project progress notes were updated.");
 
     const initialOrder = initial.stages.map((stage) => stage.key).join("|");
     const currentOrder = stages.map((stage) => stage.key).join("|");
@@ -1116,6 +1118,40 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     setShowSaveConfirmation(true);
   };
 
+  const prepareProjectDelay = () => {
+    if (!projectDelayReason.trim()) { setProjectDelayError("Enter a reason for the delay."); return; }
+    setProjectDelayError("");
+    setShowProjectDelayModal(false);
+    setShowProjectDelayConfirm(true);
+  };
+  const confirmProjectDelay = async () => {
+    setNotesSaving(true);
+    try {
+      await onProjectDelay("mark_delayed", { reason: projectDelayReason.trim(), proposedRevisedDate: projectProposedDate || null });
+      setShowProjectDelayConfirm(false);
+    } catch (error) { setProjectDelayError(error.message || "Unable to save the delay."); setShowProjectDelayConfirm(false); setShowProjectDelayModal(true); }
+    finally { setNotesSaving(false); }
+  };
+  const confirmResolveProjectDelay = async () => {
+    setNotesSaving(true);
+    try { await onProjectDelay("resolve_delay", {}); setShowDelayResolveModal(false); }
+    catch (error) { setProjectDelayError(error.message || "Unable to resolve the delay."); }
+    finally { setNotesSaving(false); }
+  };
+  const saveProtectedNotes = async () => {
+    setNotesSaving(true); setNotesError("");
+    try { await onSaveProtectedNotes(protectedNotesDraft); setShowProtectedNotesModal(false); }
+    catch (error) { setNotesError(error.message || "Unable to save protected notes."); }
+    finally { setNotesSaving(false); }
+  };
+  const saveActivityNote = async () => {
+    if (!activityNoteDraft.trim()) { setNotesError("Enter a note before saving."); return; }
+    setNotesSaving(true); setNotesError("");
+    try { await onAddActivityNote(activityNoteDraft.trim()); setShowActivityNoteModal(false); }
+    catch (error) { setNotesError(error.message || "Unable to add the note."); }
+    finally { setNotesSaving(false); }
+  };
+
   const handleSave = async () => {
     setErrorMessage("");
     const installationDateError = getInstallationDateError(inspectionDate, installationDate);
@@ -1139,7 +1175,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
           ...project,
           progress,
           status,
-          progress_notes: additionalNotes,
           installation: installationDate ? new Date(`${installationDate}T00:00:00.000Z`).toISOString() : "",
           installationTime,
           stages: payloadStages,
@@ -1241,32 +1276,45 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
             </div>
             <p className="mt-2 text-xs text-slate-500">Automatically calculated from completed stages.</p>
           </div>
-          <div className="mt-4 max-w-sm">
-            <label htmlFor="progress-installation-date" className="mb-1.5 block text-sm font-medium text-slate-700">
-              Est. Installation Date
-            </label>
-            <input
-              id="progress-installation-date"
-              type="date"
-              value={installationDate}
-              min={minimumInstallationDate}
-              onChange={(event) => {
-                setInstallationDate(event.target.value);
-                if (errorMessage) setErrorMessage("");
-              }}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            />
-            <label htmlFor="progress-installation-time" className="mb-1.5 mt-3 block text-sm font-medium text-slate-700">Est. Installation Time</label>
-            <input
-              id="progress-installation-time"
-              type="time"
-              value={installationTime}
-              onChange={(event) => { setInstallationTime(event.target.value); if (errorMessage) setErrorMessage(""); }}
-              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
-            />
-            <p className="mt-1.5 text-xs text-slate-500">Appointments must fit within {businessHours.open || "08:00"}–{businessHours.close || "18:00"} (Asia/Manila). Duration: {project.rawOrder?.installation_duration_minutes || 60} minutes.</p>
+          <div className="mt-4 grid gap-x-4 gap-y-0 sm:grid-cols-2">
+            <div>
+              <div className="mb-1.5 flex flex-wrap items-center justify-between gap-2">
+                <label htmlFor="progress-installation-date" className="block text-sm font-medium text-slate-700">Est. Installation Date</label>
+                <div className="flex items-center gap-2">
+                  {project.project_delay?.is_delayed && <span className="rounded-full bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-800">Delayed</span>}
+                  {project.isOverdue && <span className="rounded-full bg-red-100 px-2 py-0.5 text-xs font-semibold text-red-700">Overdue</span>}
+                  {onProjectDelay && !project.project_delay?.is_delayed && String(project.status || "").toLowerCase() !== "completed" && Number(project.progress || 0) < 100 && !((project.stages || []).length && (project.stages || []).every((stage) => stage.completed || ["done", "completed"].includes(String(stage.status || "").toLowerCase()))) && (
+                    <button type="button" onClick={() => { setProjectDelayReason(""); setProjectProposedDate(""); setProjectDelayError(""); setShowProjectDelayModal(true); }} className="rounded-lg border border-amber-300 bg-amber-50 px-2.5 py-1 text-xs font-semibold text-amber-900 hover:bg-amber-100">Mark as Delayed</button>
+                  )}
+                  {onProjectDelay && project.project_delay?.is_delayed && <button type="button" onClick={() => setShowDelayResolveModal(true)} className="rounded-lg border border-slate-300 px-2.5 py-1 text-xs font-semibold text-slate-700 hover:bg-slate-50">Resolve delay</button>}
+                </div>
+              </div>
+              <input
+                id="progress-installation-date"
+                type="date"
+                value={installationDate}
+                min={minimumInstallationDate}
+                onChange={(event) => {
+                  setInstallationDate(event.target.value);
+                  if (errorMessage) setErrorMessage("");
+                }}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+              {project.project_delay?.is_delayed && <p className="mt-1.5 text-xs text-amber-800">{project.project_delay.reason}{project.project_delay.proposed_revised_installation_date ? ` Proposed date (pending confirmation): ${formatDateToMMDDYYYY(project.project_delay.proposed_revised_installation_date)}.` : ""}</p>}
+            </div>
+            <div>
+              <label htmlFor="progress-installation-time" className="mb-1.5 block text-sm font-medium text-slate-700">Est. Installation Time</label>
+              <input
+                id="progress-installation-time"
+                type="time"
+                value={installationTime}
+                onChange={(event) => { setInstallationTime(event.target.value); if (errorMessage) setErrorMessage(""); }}
+                className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+              />
+            </div>
+            <p className="mt-1.5 text-xs text-slate-500 sm:col-span-2">Appointments must fit within {businessHours.open || "08:00"}–{businessHours.close || "18:00"} (Asia/Manila). Duration: {project.rawOrder?.installation_duration_minutes || 60} minutes.</p>
             {minimumInstallationDate && (
-              <p className="mt-1.5 text-xs text-slate-500">
+              <p className="mt-1.5 text-xs text-slate-500 sm:col-span-2">
                 Must be after the Site Inspection Date. Earliest allowed date is {formatDateToMMDDYYYY(minimumInstallationDate)}.
               </p>
             )}
@@ -1275,11 +1323,19 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
 
         <div className="min-h-0 max-h-none flex-1 overflow-y-auto bg-slate-50 px-3 py-3 sm:px-4 lg:max-h-[460px]">
           <div className="space-y-3">
-          <section className="rounded-xl border border-amber-200 bg-amber-50 p-4">
-            <label htmlFor="progress-additional-notes" className="mb-1 block text-sm font-semibold text-slate-800">Additional Notes (admin only)</label>
-            <p className="mb-2 text-xs text-slate-600">Private notes for staff. Customers will not see this field.</p>
-            <textarea id="progress-additional-notes" value={additionalNotes} maxLength={4000} onChange={(event) => setAdditionalNotes(event.target.value)} rows={3} placeholder="Add internal project notes..." className="w-full resize-y rounded-lg border border-amber-200 bg-white p-3 text-sm text-slate-800 outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" />
-            <div className="mt-1 text-right text-xs text-slate-500">{additionalNotes.length}/4000</div>
+          <section className="space-y-4 rounded-xl border border-amber-200 bg-amber-50 p-4">
+            <div>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <h3 className="text-sm font-semibold text-slate-800">Protected Project Notes</h3>
+                {canEditProtectedNotes && <button type="button" onClick={() => { setProtectedNotesDraft(getProtectedNotesContent(project)); setNotesError(""); setShowProtectedNotesModal(true); }} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Edit protected notes</button>}
+              </div>
+              <p className="mt-1 whitespace-pre-wrap text-sm text-slate-700">{getProtectedNotesContent(project) || "No protected project notes yet."}</p>
+              {project.protected_project_notes?.authorName && <p className="mt-1 text-xs text-slate-500">Added by {project.protected_project_notes.authorName} ({project.protected_project_notes.authorRole || "staff"}) · {project.protected_project_notes.createdAt ? new Date(project.protected_project_notes.createdAt).toLocaleString() : ""}{project.protected_project_notes.updatedAt && project.protected_project_notes.updatedAt !== project.protected_project_notes.createdAt ? ` · Updated ${new Date(project.protected_project_notes.updatedAt).toLocaleString()}` : ""}</p>}
+            </div>
+            <div className="border-t border-amber-200 pt-3">
+              <div className="flex items-center justify-between gap-2"><h3 className="text-sm font-semibold text-slate-800">Staff Activity Notes</h3><button type="button" onClick={() => { setActivityNoteDraft(""); setNotesError(""); setShowActivityNoteModal(true); }} className="rounded-lg border border-amber-300 bg-white px-3 py-1.5 text-xs font-semibold text-slate-700">Add Note</button></div>
+              {Array.isArray(project.progress_activity_notes) && project.progress_activity_notes.length > 0 ? <ol className="mt-2 max-h-56 space-y-2 overflow-y-auto">{[...project.progress_activity_notes].reverse().map((note) => <li key={note.id || note._id || note.createdAt} className="rounded-lg border border-amber-100 bg-white p-3"><p className="whitespace-pre-wrap text-sm text-slate-700">{note.content}</p><p className="mt-1 text-xs text-slate-500">{note.authorName || "Staff"} ({note.authorRole || "staff"}) · {note.createdAt ? new Date(note.createdAt).toLocaleString() : ""}</p></li>)}</ol> : <p className="mt-2 text-xs text-slate-600">No activity notes yet.</p>}
+            </div>
             {(project.progress_audit || []).length > 0 && (
               <details className="mt-3 border-t border-amber-200 pt-2">
                 <summary className="cursor-pointer text-xs font-semibold text-slate-700">Progress history ({project.progress_audit.length})</summary>
@@ -1862,15 +1918,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                       {stage.key === "installation" ? "Mark Installation as Done" : `Mark ${stage.name} Done`}
                     </button>
                   )}
-                  {stage.completed && !stage.saved && (
-                    <button
-                      type="button"
-                      onClick={() => undoUnsavedStageCompletion(stageIndex)}
-                      className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
-                    >
-                      Mark as Undone
-                    </button>
-                  )}
                 </div>
                 </div>
               </details>
@@ -2192,6 +2239,12 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
             </div>
           </div>
         )}
+
+        {showProjectDelayModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4" role="presentation"><section className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="project-delay-title"><h3 id="project-delay-title" className="text-lg font-semibold text-slate-900">Mark project as delayed</h3><p className="mt-1 text-sm text-slate-600">This records a manual delay without changing completed stages or the approved installation schedule.</p><label className="mt-4 block text-sm font-medium text-slate-800" htmlFor="project-delay-reason">Reason <span className="text-red-600">*</span></label><textarea id="project-delay-reason" value={projectDelayReason} onChange={(event) => setProjectDelayReason(event.target.value)} maxLength={2000} rows={3} className="mt-1 w-full rounded-lg border border-slate-300 p-3 text-sm outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" placeholder="Explain what is delaying the project" /><label className="mt-3 block text-sm font-medium text-slate-800" htmlFor="project-delay-proposed-date">Proposed revised date (optional)</label><input id="project-delay-proposed-date" type="date" value={projectProposedDate} min={getTodayIso()} onChange={(event) => setProjectProposedDate(event.target.value)} className="mt-1 w-full rounded-lg border border-slate-300 px-3 py-2 text-sm" /><p className="mt-1 text-xs text-slate-500">A proposed date is not confirmed; the existing schedule approval process still applies.</p>{projectDelayError && <p className="mt-3 text-sm text-red-700">{projectDelayError}</p>}<div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setShowProjectDelayModal(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm">Cancel</button><button type="button" onClick={prepareProjectDelay} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white">Continue</button></div></section></div>}
+        {showProjectDelayConfirm && <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/60 p-4" role="presentation"><section className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="confirm-project-delay-title"><h3 id="confirm-project-delay-title" className="text-lg font-semibold text-slate-900">Confirm project delay</h3><p className="mt-2 text-sm text-slate-700">{projectDelayReason}</p>{projectProposedDate && <p className="mt-1 text-sm text-slate-600">Proposed date (pending confirmation): {formatDateToMMDDYYYY(projectProposedDate)}</p>}<p className="mt-3 text-xs text-slate-500">The customer will receive a delay update. Completed progress and the current schedule will remain unchanged.</p>{projectDelayError && <p className="mt-2 text-sm text-red-700">{projectDelayError}</p>}<div className="mt-5 flex justify-end gap-2"><button type="button" disabled={notesSaving} onClick={() => { setShowProjectDelayConfirm(false); setShowProjectDelayModal(true); }} className="rounded-lg border border-slate-300 px-4 py-2 text-sm">Back</button><button type="button" disabled={notesSaving} onClick={() => void confirmProjectDelay()} className="rounded-lg bg-amber-600 px-4 py-2 text-sm font-semibold text-white disabled:opacity-60">{notesSaving ? "Saving…" : "Confirm delay"}</button></div></section></div>}
+        {showDelayResolveModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4" role="presentation"><section className="w-full max-w-md rounded-2xl bg-white p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="resolve-delay-title"><h3 id="resolve-delay-title" className="text-lg font-semibold text-slate-900">Resolve project delay?</h3><p className="mt-2 text-sm text-slate-600">This clears the active delay badge and records the resolution. Delay history and completed progress will be preserved.</p>{projectDelayError && <p className="mt-2 text-sm text-red-700">{projectDelayError}</p>}<div className="mt-5 flex justify-end gap-2"><button type="button" onClick={() => setShowDelayResolveModal(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm">Cancel</button><button type="button" disabled={notesSaving} onClick={() => void confirmResolveProjectDelay()} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">{notesSaving ? "Saving…" : "Confirm resolution"}</button></div></section></div>}
+        {showProtectedNotesModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4" role="presentation"><section className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="protected-notes-title"><h3 id="protected-notes-title" className="text-lg font-semibold text-slate-900">Edit Protected Project Notes</h3><textarea autoFocus value={protectedNotesDraft} onChange={(event) => setProtectedNotesDraft(event.target.value)} maxLength={4000} rows={5} className="mt-4 w-full rounded-lg border border-slate-300 p-3 text-sm outline-none focus:border-blue-500" placeholder="Add important project information" />{notesError && <p className="mt-2 text-sm text-red-700">{notesError}</p>}<div className="mt-4 flex justify-end gap-2"><button type="button" onClick={() => setShowProtectedNotesModal(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm">Cancel</button><button type="button" disabled={notesSaving} onClick={() => void saveProtectedNotes()} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">{notesSaving ? "Saving…" : "Save notes"}</button></div></section></div>}
+        {showActivityNoteModal && <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4" role="presentation"><section className="w-full max-w-lg rounded-2xl bg-white p-5 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="activity-note-title"><h3 id="activity-note-title" className="text-lg font-semibold text-slate-900">Add Staff Activity Note</h3><textarea autoFocus value={activityNoteDraft} onChange={(event) => setActivityNoteDraft(event.target.value)} maxLength={2000} rows={4} className="mt-4 w-full rounded-lg border border-slate-300 p-3 text-sm outline-none focus:border-blue-500" placeholder="Add a project update" />{notesError && <p className="mt-2 text-sm text-red-700">{notesError}</p>}<div className="mt-4 flex justify-end gap-2"><button type="button" onClick={() => setShowActivityNoteModal(false)} className="rounded-lg border border-slate-300 px-4 py-2 text-sm">Cancel</button><button type="button" disabled={notesSaving} onClick={() => void saveActivityNote()} className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-semibold text-white">{notesSaving ? "Saving…" : "Add note"}</button></div></section></div>}
 
         {isSaving && (
           <div className="rounded-xl bg-blue-50 border border-blue-200 p-3 text-sm text-blue-700 mt-4">

@@ -88,6 +88,10 @@ export const buildContractSnapshot = (order = {}) => {
     product: firstItem.name || firstItem.product_id?.name || firstItem.product_name || "Project Item",
     dimensions: `${width} x ${height} ${firstItem.unit || "in"}`.trim(),
     quantity,
+    productCharges: items.map((item) => ({
+      product: item.name || item.product_id?.name || "Project Item",
+      charges: (item.additional_project_charges || []).map((charge) => ({ name: charge.name || "Additional charge", amount: Number(charge.amount) || 0, note: charge.note || "" })),
+    })),
     projectCost,
     additionalCharges: (order.project_additional_charges || []).map((charge) => ({ name: charge.name || "Additional charge", amount: Number(charge.amount) || 0, note: charge.note || "" })),
     downpayment,

@@ -13,6 +13,9 @@ import {
   updateOrderStatus,
   updateOrderInspection,
   updateOrderProgress,
+  updateProjectDelay,
+  updateProtectedProjectNotes,
+  addProgressActivityNote,
   generateContract,
   submitOrderReview,
   deleteOrderReview,
@@ -74,6 +77,9 @@ router.put("/admin/:orderId/review/visibility", authMiddleware, roleMiddleware([
 router.put("/admin/:orderId/review/response", authMiddleware, roleMiddleware(["admin", "super_admin"]), respondToCustomerReview);
 router.put("/admin/:orderId/inspection", authMiddleware, roleMiddleware("admin"), updateOrderInspection);
 router.put("/admin/:orderId/progress", authMiddleware, roleMiddleware(["admin", "super_admin", "skilled_worker"]), staffModulePermission("progress_monitoring", "edit"), updateOrderProgress);
+router.put("/admin/:orderId/project-delay", authMiddleware, roleMiddleware(["admin", "super_admin"]), staffModulePermission("progress_monitoring", "edit"), updateProjectDelay);
+router.put("/admin/:orderId/protected-project-notes", authMiddleware, roleMiddleware(["admin", "super_admin"]), staffModulePermission("progress_monitoring", "edit"), updateProtectedProjectNotes);
+router.post("/admin/:orderId/activity-notes", authMiddleware, roleMiddleware(["admin", "super_admin", "skilled_worker"]), staffModulePermission("progress_monitoring", "edit"), addProgressActivityNote);
 router.post("/admin/:orderId/contract", authMiddleware, roleMiddleware("admin"), generateContract);
 router.post("/admin/:orderId/send-contract-email", authMiddleware, roleMiddleware("admin"), sendWalkInApprovalEmail);
 

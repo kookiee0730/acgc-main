@@ -76,6 +76,13 @@ export const updateOrderProgress = (orderId, payload) =>
     body: JSON.stringify(payload),
   });
 
+export const updateProjectDelay = (orderId, payload) =>
+  apiFetch(`/orders/admin/${orderId}/project-delay`, { method: "PUT", body: JSON.stringify(payload) });
+export const updateProtectedProjectNotes = (orderId, payload) =>
+  apiFetch(`/orders/admin/${orderId}/protected-project-notes`, { method: "PUT", body: JSON.stringify(payload) });
+export const addProgressActivityNote = (orderId, payload) =>
+  apiFetch(`/orders/admin/${orderId}/activity-notes`, { method: "POST", body: JSON.stringify(payload) });
+
 export const respondToContract = (orderId, payload) =>
   apiFetch(`/orders/${orderId}/contract`, {
     method: "PUT",

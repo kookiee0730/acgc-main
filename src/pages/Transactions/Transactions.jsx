@@ -928,10 +928,6 @@ function Transactions() {
       return;
     }
     const isAdminRecording = !pendingSubmission && !isAdjusting && editPaymentAction === "record";
-    if (isAdminRecording && !lowerPaymentReason) {
-      toast.error("Provide an admin note for recording a payment on behalf of the customer.");
-      return;
-    }
     if (isAdminRecording && (!editPaymentDate || Number.isNaN(new Date(editPaymentDate).getTime()) || new Date(editPaymentDate) > new Date())) {
       toast.error("Provide a valid payment date that is not in the future.");
       return;
@@ -2020,12 +2016,12 @@ function Transactions() {
                   />
                 </div>
                 <div>
-                  <label htmlFor="admin-payment-note" className={`mb-2 block text-[11px] font-extrabold uppercase tracking-[0.18em] ${labelClass}`}>ADMIN NOTE / REASON <span className="text-red-500">(required)</span></label>
+                  <label htmlFor="admin-payment-note" className={`mb-2 block text-[11px] font-extrabold uppercase tracking-[0.18em] ${labelClass}`}>ADMIN NOTE / REASON <span className={tertiaryTextClass}>(optional)</span></label>
                   <textarea
                     id="admin-payment-note"
                     value={editPaymentReason}
                     onChange={(event) => setEditPaymentReason(event.target.value)}
-                    placeholder="Document who received the payment and any receipt or customer agreement details."
+                    placeholder="Optional note about who received the payment or related details."
                     rows={3}
                     maxLength={1000}
                     className={`${inputClass} resize-y`}
@@ -2037,13 +2033,13 @@ function Transactions() {
               {(pendingPaymentProof || adjustingVerifiedPayment) && (
               <div>
                 <label htmlFor="payment-verification-reason" className={`mb-2 block text-[11px] font-extrabold uppercase tracking-[0.18em] ${labelClass}`}>
-                  Verification / rejection reason
+                  Verification / rejection reason <span className={tertiaryTextClass}>(required only if the amount differs or proof is rejected)</span>
                 </label>
                 <textarea
                   id="payment-verification-reason"
                   value={editPaymentReason}
                   onChange={(event) => setEditPaymentReason(event.target.value)}
-                  placeholder="Required if the verified amount differs or you reject the proof."
+                  placeholder="Add a reason only if the verified amount differs from the submitted amount or you reject the proof."
                   rows={3}
                   className={`${inputClass} resize-y`}
                 />

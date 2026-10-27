@@ -324,6 +324,15 @@ export default function OrderTimelineModal({
         </header>
 
         <div className={`min-h-0 flex-1 overflow-y-auto overscroll-contain px-4 py-3.5 lg:max-h-[70vh] lg:px-5 ${darkMode ? "bg-slate-950/40" : "bg-slate-50/70"}`}>
+          {order?.project_delay?.is_delayed && (
+            <section className={`mb-3 rounded-xl border p-3 ${darkMode ? "border-amber-800 bg-amber-950/40" : "border-amber-200 bg-amber-50"}`} aria-label="Project delay update">
+              <div className="flex flex-wrap items-center gap-2">
+                <span className="rounded-full bg-amber-100 px-2.5 py-1 text-xs font-semibold text-amber-900">Project delayed</span>
+                {order.project_delay.proposed_revised_installation_date && <span className={`text-xs ${darkMode ? "text-amber-200" : "text-amber-900"}`}>Proposed date (pending confirmation): {new Date(order.project_delay.proposed_revised_installation_date).toLocaleDateString()}</span>}
+              </div>
+              <p className={`mt-2 text-sm ${darkMode ? "text-slate-200" : "text-slate-700"}`}>{order.project_delay.reason}</p>
+            </section>
+          )}
           {items.length > 1 && !loading && !isEmpty && (
             <div className={`mb-3 flex flex-col gap-3 border-b pb-3 sm:flex-row sm:items-center sm:justify-between ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
               <div className="min-w-0">
