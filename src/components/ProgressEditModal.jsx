@@ -165,6 +165,9 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const [newCustomMainStageName, setNewCustomMainStageName] = useState("");
   const [confirmExit, setConfirmExit] = useState(false);
   const initialProgressSnapshot = useRef(null);
+  const initialEditValues = useRef(null);
+  const [showSaveConfirmation, setShowSaveConfirmation] = useState(false);
+  const [saveChangeSummary, setSaveChangeSummary] = useState([]);
   const [newMainStageAfterKey, setNewMainStageAfterKey] = useState("");
   const [editingMainStageIndex, setEditingMainStageIndex] = useState(null);
   const [editedMainStageName, setEditedMainStageName] = useState("");
@@ -205,17 +208,30 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     const currentStage = nextStages.find((stage) => !stage.completed && String(stage.status || "").trim().toLowerCase().replace(/[_\s]+/g, "-") === "in-progress")
       || nextStages.find((stage) => !stage.completed)
       || nextStages.at(-1);
+    const initialInstallationDate = (() => {
+      const value = project.estimated_installation_date || project.rawOrder?.estimated_installation_date;
+      if (!value) return "";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+    })();
+    const initialNotes = project.progress_notes || project.rawOrder?.progress_notes || "";
+    initialEditValues.current = {
+      status: project.status || "Pending",
+      installationDate: initialInstallationDate,
+      additionalNotes: initialNotes,
+      stages: nextStages.map((stage) => ({
+        ...stage,
+        images: [...(stage.images || [])],
+        subStages: (stage.subStages || []).map((subStage) => ({ ...subStage, images: [...(subStage.images || [])] })),
+      })),
+    };
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStages(nextStages);
     initialProgressSnapshot.current = createUnsavedSnapshot({
       progress: project.progress || 0,
       status: project.status || "Pending",
-      installationDate: (() => {
-        const value = project.estimated_installation_date || project.rawOrder?.estimated_installation_date;
-        if (!value) return "";
-        const date = new Date(value);
-        return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
-      })(),
+      installationDate: initialInstallationDate,
+      additionalNotes: initialNotes,
       stages: nextStages,
     });
     setNewMainStageAfterKey(currentStage?.key || "");
@@ -279,11 +295,12 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
 
   const isStageLocked = (index) => {
     const stage = stages[index];
+    if (index > activeStageIndex) return true;
     if (!stage?.completed || !stage?.saved) return false;
     return hasLaterStageStarted(index);
   };
 
-  const currentStageIndex = stages.findIndex((stage) => !stage.completed);
+  const currentStageIndex = stages.findIndex((stage) => !(stage.completed && stage.saved));
   const activeStageIndex = currentStageIndex === -1 ? stages.length - 1 : currentStageIndex;
 
   const isStageEditable = (index) => {
@@ -535,11 +552,13 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
 
       if (patch.status) {
         if (patch.status === "done") {
+          if (!current.completed) updated.previousStatus = current.status || "pending";
           updated.completed = true;
           updated.date = new Date();
         } else {
           updated.completed = false;
           updated.date = null;
+          delete updated.previousStatus;
         }
 
         if (current.status === "delayed" && patch.status !== "delayed") {
@@ -876,6 +895,19 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     setErrorMessage("");
   };
 
+  const undoUnsavedStageCompletion = (stageIndex) => {
+    const stage = stages[stageIndex];
+    if (!stage?.completed || stage.saved) return;
+    updateStage(stageIndex, {
+      status: stage.previousStatus || "pending",
+      completed: false,
+      date: null,
+      completionNote: "",
+      previousStatus: null,
+    });
+    setErrorMessage("");
+  };
+
   const buildPayloadStages = () => {
     const schedulingDone = stages.some(
       (stage) => stage.key === "installation_scheduling" && stage.completed
@@ -959,6 +991,113 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       });
     });
     return contexts;
+  };
+
+  const buildSaveChangeSummary = () => {
+    const initial = initialEditValues.current;
+    if (!initial) return ["Progress updates for this project will be saved."];
+
+    const changes = [];
+    const dateTimeValue = (value) => {
+      if (!value) return "";
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? String(value) : String(date.getTime());
+    };
+    const displayDateTime = (value) => value ? formatDateTimeToMMDDYYYY(value) || String(value) : "Not set";
+    const displayDate = (value) => value ? formatDateToMMDDYYYY(value) || String(value) : "Not set";
+    const displayStatus = (stage) => stage?.completed
+      ? "Done"
+      : String(stage?.status || "pending").replaceAll("_", " ").replace(/\b\w/g, (letter) => letter.toUpperCase());
+    const initialStages = new Map(initial.stages.map((stage) => [stage.key, stage]));
+    const currentStages = new Map(stages.map((stage) => [stage.key, stage]));
+
+    if (initial.installationDate !== installationDate) {
+      changes.push(`Estimated installation date: ${displayDate(initial.installationDate)} → ${displayDate(installationDate)}`);
+    }
+    if (initial.status !== status) changes.push(`Project status: ${initial.status} → ${status}`);
+    if (initial.additionalNotes !== additionalNotes) changes.push("Project progress notes were updated.");
+
+    const initialOrder = initial.stages.map((stage) => stage.key).join("|");
+    const currentOrder = stages.map((stage) => stage.key).join("|");
+    if (initialOrder !== currentOrder && initialStages.size === currentStages.size) changes.push("Project stage order was changed.");
+
+    initial.stages.forEach((oldStage) => {
+      if (!currentStages.has(oldStage.key)) changes.push(`Removed stage: ${oldStage.name}`);
+    });
+
+    stages.forEach((stage) => {
+      const oldStage = initialStages.get(stage.key);
+      if (!oldStage) {
+        changes.push(`Added stage: ${stage.name}`);
+        return;
+      }
+
+      if (displayStatus(oldStage) !== displayStatus(stage)) {
+        changes.push(`${stage.name}: status changed from ${displayStatus(oldStage)} to ${displayStatus(stage)}.`);
+      }
+      if ((oldStage.completionNote || "") !== (stage.completionNote || "")) {
+        changes.push(stage.completionNote
+          ? `${stage.name}: completion note added or updated — “${stage.completionNote.trim()}”`
+          : `${stage.name}: completion note removed.`);
+      }
+      if (dateTimeValue(oldStage.date) !== dateTimeValue(stage.date)) {
+        changes.push(`${stage.name}: completion date changed from ${displayDateTime(oldStage.date)} to ${displayDateTime(stage.date)}.`);
+      }
+      const oldStagePhotos = oldStage.images || [];
+      const currentStagePhotos = stage.imagePreviews || stage.images || [];
+      const addedStagePhotos = currentStagePhotos.filter((photo) => !oldStagePhotos.includes(photo)).length;
+      const removedStagePhotos = oldStagePhotos.filter((photo) => !currentStagePhotos.includes(photo)).length;
+      if (addedStagePhotos) changes.push(`${stage.name}: ${addedStagePhotos} proof photo${addedStagePhotos === 1 ? "" : "s"} added.`);
+      if (removedStagePhotos) changes.push(`${stage.name}: ${removedStagePhotos} proof photo${removedStagePhotos === 1 ? "" : "s"} removed.`);
+
+      const scheduleFields = ["proposedInstallationDate", "proposedInstallationTime", "customerResponse", "customerPreferredInstallationDate", "customerPreferredInstallationTime", "schedulingNotes", "customerRescheduleNotes"];
+      const delayFields = ["delayReason", "delayExpectedResolution", "delayNotes"];
+      if (scheduleFields.some((field) => String(oldStage[field] || "") !== String(stage[field] || ""))) {
+        changes.push(`${stage.name}: installation schedule or customer response details were updated.`);
+      }
+      if (delayFields.some((field) => String(oldStage[field] || "") !== String(stage[field] || ""))) {
+        changes.push(`${stage.name}: delay details were updated.`);
+      }
+
+      const oldSubStages = oldStage.subStages || [];
+      const currentSubStages = stage.subStages || [];
+      const oldSubStageNames = new Set(oldSubStages.map((subStage) => subStage.name));
+      const currentSubStageNames = new Set(currentSubStages.map((subStage) => subStage.name));
+      currentSubStages.filter((subStage) => !oldSubStageNames.has(subStage.name)).forEach((subStage) => {
+        changes.push(`${stage.name}: added sub-stage ${subStage.name || "Untitled sub-stage"}.`);
+      });
+      oldSubStages.filter((subStage) => !currentSubStageNames.has(subStage.name)).forEach((subStage) => {
+        changes.push(`${stage.name}: removed sub-stage ${subStage.name || "Untitled sub-stage"}.`);
+      });
+      currentSubStages.forEach((subStage, index) => {
+        const oldSubStage = oldSubStages[index];
+        if (!oldSubStage) return;
+        const subName = subStage.name || oldSubStage.name || "Sub-stage";
+        if (displayStatus(oldSubStage) !== displayStatus(subStage)) {
+          changes.push(`${stage.name} / ${subName}: status changed from ${displayStatus(oldSubStage)} to ${displayStatus(subStage)}.`);
+        }
+        if ((oldSubStage.completionNote || "") !== (subStage.completionNote || "")) {
+          changes.push(`${stage.name} / ${subName}: completion note updated.`);
+        }
+        if ((oldSubStage.description || "") !== (subStage.description || "")) {
+          changes.push(`${stage.name} / ${subName}: description updated.`);
+        }
+        const oldSubPhotos = oldSubStage.images || [];
+        const currentSubPhotos = subStage.imagePreviews || subStage.images || [];
+        const addedSubPhotos = currentSubPhotos.filter((photo) => !oldSubPhotos.includes(photo)).length;
+        const removedSubPhotos = oldSubPhotos.filter((photo) => !currentSubPhotos.includes(photo)).length;
+        if (addedSubPhotos) changes.push(`${stage.name} / ${subName}: ${addedSubPhotos} proof photo${addedSubPhotos === 1 ? "" : "s"} added.`);
+        if (removedSubPhotos) changes.push(`${stage.name} / ${subName}: ${removedSubPhotos} proof photo${removedSubPhotos === 1 ? "" : "s"} removed.`);
+      });
+    });
+
+    return changes.length ? changes : ["No changes detected."];
+  };
+
+  const openSaveConfirmation = () => {
+    setErrorMessage("");
+    setSaveChangeSummary(buildSaveChangeSummary());
+    setShowSaveConfirmation(true);
   };
 
   const handleSave = async () => {
@@ -1195,7 +1334,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
             return (
               <details
                 key={stage.key}
-                open={stageEditable}
+                open={stageEditable || (stage.completed && !stage.saved)}
                 className={`progress-edit-stage overflow-hidden rounded-xl border ${stageEditable ? "border-slate-200 bg-white" : "border-slate-200 bg-slate-100/80"}`}
               >
                 <summary className={`progress-edit-stage-summary flex list-none items-start gap-3 p-3 sm:p-4 ${stageEditable ? "cursor-pointer transition-colors hover:bg-slate-50" : "cursor-pointer"}`}>
@@ -1297,8 +1436,8 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                   </div>
                 )}
                 <div className="mt-4 grid gap-3 min-[480px]:grid-cols-2">
-                  <label className="block text-sm text-gray-600">
-                    Stage State
+                  <div className="block text-sm text-gray-600">
+                    <span className="block">Stage State</span>
                     {stage.completed ? (
                       <div className="mt-1.5 rounded-lg border border-emerald-200 bg-emerald-50 px-3 py-2 text-sm font-medium text-emerald-800">Completed</div>
                     ) : (
@@ -1313,7 +1452,25 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                         <option value="delayed">Delayed</option>
                       </select>
                     )}
-                  </label>
+                    {stage.completed && (
+                      <label className="mt-3 block text-sm font-medium text-slate-700">
+                        Completion notes
+                        <textarea
+                          value={stage.completionNote || ""}
+                          onChange={(event) => updateStage(stageIndex, { completionNote: event.target.value })}
+                          disabled={stage.saved}
+                          maxLength={1000}
+                          rows={3}
+                          placeholder="Add notes about the completed work"
+                          className={`mt-1.5 w-full resize-y rounded-lg border px-3 py-2 text-sm outline-none focus:ring-2 focus:ring-blue-100 disabled:cursor-not-allowed disabled:bg-slate-50 ${stage.saved ? "border-slate-200 text-slate-500" : "border-slate-300 text-slate-800 focus:border-blue-500"}`}
+                          aria-label={`Completion notes for ${stage.name}`}
+                        />
+                        <span className="mt-1 block text-xs font-normal text-slate-500">
+                          {stage.saved ? "This note is saved with the completed stage." : "You can edit this note until you save the progress changes."}
+                        </span>
+                      </label>
+                    )}
+                  </div>
 
                     <div className="rounded-xl border border-dashed border-slate-300 bg-white p-3">
                       <div className="flex items-center gap-2 text-sm font-medium text-slate-700">
@@ -1675,6 +1832,15 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                       {stage.key === "installation" ? "Mark Installation as Done" : `Mark ${stage.name} Done`}
                     </button>
                   )}
+                  {stage.completed && !stage.saved && (
+                    <button
+                      type="button"
+                      onClick={() => undoUnsavedStageCompletion(stageIndex)}
+                      className="inline-flex items-center gap-2 rounded-lg border border-amber-300 bg-amber-50 px-3 py-2 text-sm font-medium text-amber-800 transition hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-500"
+                    >
+                      Mark as Undone
+                    </button>
+                  )}
                 </div>
                 </div>
               </details>
@@ -2017,13 +2183,43 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
           </button>
           <button
             type="button"
-            onClick={handleSave}
+            onClick={openSaveConfirmation}
             className="rounded-lg bg-slate-900 px-4 py-2 text-sm font-medium text-white transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
             disabled={isSaving}
           >
             {isSaving ? "Saving..." : "Save Changes"}
           </button>
         </div>
+        {showSaveConfirmation && (
+          <div className="fixed inset-0 z-[95] flex items-center justify-center bg-slate-950/60 p-4" role="presentation">
+            <section className="w-full max-w-lg overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="save-progress-confirm-title" aria-describedby="save-progress-confirm-description">
+              <div className="border-b border-slate-200 p-5">
+                <div className="flex items-start gap-3">
+                  <span className="flex size-10 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-700"><CheckCircle2 size={20} /></span>
+                  <div>
+                    <h3 id="save-progress-confirm-title" className="text-lg font-semibold text-slate-900">Review progress changes</h3>
+                    <p id="save-progress-confirm-description" className="mt-1 text-sm text-slate-600">Check the updates below before saving them to this project.</p>
+                  </div>
+                </div>
+              </div>
+              <div className="max-h-[50dvh] overflow-y-auto p-5">
+                <p className="text-xs font-semibold uppercase tracking-wide text-slate-500">Changes to save</p>
+                <ul className="mt-3 space-y-2">
+                  {saveChangeSummary.map((change, index) => (
+                    <li key={`${index}-${change}`} className="flex items-start gap-2.5 text-sm leading-5 text-slate-700">
+                      <span className="mt-2 size-1.5 shrink-0 rounded-full bg-blue-600" aria-hidden="true" />
+                      <span className="break-words">{change}</span>
+                    </li>
+                  ))}
+                </ul>
+              </div>
+              <div className="flex flex-col-reverse gap-2 border-t border-slate-200 bg-slate-50 px-5 py-4 sm:flex-row sm:justify-end">
+                <button type="button" onClick={() => setShowSaveConfirmation(false)} className="min-h-10 rounded-lg border border-slate-300 bg-white px-4 text-sm font-medium text-slate-700 hover:bg-slate-100">Review more</button>
+                <button type="button" onClick={() => { setShowSaveConfirmation(false); void handleSave(); }} className="min-h-10 rounded-lg bg-slate-900 px-4 text-sm font-semibold text-white hover:bg-slate-800">Confirm and save</button>
+              </div>
+            </section>
+          </div>
+        )}
         <UnsavedChangesDialog open={confirmExit} onStay={() => setConfirmExit(false)} onDiscard={onClose} />
       </div>
     </div>
