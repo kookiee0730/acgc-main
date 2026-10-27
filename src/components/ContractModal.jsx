@@ -243,6 +243,7 @@ function ContractModal({ isOpen, onClose, inspection, contractData, onAccept, on
                   </tr>
                   );
                 })}
+                {(inspection.project_additional_charges || []).map((charge, index) => <tr key={`project-charge-${index}`} className="border-b border-slate-200 bg-amber-50/60"><td className="px-3 py-2 text-slate-500">+</td><td className="px-3 py-2 font-semibold">{charge.name || "Additional project charge"}{charge.note && <div className="text-[9px] font-normal text-slate-500">{charge.note}</div>}</td><td className="px-3 py-2 text-center">—</td><td className="px-3 py-2 text-center">1</td><td className="px-3 py-2 text-right">{formatCurrency(charge.amount)}</td>{isPerProductWarranty && <td className="px-3 py-2 text-center">—</td>}<td className="px-3 py-2 text-right font-bold">{formatCurrency(charge.amount)}</td></tr>)}
               </tbody>
               <tfoot>
                 <tr className={darkMode ? "bg-[#153451] font-black" : "bg-rose-50 font-black"}>

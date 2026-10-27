@@ -5,6 +5,7 @@ const SystemSettingSchema = new mongoose.Schema(
     key: { type: String, required: true, unique: true },
     maintenance_mode: { type: Boolean, default: false },
     global_permissions: { type: mongoose.Schema.Types.Mixed, default: {} },
+    business_hours: { type: mongoose.Schema.Types.Mixed, default: { open: "08:00", close: "18:00", timezone: "Asia/Manila" } },
     backup_schedule: { type: String, default: "weekly" },
     backup_schedule_time: { type: String, default: "00:00" },
     backup_status: { type: String, default: "Success" },

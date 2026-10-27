@@ -5,6 +5,8 @@ import path from "path";
 import { randomUUID } from "node:crypto";
 import mongoose from "mongoose";
 import Order from "../models/Order.js";
+import SystemSetting from "../models/SystemSetting.js";
+import ScheduleReservation from "../models/ScheduleReservation.js";
 import CustomerNotification from "../models/CustomerNotification.js";
 import Product from "../models/Product.js";
 import User from "../models/User.js";
@@ -45,6 +47,146 @@ const isWithinReviewEditWindow = (submittedAt) => {
   const reviewDate = new Date(submittedAt);
   const editDeadline = new Date(reviewDate.getTime() + 7 * 24 * 60 * 60 * 1000);
   return new Date() <= editDeadline;
+};
+
+const scheduleDateKey = (value) => {
+  if (!value) return "";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}/.test(value)) return value.slice(0, 10);
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
+};
+const manilaTodayKey = () => new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).format(new Date());
+const timeMinutes = (value) => { const match = String(value || "").match(/^(\d{2}):(\d{2})$/); return match ? Number(match[1]) * 60 + Number(match[2]) : null; };
+const normalizeProjectCharges = (charges) => {
+  if (!Array.isArray(charges)) return { error: "Additional project charges must be a list." };
+  const normalized = [];
+  for (const charge of charges) {
+    const name = String(charge?.name || "").trim();
+    const amount = Number(charge?.amount);
+    if (!name || !Number.isFinite(amount) || amount < 0) return { error: "Each additional charge needs a description and a non-negative amount." };
+    normalized.push({ name, amount, note: String(charge?.note || "").trim() });
+  }
+  return { charges: normalized };
+};
+
+const validateOrderSchedules = async (candidate, excludeOrderId = "", previous = null) => {
+  const settings = await SystemSetting.findOne({ key: "global" }).select("business_hours").lean();
+  const hours = settings?.business_hours || { open: "08:00", close: "18:00" };
+  const open = timeMinutes(hours.open) ?? 480;
+  const close = timeMinutes(hours.close) ?? 1080;
+  const schedules = [
+    { date: candidate.inspection_date, time: candidate.inspection_time, duration: Number(candidate.inspection_duration_minutes || 30) + Number(candidate.inspection_travel_minutes || 0), kind: "Inspection" },
+    { date: candidate.estimated_installation_date, time: candidate.estimated_installation_time, duration: Number(candidate.installation_duration_minutes || 60), kind: "Installation" },
+  ];
+  const scheduleChanged = (schedule) => {
+    if (!previous) return true;
+    const oldDate = schedule.kind === "Inspection" ? previous.inspection_date : previous.estimated_installation_date;
+    const oldTime = schedule.kind === "Inspection" ? previous.inspection_time : previous.estimated_installation_time;
+    const oldDuration = schedule.kind === "Inspection"
+      ? Number(previous.inspection_duration_minutes || 30) + Number(previous.inspection_travel_minutes || 0)
+      : Number(previous.installation_duration_minutes || 60);
+    return scheduleDateKey(schedule.date) !== scheduleDateKey(oldDate)
+      || String(schedule.time || "") !== String(oldTime || "")
+      || Number(schedule.duration) !== oldDuration;
+  };
+  for (const schedule of schedules) {
+    if (!schedule.date && !schedule.time) continue;
+    const isChanged = scheduleChanged(schedule);
+    if (schedule.date && !schedule.time && isChanged) return `${schedule.kind} needs both a date and a start time.`;
+    if (!schedule.date && schedule.time && isChanged) return `${schedule.kind} needs a date before selecting a start time.`;
+    if (!schedule.date || !schedule.time) continue;
+    const day = scheduleDateKey(schedule.date);
+    const start = timeMinutes(schedule.time);
+    if (start === null) return `${schedule.kind} time is invalid.`;
+    const end = start + schedule.duration;
+    if (isChanged && day < manilaTodayKey()) return `${schedule.kind} cannot be scheduled in the past.`;
+    if (isChanged && day === manilaTodayKey()) {
+      const nowTime = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).format(new Date());
+      if (start <= (timeMinutes(nowTime) ?? 0)) return `${schedule.kind} must start in the future (Asia/Manila).`;
+    }
+    const isMultiDayInstallation = schedule.kind === "Installation" && schedule.duration > close - open;
+    if (isChanged && (start < open || (!isMultiDayInstallation && end > close))) return `${schedule.kind} must fit within business hours (${hours.open || "08:00"}–${hours.close || "18:00"}, Asia/Manila).`;
+  }
+  const active = schedules.filter((schedule) => schedule.date && schedule.time);
+  for (let i = 0; i < active.length; i += 1) {
+    for (let j = i + 1; j < active.length; j += 1) {
+      if (!scheduleChanged(active[i]) && !scheduleChanged(active[j])) continue;
+      const firstStart = Date.parse(`${scheduleDateKey(active[i].date)}T00:00:00.000Z`) / 60_000 + timeMinutes(active[i].time);
+      const secondStart = Date.parse(`${scheduleDateKey(active[j].date)}T00:00:00.000Z`) / 60_000 + timeMinutes(active[j].time);
+      if (firstStart < secondStart + active[j].duration && firstStart + active[i].duration > secondStart) return "Inspection and installation schedules overlap for this project.";
+    }
+  }
+  const activeChanges = active.filter(scheduleChanged);
+  if (!activeChanges.length) return "";
+  const otherOrders = await Order.find({ ...(excludeOrderId ? { _id: { $ne: excludeOrderId } } : {}), status: { $nin: ["cancelled", "canceled"] }, $or: [{ inspection_date: { $ne: null } }, { estimated_installation_date: { $ne: null } }] }).select("inspection_date inspection_time inspection_duration_minutes inspection_travel_minutes estimated_installation_date estimated_installation_time installation_duration_minutes status").lean();
+  for (const schedule of activeChanges) {
+    const start = Date.parse(`${scheduleDateKey(schedule.date)}T00:00:00.000Z`) / 60_000 + timeMinutes(schedule.time);
+    const end = start + schedule.duration;
+    for (const record of otherOrders) {
+      const booked = [
+        { date: record.inspection_date, time: record.inspection_time, duration: Number(record.inspection_duration_minutes || 30) + Number(record.inspection_travel_minutes || 0), kind: "Inspection" },
+        { date: record.estimated_installation_date, time: record.estimated_installation_time, duration: Number(record.installation_duration_minutes || 60), kind: "Installation" },
+      ];
+      for (const slot of booked) {
+        const bookedStart = timeMinutes(slot.time);
+        if (bookedStart === null) continue;
+        const absoluteBookedStart = Date.parse(`${scheduleDateKey(slot.date)}T00:00:00.000Z`) / 60_000 + bookedStart;
+        if (start < absoluteBookedStart + slot.duration && end > absoluteBookedStart) return `${schedule.kind} overlaps another ${slot.kind} appointment. Choose another time.`;
+      }
+    }
+  }
+  return "";
+};
+
+const getOrderReservationKeys = (candidate) => {
+  const keys = new Set();
+  const schedules = [
+    { date: candidate.inspection_date, time: candidate.inspection_time, minutes: Number(candidate.inspection_duration_minutes || 30) + Number(candidate.inspection_travel_minutes || 0) },
+    { date: candidate.estimated_installation_date, time: candidate.estimated_installation_time, minutes: Number(candidate.installation_duration_minutes || 60) },
+  ];
+  for (const schedule of schedules) {
+    const start = timeMinutes(schedule.time);
+    const day = scheduleDateKey(schedule.date);
+    if (!day || start === null || !schedule.minutes) continue;
+    const origin = new Date(`${day}T00:00:00.000Z`).getTime() + start * 60_000;
+    for (let offset = 0; offset < schedule.minutes; offset += 1) {
+      const slot = new Date(origin + offset * 60_000);
+      const date = slot.toISOString().slice(0, 10);
+      const time = `${String(slot.getUTCHours()).padStart(2, "0")}:${String(slot.getUTCMinutes()).padStart(2, "0")}`;
+      keys.add(`shared:${date}:${time}`);
+    }
+  }
+  return [...keys];
+};
+
+const saveWithScheduleReservations = async (order, candidate, save, previousSchedule = null) => {
+  const orderId = order._id;
+  const nextKeys = getOrderReservationKeys(candidate);
+  if (previousSchedule && JSON.stringify([...nextKeys].sort()) === JSON.stringify(getOrderReservationKeys(previousSchedule).sort())) {
+    await save();
+    return;
+  }
+  const existingKeys = await ScheduleReservation.find({ orderId }).distinct("_id");
+  const existingSet = new Set(existingKeys);
+  const addedKeys = nextKeys.filter((key) => !existingSet.has(key));
+  try {
+    if (addedKeys.length) await ScheduleReservation.insertMany(addedKeys.map((_id) => ({ _id, orderId })), { ordered: true });
+  } catch (error) {
+    await ScheduleReservation.deleteMany({ orderId, _id: { $in: addedKeys } });
+    if (error?.code === 11000 || error?.writeErrors?.some((entry) => entry?.code === 11000)) {
+      const conflict = new Error("This appointment time was just reserved by another booking. Choose an available time.");
+      conflict.statusCode = 409;
+      throw conflict;
+    }
+    throw error;
+  }
+  try {
+    await save();
+    await ScheduleReservation.deleteMany({ orderId, _id: { $nin: nextKeys } });
+  } catch (error) {
+    if (addedKeys.length) await ScheduleReservation.deleteMany({ orderId, _id: { $in: addedKeys } });
+    throw error;
+  }
 };
 
 const buildReviewNotificationMessage = (order, review, productName = order.items?.[0]?.name || "project") => {
@@ -903,8 +1045,12 @@ export const createOrderAsAdmin = async (req, res) => {
       contract_signed_date,
       inspection_date,
       inspection_time,
+      inspection_duration_minutes = 30,
+      inspection_travel_minutes = 0,
       estimated_installation_date,
       estimated_installation_time,
+      installation_duration_minutes = 60,
+      project_additional_charges = [],
       inspection_notes,
       is_rush_order,
     } = req.body;
@@ -927,6 +1073,12 @@ export const createOrderAsAdmin = async (req, res) => {
     if (installationDateError) {
       return res.status(400).json({ success: false, message: installationDateError });
     }
+
+    if (!Number.isFinite(Number(inspection_duration_minutes)) || Number(inspection_duration_minutes) < 30 || !Number.isFinite(Number(inspection_travel_minutes)) || Number(inspection_travel_minutes) < 0 || !Number.isFinite(Number(installation_duration_minutes)) || Number(installation_duration_minutes) < 1) {
+      return res.status(400).json({ success: false, message: "Inspection, travel, and installation durations must be valid non-negative minutes (inspection minimum is 30)." });
+    }
+    const scheduleError = await validateOrderSchedules({ inspection_date, inspection_time, inspection_duration_minutes, inspection_travel_minutes, estimated_installation_date, estimated_installation_time, installation_duration_minutes });
+    if (scheduleError) return res.status(409).json({ success: false, code: "SCHEDULE_UNAVAILABLE", message: scheduleError });
 
     const requestedRushSlots = Math.max(countSelectedRushItems(items), is_rush_order === true ? 1 : 0);
     if (requestedRushSlots > 0 && !inspection_date) {
@@ -963,6 +1115,8 @@ export const createOrderAsAdmin = async (req, res) => {
     }
 
     const repricedItems = await repriceInspectionItems(items);
+    const normalizedProjectCharges = normalizeProjectCharges(project_additional_charges);
+    if (normalizedProjectCharges.error) return res.status(400).json({ success: false, message: normalizedProjectCharges.error });
     const pricedItems = repricedItems.map((item) => ({
       ...item,
       warranty_start_date: null,
@@ -973,7 +1127,7 @@ export const createOrderAsAdmin = async (req, res) => {
     if (!(calculatedEstimatedCost > 0)) {
       return res.status(400).json({ success: false, message: "Inspection items must have valid configured prices." });
     }
-    const estimated_cost = calculatedEstimatedCost;
+    const estimated_cost = calculatedEstimatedCost + normalizedProjectCharges.charges.reduce((sum, charge) => sum + charge.amount, 0);
     const manualOverride = Math.max(Number(req.body.manual_override) || 0, 0);
     const total_amount = manualOverride || estimated_cost;
     const requiredAmount = calculateRequiredDownpayment(total_amount, payment_terms, required_downpayment_amount);
@@ -994,6 +1148,7 @@ export const createOrderAsAdmin = async (req, res) => {
       items: pricedItems,
       total_amount,
       estimated_cost,
+      project_additional_charges: normalizedProjectCharges.charges,
       final_project_cost: total_amount,
       manual_override: manualOverride,
       contract_amount: isWalkInCustomer ? total_amount : 0,
@@ -1022,9 +1177,12 @@ export const createOrderAsAdmin = async (req, res) => {
       inspection_completed_at: hasSignedWalkInContract ? walkInSignedAt : null,
       inspection_date: inspection_date ? new Date(inspection_date) : null,
       inspection_time: inspection_time || "",
+      inspection_duration_minutes: Number(inspection_duration_minutes),
+      inspection_travel_minutes: Number(inspection_travel_minutes),
       is_rush_order: is_rush_order === true,
       estimated_installation_date: estimated_installation_date ? new Date(estimated_installation_date) : null,
       estimated_installation_time: estimated_installation_time || "",
+      installation_duration_minutes: Number(installation_duration_minutes),
       inspection_notes: inspection_notes || "",
       // Walk-in specific
       acceptance_method: hasSignedWalkInContract ? "walk_in_signed_contract" : isWalkInCustomer ? "walk_in_pending_contract" : "online",
@@ -1053,7 +1211,10 @@ export const createOrderAsAdmin = async (req, res) => {
     });
 
     order.payment_status = getOrderPaymentStatus(order);
-    await order.save();
+    await saveWithScheduleReservations(order, {
+      inspection_date, inspection_time, inspection_duration_minutes, inspection_travel_minutes,
+      estimated_installation_date, estimated_installation_time, installation_duration_minutes,
+    }, () => order.save());
 
     res.status(201).json({ success: true, order });
     void sendOrderNotification(hasSignedWalkInContract ? "contract_accepted" : "order_submitted", order);
@@ -1157,10 +1318,10 @@ export const getAdminOrders = async (req, res) => {
     const pageValue = Math.max(Number(req.query.page) || 1, 1);
     const skipValue = limitValue ? (pageValue - 1) * limitValue : 0;
     const baseFields = [
-      "customer customer_name customer_email customer_phone has_account_on_website shipping_address items total_amount estimated_cost final_project_cost manual_override",
+      "customer customer_name customer_email customer_phone has_account_on_website shipping_address items project_additional_charges total_amount estimated_cost final_project_cost manual_override",
       "payment_terms downpayment_amount required_downpayment_amount amount_paid payment_status payment_records payment_proof_amount payment_proof_submitted_at payment_proof_confirmed_at payment_proof_file_name payment_proof_file_url payment_method transaction_number",
       "status cancellation_reason customer_cancellation_count_at_cancel is_rush_order order_type contract_status contractStatus contractGenerated contractId contractVersion currentContractVersion contractGeneratedAt contractNeedsRegeneration contractSentAt contract_email_status contract_email_error contractDeclineReason contractDeclinedAt acceptedByCustomer acceptedAt acceptanceMethod transactionCreated transactionCreatedAt transaction_approved",
-      "tracking inspection_status inspection_completed_at inspection_date inspection_time estimated_installation_date estimated_installation_time inspection_notes issues_found",
+      "tracking inspection_status inspection_completed_at inspection_date inspection_time inspection_duration_minutes inspection_travel_minutes estimated_installation_date estimated_installation_time installation_duration_minutes inspection_notes issues_found",
       "progress progress_stages progress_notes progress_audit attachments warranty_assignment_mode warranty_period custom_warranty_days warranty_start_date warranty_expiry_date warranty_status warranty_terms price_change_history review signed_contract_url contract_number contract_signed_date acceptance_method createdAt updatedAt",
     ].join(" ");
     const moduleFields = {
@@ -1823,6 +1984,9 @@ export const updateOrderStatus = async (req, res) => {
     order.payment_status = getOrderPaymentStatus(order);
 
     await order.save();
+    if (String(order.status || "").toLowerCase() === "cancelled" || String(order.status || "").toLowerCase() === "canceled") {
+      await ScheduleReservation.deleteMany({ orderId: order._id });
+    }
 
     res.json({ success: true, order });
     const currentPaidAmount = getOrderPaymentAmounts(order).paidAmount;
@@ -2449,6 +2613,7 @@ export const respondToContract = async (req, res) => {
     order.contractDeclinedAt = new Date();
 
     await order.save();
+    await ScheduleReservation.deleteMany({ orderId: order._id });
 
     res.json({ success: true, order });
   } catch (error) {
@@ -2518,6 +2683,7 @@ export const cancelCustomerOrder = async (req, res) => {
     const cancellationCount = Number(customerAccount?.customer_cancellation_count) || 0;
     updatedOrder.customer_cancellation_count_at_cancel = cancellationCount;
     await updatedOrder.save();
+    await ScheduleReservation.deleteMany({ orderId: updatedOrder._id });
     let cooldownUntil = customerAccount?.online_order_cooldown_until || null;
     let message = "Order cancelled successfully.";
     const cancellationCountInCycle = cancellationCount > 0 ? ((cancellationCount - 1) % 3) + 1 : 0;
@@ -2663,6 +2829,12 @@ export const respondToInstallationSchedule = async (req, res) => {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
     const previousProgressStages = (order.progress_stages || []).map((stage) => stage.toObject?.() || { ...stage });
+    const previousSchedule = {
+      inspection_date: order.inspection_date, inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes, inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date, estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    };
 
     const isCustomer = order.customer && order.customer.toString() === req.user.id;
     const isAdmin = req.user.role === "admin";
@@ -2700,6 +2872,30 @@ export const respondToInstallationSchedule = async (req, res) => {
 
     if (action !== "accept_preferred" && !hasProposal) {
       return res.status(400).json({ success: false, message: "No installation proposal is available to respond to." });
+    }
+
+    if (action === "accept" || action === "accept_preferred") {
+      const acceptedDate = action === "accept_preferred"
+        ? scheduleStage.customerPreferredInstallationDate
+        : scheduleStage.proposedInstallationDate;
+      const acceptedTime = action === "accept_preferred"
+        ? scheduleStage.customerPreferredInstallationTime
+        : scheduleStage.proposedInstallationTime;
+      if (!acceptedDate || !acceptedTime) return res.status(400).json({ success: false, message: "An installation date and time are required to confirm this schedule." });
+      const installationDateError = getInstallationDateError(order.inspection_date, acceptedDate);
+      if (installationDateError) return res.status(400).json({ success: false, message: installationDateError });
+      const scheduleError = await validateOrderSchedules({
+        inspection_date: order.inspection_date,
+        inspection_time: order.inspection_time,
+        inspection_duration_minutes: order.inspection_duration_minutes,
+        inspection_travel_minutes: order.inspection_travel_minutes,
+        estimated_installation_date: acceptedDate,
+        estimated_installation_time: acceptedTime,
+        installation_duration_minutes: order.installation_duration_minutes,
+      }, order._id, order);
+      if (scheduleError) return res.status(409).json({ success: false, code: "SCHEDULE_UNAVAILABLE", message: scheduleError });
+      order.estimated_installation_date = new Date(acceptedDate);
+      order.estimated_installation_time = String(acceptedTime);
     }
 
     if (action === "accept") {
@@ -2804,7 +3000,15 @@ export const respondToInstallationSchedule = async (req, res) => {
       previousProgressStages,
       order.progress_stages.map((stage) => stage.toObject?.() || { ...stage })
     );
-    await order.save();
+    await saveWithScheduleReservations(order, {
+      inspection_date: order.inspection_date,
+      inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes,
+      inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date,
+      estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    }, () => order.save(), previousSchedule);
     await persistInstallationNotifications(order, order.progress_stages, null, "", { includeCompletion: false });
 
     res.json({ success: true, order: await orderWithCustomerNotifications(order) });
@@ -2823,11 +3027,14 @@ export const updateOrderInspection = async (req, res) => {
     }
 
     const { orderId } = req.params;
-    const { inspection_status, inspection_date, inspection_time, estimated_installation_date, estimated_installation_time, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode, is_rush_order } = req.body;
+    const { inspection_status, inspection_date, inspection_time, inspection_duration_minutes, inspection_travel_minutes, estimated_installation_date, estimated_installation_time, installation_duration_minutes, project_additional_charges, inspection_notes, issues_found, shipping_address, payment_terms, agreed_payment_date, items, customer_name, customer_email, customer_phone, has_account_on_website, downpayment_received, required_downpayment_amount, manual_override, warranty_period, custom_warranty_days, warranty_assignment_mode, is_rush_order } = req.body;
 
     const isValidScheduleTime = (value) => value === undefined || value === null || value === "" || /^(?:[01]\d|2[0-3]):[0-5]\d$/.test(String(value));
     if (!isValidScheduleTime(inspection_time) || !isValidScheduleTime(estimated_installation_time)) {
       return res.status(400).json({ success: false, message: "Inspection and installation times must use a valid 24-hour time." });
+    }
+    if ((inspection_duration_minutes !== undefined && (!Number.isFinite(Number(inspection_duration_minutes)) || Number(inspection_duration_minutes) < 30)) || (inspection_travel_minutes !== undefined && (!Number.isFinite(Number(inspection_travel_minutes)) || Number(inspection_travel_minutes) < 0)) || (installation_duration_minutes !== undefined && (!Number.isFinite(Number(installation_duration_minutes)) || Number(installation_duration_minutes) < 1))) {
+      return res.status(400).json({ success: false, message: "Inspection duration must be at least 30 minutes; travel and installation duration must be non-negative valid minutes." });
     }
 
     if (manual_override !== undefined && manual_override !== null && String(manual_override).trim() !== ""
@@ -2847,6 +3054,8 @@ export const updateOrderInspection = async (req, res) => {
       }
     }
     if (inspection_time !== undefined) updateData.inspection_time = inspection_time || "";
+    if (inspection_duration_minutes !== undefined) updateData.inspection_duration_minutes = Number(inspection_duration_minutes);
+    if (inspection_travel_minutes !== undefined) updateData.inspection_travel_minutes = Number(inspection_travel_minutes);
     if (estimated_installation_date !== undefined) {
       const parsedInstallationDate = estimated_installation_date ? new Date(estimated_installation_date) : null;
       if (parsedInstallationDate && Number.isNaN(parsedInstallationDate.getTime())) {
@@ -2855,6 +3064,12 @@ export const updateOrderInspection = async (req, res) => {
       updateData.estimated_installation_date = parsedInstallationDate;
     }
     if (estimated_installation_time !== undefined) updateData.estimated_installation_time = estimated_installation_time || "";
+    if (installation_duration_minutes !== undefined) updateData.installation_duration_minutes = Number(installation_duration_minutes);
+    if (project_additional_charges !== undefined) {
+      const normalized = normalizeProjectCharges(project_additional_charges);
+      if (normalized.error) return res.status(400).json({ success: false, message: normalized.error });
+      updateData.project_additional_charges = normalized.charges;
+    }
     if (inspection_notes !== undefined) updateData.inspection_notes = inspection_notes;
     if (issues_found !== undefined) updateData.issues_found = issues_found;
     if (shipping_address !== undefined) updateData.shipping_address = normalizeAddress(shipping_address || "");
@@ -2894,6 +3109,23 @@ export const updateOrderInspection = async (req, res) => {
     if (!order) {
       return res.status(404).json({ success: false, message: "Order not found" });
     }
+    const previousSchedule = {
+      inspection_date: order.inspection_date, inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes, inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date, estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    };
+
+    const scheduleError = await validateOrderSchedules({
+      inspection_date: inspection_date !== undefined ? inspection_date : order.inspection_date,
+      inspection_time: inspection_time !== undefined ? inspection_time : order.inspection_time,
+      inspection_duration_minutes: inspection_duration_minutes !== undefined ? inspection_duration_minutes : order.inspection_duration_minutes,
+      inspection_travel_minutes: inspection_travel_minutes !== undefined ? inspection_travel_minutes : order.inspection_travel_minutes,
+      estimated_installation_date: estimated_installation_date !== undefined ? estimated_installation_date : order.estimated_installation_date,
+      estimated_installation_time: estimated_installation_time !== undefined ? estimated_installation_time : order.estimated_installation_time,
+      installation_duration_minutes: installation_duration_minutes !== undefined ? installation_duration_minutes : order.installation_duration_minutes,
+    }, order._id, order);
+    if (scheduleError) return res.status(409).json({ success: false, code: "SCHEDULE_UNAVAILABLE", message: scheduleError });
 
     const previousInstallationDate = order.estimated_installation_date
       ? new Date(order.estimated_installation_date).getTime()
@@ -2969,8 +3201,10 @@ export const updateOrderInspection = async (req, res) => {
     if (Array.isArray(updateData.items) && !(calculatedItemsEstimate > 0)) {
       return res.status(400).json({ success: false, message: "Inspection items must have valid configured prices." });
     }
-    const updatedEstimatedCost = Array.isArray(updateData.items)
-      ? calculatedItemsEstimate
+    const nextProjectCharges = Array.isArray(updateData.project_additional_charges) ? updateData.project_additional_charges : order.project_additional_charges || [];
+    const projectChargesTotal = nextProjectCharges.reduce((sum, charge) => sum + Math.max(0, Number(charge.amount) || 0), 0);
+    const updatedEstimatedCost = Array.isArray(updateData.items) || Array.isArray(updateData.project_additional_charges)
+      ? calculatedItemsEstimate + projectChargesTotal
       : Number(order.estimated_cost) > 0
         ? Number(order.estimated_cost)
         : calculatedItemsEstimate;
@@ -3072,7 +3306,15 @@ export const updateOrderInspection = async (req, res) => {
     const { requiredAmount, paidAmount } = getOrderPaymentAmounts(order);
     order.downpayment_received = requiredAmount > 0 && paidAmount >= requiredAmount;
     order.payment_status = getOrderPaymentStatus(order);
-    await order.save();
+    await saveWithScheduleReservations(order, {
+      inspection_date: order.inspection_date,
+      inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes,
+      inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date,
+      estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    }, () => order.save(), previousSchedule);
 
     res.json({ success: true, order: attachOrderScheduleOverdue(order) });
     const currentInstallationDate = order.estimated_installation_date
@@ -3116,10 +3358,17 @@ export const updateOrderProgress = async (req, res) => {
     }
 
     const { orderId } = req.params;
-    const { progress, status, installation_date, estimated_installation_date, stages, proof_images } = req.body;
+    const { progress, status, installation_date, estimated_installation_date, estimated_installation_time, stages, proof_images } = req.body;
 
     const order = await Order.findById(orderId);
     if (!order) return res.status(404).json({ success: false, message: "Order not found" });
+
+    const previousSchedule = {
+      inspection_date: order.inspection_date, inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes, inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date, estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    };
 
     const previousInstallationPlan = getInstallationPlan(order);
     const itemIndex = req.body.itemIndex;
@@ -3129,6 +3378,18 @@ export const updateOrderProgress = async (req, res) => {
       if (installationDateError) {
         return res.status(400).json({ success: false, message: installationDateError });
       }
+      const proposedTime = estimated_installation_time ?? order.estimated_installation_time;
+      if (!proposedTime) return res.status(400).json({ success: false, message: "Choose an installation start time." });
+      const scheduleError = await validateOrderSchedules({
+        inspection_date: order.inspection_date,
+        inspection_time: order.inspection_time,
+        inspection_duration_minutes: order.inspection_duration_minutes,
+        inspection_travel_minutes: order.inspection_travel_minutes,
+        estimated_installation_date,
+        estimated_installation_time: proposedTime,
+        installation_duration_minutes: order.installation_duration_minutes,
+      }, order._id, previousSchedule);
+      if (scheduleError) return res.status(409).json({ success: false, code: "SCHEDULE_UNAVAILABLE", message: scheduleError });
     }
     if (itemIndex !== undefined && (!isItemProgressUpdate || itemIndex < 0 || itemIndex >= order.items.length)) {
       return res.status(400).json({ success: false, message: "Invalid item index for batch progress update." });
@@ -3236,6 +3497,7 @@ export const updateOrderProgress = async (req, res) => {
       }
       order.estimated_installation_date = parsedInstallationDate;
     }
+    if (!isItemProgressUpdate && estimated_installation_time !== undefined) order.estimated_installation_time = String(estimated_installation_time || "");
 
     if (Array.isArray(stages)) {
       const normalizedStages = stages.map((s) => ({
@@ -3342,6 +3604,7 @@ export const updateOrderProgress = async (req, res) => {
 
         if (scheduleStage) {
           scheduleStage.proposedInstallationDate = requestedInstallationDate;
+          scheduleStage.proposedInstallationTime = String(estimated_installation_time || order.estimated_installation_time || "");
           if (isRescheduled) clearGeneratedRescheduleDelay([scheduleStage]);
         }
       }
@@ -3468,7 +3731,15 @@ export const updateOrderProgress = async (req, res) => {
       auditTarget.markModified?.("progress_audit");
     }
 
-    await order.save();
+    await saveWithScheduleReservations(order, {
+      inspection_date: order.inspection_date,
+      inspection_time: order.inspection_time,
+      inspection_duration_minutes: order.inspection_duration_minutes,
+      inspection_travel_minutes: order.inspection_travel_minutes,
+      estimated_installation_date: order.estimated_installation_date,
+      estimated_installation_time: order.estimated_installation_time,
+      installation_duration_minutes: order.installation_duration_minutes,
+    }, () => order.save(), previousSchedule);
 
     const notificationStages = isItemProgressUpdate
       ? order.items[itemIndex]?.progress_stages || []
@@ -3578,6 +3849,7 @@ export const generateContract = async (req, res) => {
     const contractSnapshot = {
       ...(snapshot || order.contractSnapshot || {}),
       projectCost: finalProjectCost,
+      additionalCharges: (order.project_additional_charges || []).map((charge) => ({ name: charge.name || "Additional charge", amount: Number(charge.amount) || 0, note: charge.note || "" })),
       downpayment: requiredAmount,
     };
 

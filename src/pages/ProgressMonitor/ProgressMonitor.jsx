@@ -256,6 +256,7 @@ const buildProjectRows = (order) => {
           : "TBD"),
       installation: formatDateToMMMDDYYYY(order.estimated_installation_date) || "TBD",
       estimated_installation_date: order.estimated_installation_date,
+      estimated_installation_time: order.estimated_installation_time || "",
       progress: stages.length > 0
         ? calculateProjectProgressFromStages(stages)
         : itemProgress ?? mapProgressFromStatus(order.status, order.progress),
@@ -501,6 +502,7 @@ function ProgressMonitor() {
           progress: updatedProject.progress,
           status: updatedProject.status,
           estimated_installation_date: updatedProject.installation,
+          estimated_installation_time: updatedProject.installationTime || "",
           stages: updatedProject.stages,
           progress_notes: updatedProject.progress_notes || "",
           expectedUpdatedAt: updatedProject.rawOrder?.updatedAt || "",
@@ -528,6 +530,7 @@ function ProgressMonitor() {
             inspection_date: savedOrder.inspection_date,
             installation: formatDateToMMMDDYYYY(savedOrder.estimated_installation_date) || "TBD",
             estimated_installation_date: savedOrder.estimated_installation_date,
+            estimated_installation_time: savedOrder.estimated_installation_time || "",
             createdAt: savedOrder.createdAt,
             updatedAt: savedOrder.updatedAt,
             contract_terms: savedOrder.contract_terms,
@@ -641,6 +644,7 @@ function ProgressMonitor() {
           : "TBD"),
       installation: formatDateToMMMDDYYYY(savedOrder.estimated_installation_date) || "TBD",
       estimated_installation_date: savedOrder.estimated_installation_date,
+      estimated_installation_time: savedOrder.estimated_installation_time || "",
       progress: mapProgressFromStatus(savedOrder.status, savedOrder.progress),
       stages: savedOrder.progress_stages || [],
       progress_stages: savedOrder.progress_stages || [],

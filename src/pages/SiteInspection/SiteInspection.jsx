@@ -37,7 +37,7 @@ import { toSquareFeet } from "@/lib/estimator";
 import { getMeasuredProductLineTotal, getProductLineBreakdown, getProductSizeLimitWarnings } from "@/lib/productPricing";
 import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
 import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
-import { searchCustomers } from "@/api/users";
+import { getSystemSettings, searchCustomers } from "@/api/users";
 import { uploadFiles } from "@/api/uploads";
 import Sidebar from "../../components/layout/Sidebar";
 import Navbar from "../../components/layout/Navbar";
@@ -66,9 +66,13 @@ const getDefaultInspection = () => ({
   siteAddress: "",
   inspection_date: "",
   inspection_time: "",
+  inspection_duration_minutes: 30,
+  inspection_travel_minutes: 0,
   is_rush_order: false,
   estimated_installation_date: "",
   estimated_installation_time: "",
+  installation_duration_minutes: 60,
+  project_additional_charges: [],
   notes: "",
   site_notes: "",
   warranty_period: 90,
@@ -184,7 +188,7 @@ const formatScheduleTime = (value) => {
   return `${hour % 12 || 12}:${match[2]} ${hour >= 12 ? "PM" : "AM"}`;
 };
 
-const getScheduleOverlap = (records, dateValue, timeValue, excludeRecordId = "") => {
+const getScheduleOverlap = (records, dateValue, timeValue, excludeRecordId = "", durationMinutes = 30) => {
   if (!dateValue || !timeValue) return null;
   const timeToMinutes = (value) => {
     const match = String(value || "").match(/^(\d{2}):(\d{2})$/);
@@ -192,20 +196,23 @@ const getScheduleOverlap = (records, dateValue, timeValue, excludeRecordId = "")
   };
   const candidateStart = timeToMinutes(timeValue);
   if (candidateStart === null) return null;
-  const candidateEnd = candidateStart + 30;
+  const candidateDay = String(dateValue).slice(0, 10);
+  const candidateStartAbsolute = Date.parse(`${candidateDay}T00:00:00Z`) / 60000 + candidateStart;
+  const candidateEnd = candidateStartAbsolute + Math.max(1, Number(durationMinutes) || 30);
   for (const record of records || []) {
     if (String(record?._id || record?.id || "") === String(excludeRecordId || "")) continue;
     if (String(record?.status || "").toLowerCase() === "cancelled") continue;
     const schedules = [
-      { date: record?.inspection_date, time: record?.inspection_time, label: "Inspection", duration: Number(record?.inspection_duration_minutes) + Number(record?.inspection_travel_minutes || 0) * 2 },
-      { date: record?.estimated_installation_date, time: record?.estimated_installation_time, label: "Installation", duration: Number(record?.estimated_installation_duration_minutes) },
+      { date: record?.inspection_date, time: record?.inspection_time, label: "Inspection", duration: Number(record?.inspection_duration_minutes || 30) + Number(record?.inspection_travel_minutes || 0) },
+      { date: record?.estimated_installation_date, time: record?.estimated_installation_time, label: "Installation", duration: Number(record?.installation_duration_minutes || 60) },
     ];
     for (const schedule of schedules) {
-      if (!schedule.date || String(schedule.date).slice(0, 10) !== String(dateValue).slice(0, 10)) continue;
+      if (!schedule.date) continue;
       const bookedStart = timeToMinutes(schedule.time);
       if (bookedStart === null) continue;
       const bookedDuration = schedule.duration > 0 ? schedule.duration : 30;
-      if (candidateStart < bookedStart + bookedDuration && candidateEnd > bookedStart) {
+      const bookedStartAbsolute = Date.parse(`${String(schedule.date).slice(0, 10)}T00:00:00Z`) / 60000 + bookedStart;
+      if (candidateStartAbsolute < bookedStartAbsolute + bookedDuration && candidateEnd > bookedStartAbsolute) {
         return { label: schedule.label, time: schedule.time };
       }
     }
@@ -213,16 +220,27 @@ const getScheduleOverlap = (records, dateValue, timeValue, excludeRecordId = "")
   return null;
 };
 
-const getAvailableScheduleTimes = (records, dateValue, excludeRecordId = "") => {
+const getAvailableScheduleTimes = (records, dateValue, excludeRecordId = "", durationMinutes = 30, businessHours = { open: "08:00", close: "18:00" }, allowMultiDay = false) => {
   const availableTimes = [];
-  for (let minute = 8 * 60; minute <= 17 * 60 && availableTimes.length < 3; minute += 30) {
+  const toMinutes = (value, fallback) => { const match = String(value || "").match(/^(\d{2}):(\d{2})$/); return match ? Number(match[1]) * 60 + Number(match[2]) : fallback; };
+  const opening = toMinutes(businessHours?.open, 8 * 60);
+  const latestStart = toMinutes(businessHours?.close, 18 * 60) - (allowMultiDay ? 1 : Math.max(1, Number(durationMinutes) || 30));
+  const now = new Date();
+  const manilaDateParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const manilaToday = `${manilaDateParts.find((part) => part.type === "year")?.value}-${manilaDateParts.find((part) => part.type === "month")?.value}-${manilaDateParts.find((part) => part.type === "day")?.value}`;
+  const manilaClockParts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  const currentManilaMinutes = Number(manilaClockParts.find((part) => part.type === "hour")?.value || 0) * 60 + Number(manilaClockParts.find((part) => part.type === "minute")?.value || 0);
+  for (let minute = opening; minute <= latestStart && availableTimes.length < 3; minute += 30) {
+    if (dateValue === manilaToday) {
+      if (minute <= currentManilaMinutes) continue;
+    }
     const time = `${String(Math.floor(minute / 60)).padStart(2, "0")}:${String(minute % 60).padStart(2, "0")}`;
-    if (!getScheduleOverlap(records, dateValue, time, excludeRecordId)) availableTimes.push(time);
+    if (!getScheduleOverlap(records, dateValue, time, excludeRecordId, durationMinutes)) availableTimes.push(time);
   }
   return availableTimes;
 };
 
-function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeChange, className, darkMode = false, scheduledRecords = [], excludeRecordId = "" }) {
+function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeChange, className, darkMode = false, scheduledRecords = [], excludeRecordId = "", durationMinutes = 30, businessHours = { open: "08:00", close: "18:00" } }) {
   const [isCalendarOpen, setIsCalendarOpen] = useState(false);
   const [isTimeModalOpen, setIsTimeModalOpen] = useState(false);
   const [draftTime, setDraftTime] = useState({ hour: 9, minute: 0, period: "AM" });
@@ -261,25 +279,42 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
   }).filter(Boolean));
   const inspectionDates = scheduledDateKeys("inspection_date");
   const installationDates = scheduledDateKeys("estimated_installation_date");
-  const minimumDate = min ? new Date(`${min}T00:00:00`) : null;
+  const now = new Date();
+  const manilaDateParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(now);
+  const todayKey = `${manilaDateParts.find((part) => part.type === "year")?.value}-${manilaDateParts.find((part) => part.type === "month")?.value}-${manilaDateParts.find((part) => part.type === "day")?.value}`;
+  const todayDate = new Date(`${todayKey}T12:00:00`);
+  const manilaClockParts = new Intl.DateTimeFormat("en-GB", { timeZone: "Asia/Manila", hour: "2-digit", minute: "2-digit", hourCycle: "h23" }).formatToParts(now);
+  const currentManilaMinutes = Number(manilaClockParts.find((part) => part.type === "hour")?.value || 0) * 60 + Number(manilaClockParts.find((part) => part.type === "minute")?.value || 0);
+  const minimumDateKey = min && min > todayKey ? min : todayKey;
+  const minimumDate = new Date(`${minimumDateKey}T00:00:00`);
   const calendarSurface = darkMode ? "border-slate-700 bg-slate-900 text-slate-100" : "border-slate-200 bg-white text-slate-900";
   const calendarMuted = darkMode ? "text-slate-400" : "text-slate-500";
   const combinedValue = [formatInspectionDateForDisplay(value), formatScheduleTime(timeValue)].filter(Boolean).join(" at ");
-  const todayDate = new Date();
-  const todayKey = dateKey(todayDate);
   const selectedDateSummary = value
     ? new Date(`${value}T12:00:00`).toLocaleDateString("en-US", { weekday: "short", month: "short", day: "numeric", year: "numeric" })
     : "Choose a date";
   const draftTimeValue = `${String(draftTime.period === "PM" ? (draftTime.hour % 12) + 12 : draftTime.hour % 12).padStart(2, "0")}:${String(draftTime.minute).padStart(2, "0")}`;
-  const timeConflict = getScheduleOverlap(scheduledRecords, value, draftTimeValue, excludeRecordId);
-  const availableTimes = timeConflict ? getAvailableScheduleTimes(scheduledRecords, value, excludeRecordId) : [];
-  const openTimeModal = () => {
-    const match = String(timeValue || "").match(/^(\d{2}):(\d{2})$/);
+  const openingMinutes = Number(String(businessHours?.open || "08:00").slice(0, 2)) * 60 + Number(String(businessHours?.open || "08:00").slice(3, 5));
+  const closingMinutes = Number(String(businessHours?.close || "18:00").slice(0, 2)) * 60 + Number(String(businessHours?.close || "18:00").slice(3, 5));
+  const isMultiDayInstallation = label.toLowerCase().includes("installation") && Number(durationMinutes) > closingMinutes - openingMinutes;
+  const draftMinutes = Number(draftTimeValue.slice(0, 2)) * 60 + Number(draftTimeValue.slice(3, 5));
+  const selectedTimeIsPast = value === todayKey && draftMinutes <= currentManilaMinutes;
+  const timeConflict = draftTimeValue && selectedTimeIsPast
+    ? { label: "Past time", time: draftTimeValue }
+    : draftTimeValue && (draftMinutes < openingMinutes || (!isMultiDayInstallation && draftMinutes + Number(durationMinutes || 30) > closingMinutes))
+    ? { label: "Business hours", time: `${businessHours?.open || "08:00"}–${businessHours?.close || "18:00"}` }
+    : getScheduleOverlap(scheduledRecords, value, draftTimeValue, excludeRecordId, durationMinutes);
+  const availableTimes = timeConflict ? getAvailableScheduleTimes(scheduledRecords, value, excludeRecordId, durationMinutes, businessHours, isMultiDayInstallation) : [];
+  const openTimeModal = (resetToOpening = false) => {
+    const match = resetToOpening ? null : String(timeValue || "").match(/^(\d{2}):(\d{2})$/);
     if (match) {
       const hour = Number(match[1]);
       setDraftTime({ hour: hour % 12 || 12, minute: Number(match[2]), period: hour >= 12 ? "PM" : "AM" });
     } else {
-      setDraftTime({ hour: 9, minute: 0, period: "AM" });
+      const opening = businessHours?.open || "08:00";
+      const [hourText, minuteText] = opening.split(":");
+      const hour = Number(hourText);
+      setDraftTime({ hour: hour % 12 || 12, minute: Number(minuteText), period: hour >= 12 ? "PM" : "AM" });
     }
     setIsTimeModalOpen(true);
   };
@@ -341,7 +376,7 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
                   const isDisabled = Boolean(minimumDate && date < minimumDate);
                   const hasInspection = inspectionDates.has(key);
                   const hasInstallation = installationDates.has(key);
-                  return <button key={key} type="button" disabled={isDisabled} onClick={() => onChange(key)} aria-current={isToday ? "date" : undefined} aria-label={`${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${isToday ? ", today" : ""}${hasInspection ? ", inspection scheduled" : ""}${hasInstallation ? ", installation scheduled" : ""}`} className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-25 ${isSelected ? "border-red-700 bg-red-700 font-bold text-white shadow-sm" : isToday ? darkMode ? "border-slate-500 bg-slate-800 font-bold text-white" : "border-slate-300 bg-slate-50 font-bold text-slate-900" : "border-transparent"} ${!isSelected && isCurrentMonth ? darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-red-50" : ""} ${!isCurrentMonth ? `${calendarMuted} opacity-50 hover:bg-slate-500/10` : ""}`}>
+                  return <button key={key} type="button" disabled={isDisabled} onClick={() => { onChange(key); openTimeModal(value !== key); }} aria-current={isToday ? "date" : undefined} aria-label={`${date.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" })}${isToday ? ", today" : ""}${hasInspection ? ", inspection scheduled" : ""}${hasInstallation ? ", installation scheduled" : ""}`} className={`relative flex aspect-square items-center justify-center rounded-lg border text-sm transition focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-500 disabled:cursor-not-allowed disabled:opacity-25 ${isSelected ? "border-red-700 bg-red-700 font-bold text-white shadow-sm" : isToday ? darkMode ? "border-slate-500 bg-slate-800 font-bold text-white" : "border-slate-300 bg-slate-50 font-bold text-slate-900" : "border-transparent"} ${!isSelected && isCurrentMonth ? darkMode ? "text-slate-200 hover:bg-slate-800" : "text-slate-700 hover:bg-red-50" : ""} ${!isCurrentMonth ? `${calendarMuted} opacity-50 hover:bg-slate-500/10` : ""}`}>
                     {date.getDate()}
                     {(hasInspection || hasInstallation) && <span className="absolute bottom-1 flex items-center gap-1" aria-hidden="true">
                       {hasInspection && <span className={`size-1.5 rounded-full ${isSelected ? "bg-white" : "bg-amber-500"}`} />}
@@ -395,7 +430,7 @@ function MonthDayYearDateInput({ label, value, timeValue, min, onChange, onTimeC
                 }} aria-label="Choose time" className={`mt-1.5 h-12 w-full rounded-lg border px-3 text-base font-semibold ${darkMode ? "border-slate-700 bg-slate-950 text-slate-100" : "border-slate-200 bg-white text-slate-900"}`} />
               </label>
               {timeConflict && <div role="alert" className={`mt-3 rounded-lg border p-3 text-xs ${darkMode ? "border-amber-500/40 bg-amber-500/10 text-amber-100" : "border-amber-300 bg-amber-50 text-amber-900"}`}>
-                <p className="font-semibold">This time overlaps a scheduled {timeConflict.label.toLowerCase()} at {formatScheduleTime(timeConflict.time)}.</p>
+                <p className="font-semibold">{timeConflict.label === "Business hours" ? `The full appointment must fit between ${timeConflict.time} (Asia/Manila).` : timeConflict.label === "Past time" ? "Select a future appointment time." : `This time overlaps a scheduled ${timeConflict.label.toLowerCase()} at ${formatScheduleTime(timeConflict.time)}.`}</p>
                 <p className="mt-1">Choose another time to avoid a schedule conflict.</p>
                 {availableTimes.length > 0 && <div className="mt-2 flex flex-wrap gap-2">{availableTimes.map((time) => <button key={time} type="button" onClick={() => {
                   const [hourText, minuteText] = time.split(":");
@@ -589,7 +624,7 @@ const createContractPrintClone = (element) => {
   return { wrapper, clone };
 };
 
-export const validateInspectionPayload = (payload = {}) => {
+export const validateInspectionPayload = (payload = {}, { requireScheduleTimes = false } = {}) => {
   const nextErrors = {};
 
   if (!payload.customerName?.trim()) nextErrors.customerName = "Client name is required.";
@@ -597,6 +632,13 @@ export const validateInspectionPayload = (payload = {}) => {
   else if (!isValidPhilippinePhone(payload.phone)) nextErrors.phone = getPhilippinePhoneError(payload.phone);
   if (!payload.siteAddress?.trim()) nextErrors.siteAddress = "Site address is required.";
   if (!payload.inspection_date) nextErrors.inspection_date = "Inspection date is required.";
+  if (!Number.isFinite(Number(payload.inspection_duration_minutes)) || Number(payload.inspection_duration_minutes) < 30) nextErrors.inspection_duration_minutes = "Inspection duration must be at least 30 minutes.";
+  if (!Number.isFinite(Number(payload.installation_duration_minutes)) || Number(payload.installation_duration_minutes) < 1) nextErrors.installation_duration_minutes = "Installation duration must be at least 1 minute.";
+  if (requireScheduleTimes && payload.inspection_date && !payload.inspection_time) nextErrors.inspection_time = "Choose an inspection start time.";
+  if (requireScheduleTimes && payload.estimated_installation_date && !payload.estimated_installation_time) nextErrors.estimated_installation_time = "Choose an installation start time.";
+  if (payload.project_additional_charges?.some((charge) => (String(charge.name || "").trim() || String(charge.amount ?? "").trim()) && (!String(charge.name || "").trim() || String(charge.amount ?? "").trim() === "" || !Number.isFinite(Number(charge.amount)) || Number(charge.amount) < 0))) {
+    nextErrors.project_additional_charges = "Each additional charge needs a description and a non-negative amount.";
+  }
   const installationDateError = getInstallationDateError(payload.inspection_date, payload.estimated_installation_date);
   if (installationDateError) nextErrors.estimated_installation_date = installationDateError;
   if (!payload.items || payload.items.length === 0) nextErrors.items = "Add at least one measurement row.";
@@ -916,6 +958,7 @@ function SiteInspection() {
   const [customerTypeFilter, setCustomerTypeFilter] = useState("all");
   const [priorityFilter, setPriorityFilter] = useState("all");
   const [newInspection, setNewInspection] = useState(getDefaultInspection());
+  const [businessHours, setBusinessHours] = useState({ open: "08:00", close: "18:00", timezone: "Asia/Manila" });
   const [newManualOverrideLocked, setNewManualOverrideLocked] = useState(true);
   const [errors, setErrors] = useState({});
   const [submitting, setSubmitting] = useState(false);
@@ -941,6 +984,16 @@ function SiteInspection() {
     error: "",
   });
   const manualApprovalFileInputRef = useRef(null);
+
+  useEffect(() => {
+    let active = true;
+    getSystemSettings().then((response) => {
+      if (active && response?.business_hours?.open && response?.business_hours?.close) {
+        setBusinessHours(response.business_hours);
+      }
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
 
   const changeInspectionStep = (step, setStep, bodyRef) => {
     setStep(step);
@@ -2091,9 +2144,13 @@ function SiteInspection() {
       estimation_mode: "auto",
       inspection_date: toApiDate(payload.inspection_date),
       inspection_time: payload.inspection_time || "",
+      inspection_duration_minutes: Number(payload.inspection_duration_minutes) || 30,
+      inspection_travel_minutes: Number(payload.inspection_travel_minutes) || 0,
       is_rush_order: payload.is_rush_order === true,
       estimated_installation_date: toApiDate(payload.estimated_installation_date),
       estimated_installation_time: payload.estimated_installation_time || "",
+      installation_duration_minutes: Number(payload.installation_duration_minutes) || 60,
+      project_additional_charges: (payload.project_additional_charges || []).filter((charge) => String(charge.name || "").trim() || String(charge.amount ?? "").trim()).map((charge) => ({ name: String(charge.name || "").trim(), amount: Number(charge.amount), note: String(charge.note || "").trim() })),
       ...buildWarrantyPayload(payload.warranty_period, payload.custom_warranty_days),
       warranty_assignment_mode: (payload.items || []).length > 1 && payload.warranty_assignment_mode === "per_product"
         ? "per_product"
@@ -2374,7 +2431,7 @@ function SiteInspection() {
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
-    const totalEstimate = productEstimate;
+    const totalEstimate = productEstimate + (newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
     return { totalArea, totalEstimate };
   };
 
@@ -2390,7 +2447,7 @@ function SiteInspection() {
         return sum + calculateRowSubtotal(item);
       }, 0) * 100
     ) / 100;
-    const totalEstimate = productEstimate;
+    const totalEstimate = productEstimate + (editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + Math.max(0, Number(charge.amount) || 0) : sum, 0);
     return { totalArea, totalEstimate };
   };
 
@@ -2519,7 +2576,7 @@ function SiteInspection() {
         return;
       }
     }
-    const validationErrors = validateInspectionPayload(newInspection);
+    const validationErrors = validateInspectionPayload(newInspection, { requireScheduleTimes: true });
     if (Object.keys(validationErrors).length > 0) {
       setErrors(validationErrors);
       if (["customerName", "phone", "siteAddress", "inspection_date", "estimated_installation_date", "customerId"].some((field) => validationErrors[field])) {
@@ -3052,9 +3109,13 @@ function SiteInspection() {
         agreed_payment_date: normalizeDateInputValue(inspection.agreed_payment_date),
         inspection_date: normalizeDateInputValue(inspection.inspection_date),
         inspection_time: inspection.inspection_time || "",
+        inspection_duration_minutes: Number(inspection.inspection_duration_minutes) || 30,
+        inspection_travel_minutes: Number(inspection.inspection_travel_minutes) || 0,
         is_rush_order: inspection.is_rush_order === true || customerSelectedRush,
         estimated_installation_date: normalizeDateInputValue(getEstimatedInstallationDate(inspection)),
         estimated_installation_time: inspection.estimated_installation_time || "",
+        installation_duration_minutes: Number(inspection.installation_duration_minutes) || 60,
+        project_additional_charges: Array.isArray(inspection.project_additional_charges) ? inspection.project_additional_charges.map((charge) => ({ ...charge })) : [],
         warranty_period: normalizedWarrantyPeriod,
         warranty_assignment_mode: inspection.warranty_assignment_mode === "per_product" ? "per_product" : "same",
         warranty_status: inspection.warranty_status || "",
@@ -3485,12 +3546,16 @@ function SiteInspection() {
         manual_override: editInspection.manual_override || "",
         inspection_date: toApiDate(editInspection.inspection_date),
         inspection_time: editInspection.inspection_time || "",
+        inspection_duration_minutes: Number(editInspection.inspection_duration_minutes) || 30,
+        inspection_travel_minutes: Number(editInspection.inspection_travel_minutes) || 0,
         is_rush_order: editInspection.is_rush_order === true,
         inspection_notes: editInspection.inspection_notes || undefined,
         issues_found: editInspection.issues_found || undefined,
         inspection_status: editInspection.inspection_date ? "scheduled" : editInspection.inspection_status || undefined,
         estimated_installation_date: toApiDate(editInspection.estimated_installation_date),
         estimated_installation_time: editInspection.estimated_installation_time || "",
+        installation_duration_minutes: Number(editInspection.installation_duration_minutes) || 60,
+        project_additional_charges: (editInspection.project_additional_charges || []).filter((charge) => String(charge.name || "").trim() || String(charge.amount ?? "").trim()).map((charge) => ({ name: String(charge.name || "").trim(), amount: Number(charge.amount), note: String(charge.note || "").trim() })),
         payment_terms: editInspection.payment_terms || undefined,
         required_downpayment_amount: resolveRequiredPaymentAmount(
           editInspection.payment_terms,
@@ -4463,6 +4528,8 @@ function SiteInspection() {
                           label="Inspection date"
                           value={newInspection.inspection_date}
                           timeValue={newInspection.inspection_time}
+                          durationMinutes={(Number(newInspection.inspection_duration_minutes) || 30) + (Number(newInspection.inspection_travel_minutes) || 0)}
+                          businessHours={businessHours}
                           min={today}
                           onTimeChange={(value) => handleInspectionFieldChange("inspection_time", value)}
                           onChange={(value) => {
@@ -4477,6 +4544,7 @@ function SiteInspection() {
                           darkMode={darkMode}
                           scheduledRecords={inspections}
                         />
+                        <label className="mt-3 block text-xs font-semibold">Inspection duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={newInspection.inspection_duration_minutes} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleInspectionFieldChange("inspection_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.inspection_date && <p className="mt-2 text-xs text-red-400">{errors.inspection_date}</p>}
                       </div>
 
@@ -4486,6 +4554,8 @@ function SiteInspection() {
                           label="Estimated installation date"
                           value={newInspection.estimated_installation_date || ""}
                           timeValue={newInspection.estimated_installation_time}
+                          durationMinutes={Number(newInspection.installation_duration_minutes) || 60}
+                          businessHours={businessHours}
                           min={getMinimumInstallationDate(newInspection.inspection_date)}
                           onTimeChange={(value) => handleInspectionFieldChange("estimated_installation_time", value)}
                           onChange={(value) => {
@@ -4496,6 +4566,7 @@ function SiteInspection() {
                           darkMode={darkMode}
                           scheduledRecords={inspections}
                         />
+                        <label className="mt-3 block text-xs font-semibold">Installation duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={newInspection.installation_duration_minutes} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleInspectionFieldChange("installation_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.estimated_installation_date && <p className="mt-2 text-xs text-red-400">{errors.estimated_installation_date}</p>}
                       </div>
 
@@ -4508,6 +4579,11 @@ function SiteInspection() {
                       </div>
                     </div>
 
+
+                    <section className={`mt-5 rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
+                      <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className={`text-sm font-bold ${labelClass}`}>Additional project charges</h3><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional; add only charges confirmed for this project.</p></div><button type="button" onClick={() => handleInspectionFieldChange("project_additional_charges", [...(newInspection.project_additional_charges || []), { name: "", amount: "", note: "" }])} className="rounded-lg border px-3 py-2 text-xs font-semibold">Add charge</button></div>
+                      {(newInspection.project_additional_charges || []).map((charge, index) => <div key={`new-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="₱ Amount" value={charge.amount} onChange={(event) => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleInspectionFieldChange("project_additional_charges", newInspection.project_additional_charges.filter((_, i) => i !== index))} className="rounded-lg border">×</button></div>)}
+                    </section>
 
                     {newInspection.items.length > 1 && (
                       <div className="mt-6">
@@ -4919,8 +4995,9 @@ function SiteInspection() {
                     </button>
 
                     <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
-                      <div className={`text-right text-lg font-black ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeTotals().totalEstimate)}</span>
+                      <div className={`text-right ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
+                        {(newInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((newInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0))} additional charges</p>}
+                        <div className="text-lg font-black">Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeTotals().totalEstimate)}</span></div>
                       </div>
                     </div>
                   </section>}
@@ -5631,6 +5708,8 @@ function SiteInspection() {
                           label="Inspection date"
                           value={editInspection.inspection_date || ""}
                           timeValue={editInspection.inspection_time}
+                          durationMinutes={(Number(editInspection.inspection_duration_minutes) || 30) + (Number(editInspection.inspection_travel_minutes) || 0)}
+                          businessHours={businessHours}
                           min={today}
                           onTimeChange={(value) => handleEditChange("inspection_time", value)}
                           onChange={(value) => {
@@ -5646,6 +5725,7 @@ function SiteInspection() {
                           scheduledRecords={inspections}
                           excludeRecordId={editInspection.id}
                         />
+                        <label className="mt-3 block text-xs font-semibold">Inspection duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={editInspection.inspection_duration_minutes ?? 30} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleEditChange("inspection_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.inspection_date && <p className="mt-2 text-xs text-red-400">{errors.inspection_date}</p>}
                       </div>
 
@@ -5655,6 +5735,8 @@ function SiteInspection() {
                           label="Estimated installation date"
                           value={editInspection.estimated_installation_date || ""}
                           timeValue={editInspection.estimated_installation_time}
+                          durationMinutes={Number(editInspection.installation_duration_minutes) || 60}
+                          businessHours={businessHours}
                           min={getMinimumInstallationDate(editInspection.inspection_date)}
                           onTimeChange={(value) => handleEditChange("estimated_installation_time", value)}
                           onChange={(value) => {
@@ -5666,6 +5748,7 @@ function SiteInspection() {
                           scheduledRecords={inspections}
                           excludeRecordId={editInspection.id}
                         />
+                        <label className="mt-3 block text-xs font-semibold">Installation duration (min)<input type="text" inputMode="numeric" pattern="[0-9]*" value={editInspection.installation_duration_minutes ?? 60} onChange={(event) => { if (/^\d*$/.test(event.target.value)) handleEditChange("installation_duration_minutes", event.target.value); }} className={`${fieldClass} mt-1`} /></label>
                         {errors.estimated_installation_date && <p className="mt-2 text-xs text-red-400">{errors.estimated_installation_date}</p>}
                       </div>
 
@@ -5678,6 +5761,11 @@ function SiteInspection() {
                       </div>
                     </div>
 
+
+                    <section className={`mt-5 rounded-xl border p-4 ${darkMode ? "border-slate-700 bg-slate-900/40" : "border-slate-200 bg-slate-50"}`}>
+                      <div className="mb-3 flex items-center justify-between gap-3"><div><h3 className={`text-sm font-bold ${labelClass}`}>Additional project charges</h3><p className={`mt-1 text-xs ${darkMode ? "text-slate-400" : "text-slate-500"}`}>Optional; add only charges confirmed for this project.</p></div><button type="button" onClick={() => handleEditChange("project_additional_charges", [...(editInspection.project_additional_charges || []), { name: "", amount: "", note: "" }])} className="rounded-lg border px-3 py-2 text-xs font-semibold">Add charge</button></div>
+                      {(editInspection.project_additional_charges || []).map((charge, index) => <div key={`edit-charge-${index}`} className="mb-2 grid gap-2 sm:grid-cols-[1fr_150px_36px]"><input aria-label="Charge description" placeholder="e.g. Transportation" value={charge.name} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, name: event.target.value } : entry))} className={fieldClass} /><input aria-label="Charge amount" type="number" min="0" step="0.01" placeholder="₱ Amount" value={charge.amount} onChange={(event) => handleEditChange("project_additional_charges", editInspection.project_additional_charges.map((entry, i) => i === index ? { ...entry, amount: event.target.value } : entry))} className={fieldClass} /><button type="button" aria-label="Remove charge" onClick={() => handleEditChange("project_additional_charges", editInspection.project_additional_charges.filter((_, i) => i !== index))} className="rounded-lg border">×</button></div>)}
+                    </section>
 
                     {editInspection.items.length > 1 && (
                       <div className="mt-6">
@@ -6103,8 +6191,9 @@ function SiteInspection() {
                     </button>
 
                     <div className={`mt-4 flex justify-end border-t pt-4 ${darkMode ? "border-slate-700" : "border-slate-200"}`}>
-                      <div className={`text-right text-lg font-black ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
-                        Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeEditTotals().totalEstimate)}</span>
+                      <div className={`text-right ${darkMode ? "text-slate-100" : "text-slate-900"}`}>
+                        {(editInspection.project_additional_charges || []).some((charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "") && <p className="mb-1 text-xs font-medium text-slate-500">Products + {formatCurrency((editInspection.project_additional_charges || []).reduce((sum, charge) => String(charge.name || "").trim() && String(charge.amount ?? "").trim() !== "" ? sum + (Number(charge.amount) || 0) : sum, 0))} additional charges</p>}
+                        <div className="text-lg font-black">Project total <span className={`ml-2 text-xl ${darkMode ? "text-red-300" : "text-red-600"}`}>{formatCurrency(computeEditTotals().totalEstimate)}</span></div>
                       </div>
                     </div>
                   </section>

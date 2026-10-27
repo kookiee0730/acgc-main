@@ -164,6 +164,8 @@ function Settings() {
   const [requestingRecoveryPasswordCode, setRequestingRecoveryPasswordCode] = useState(false);
   const [showScheduleTimeModal, setShowScheduleTimeModal] = useState(false);
   const [scheduleTimeDraft, setScheduleTimeDraft] = useState("00:00");
+  const [businessHours, setBusinessHours] = useState({ open: "08:00", close: "18:00" });
+  const [savingBusinessHours, setSavingBusinessHours] = useState(false);
 
   useEffect(() => {
     if (!recoveryPasswordResetMode || !/^\d{6}$/.test(recoveryPasswordResetCode)) {
@@ -294,6 +296,7 @@ function Settings() {
         const response = await getSystemSettings();
         if (!active) return;
         setMaintenanceMode(response.maintenance_mode === true);
+        setBusinessHours(response.business_hours || { open: "08:00", close: "18:00" });
         if (response.global_permissions) {
           setGlobalPermissions(normalizeGlobalCustomerPermissions(response.global_permissions));
         }
@@ -708,6 +711,19 @@ function Settings() {
                     {creatingBackup ? "Creating full backup..." : "Create Full Backup"}
                   </button>
                 </footer>
+              </section>
+
+              <section className="flex min-w-0 flex-col overflow-hidden rounded-[20px] border border-border bg-card dark:border-slate-700 dark:bg-slate-900">
+                <header className="px-6 pt-5.5 max-[520px]:px-4">
+                  <h3 className="text-[19px] font-medium text-foreground">Scheduling business hours</h3>
+                  <p className="mt-2 text-sm text-muted-foreground">Appointments must fit within this window. Times use Asia/Manila.</p>
+                </header>
+                <div className="grid gap-4 px-6 py-5 sm:grid-cols-2 max-[520px]:px-4">
+                  <label className="text-sm font-medium text-foreground">Opening time<input type="time" value={businessHours.open || "08:00"} onChange={(event) => setBusinessHours((current) => ({ ...current, open: event.target.value }))} className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
+                  <label className="text-sm font-medium text-foreground">Closing time<input type="time" value={businessHours.close || "18:00"} onChange={(event) => setBusinessHours((current) => ({ ...current, close: event.target.value }))} className="mt-1.5 h-10 w-full rounded-lg border border-border bg-background px-3 text-sm dark:border-slate-700 dark:bg-slate-950" /></label>
+                  <p className="text-xs text-muted-foreground sm:col-span-2">A 30-minute appointment may start at 5:30 PM when closing time is 6:00 PM.</p>
+                  <button type="button" onClick={handleBusinessHoursSave} disabled={savingBusinessHours} className="h-10 rounded-lg bg-brand px-4 text-sm font-semibold text-white disabled:opacity-60 sm:col-span-2">{savingBusinessHours ? "Saving…" : "Save business hours"}</button>
+                </div>
               </section>
 
               <section className="flex min-w-0 flex-col overflow-hidden rounded-[20px] border border-border bg-card dark:border-slate-700 dark:bg-slate-900">
@@ -1226,6 +1242,17 @@ function Settings() {
     } catch (error) {
       toast.error(error?.data?.message || error?.message || "Unable to update backup time.");
     }
+  };
+
+  const handleBusinessHoursSave = async () => {
+    setSavingBusinessHours(true);
+    try {
+      const response = await updateSystemSettings({ business_hours: { ...businessHours, timezone: "Asia/Manila" } });
+      setBusinessHours(response.business_hours || businessHours);
+      toast.success("Business hours updated.");
+    } catch (error) {
+      toast.error(error?.data?.message || error?.message || "Unable to update business hours.");
+    } finally { setSavingBusinessHours(false); }
   };
 
   const handleSaveBackupRecoveryPassword = async (event) => {

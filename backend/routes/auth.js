@@ -708,6 +708,7 @@ router.get("/system-settings", authMiddleware, async (req, res) => {
       success: true,
       maintenance_mode: settings?.maintenance_mode === true,
       global_permissions: settings?.global_permissions || null,
+      business_hours: settings?.business_hours || { open: "08:00", close: "18:00", timezone: "Asia/Manila" },
       backup_schedule: backupSchedule,
       backup_schedule_time: backupScheduleTime,
       backup_status: settings?.backup_status || "Success",
@@ -1130,6 +1131,14 @@ router.patch("/system-settings", authMiddleware, roleMiddleware(["admin", "super
     if (req.body?.global_permissions && typeof req.body.global_permissions === "object") {
       update.global_permissions = { ...req.body.global_permissions };
     }
+    if (req.body?.business_hours && typeof req.body.business_hours === "object") {
+      const { open, close } = req.body.business_hours;
+      const validTime = (value) => typeof value === "string" && /^([01]\d|2[0-3]):([0-5]\d)$/.test(value);
+      if (!validTime(open) || !validTime(close) || open >= close) {
+        return res.status(400).json({ success: false, message: "Business hours must be valid 24-hour times with closing after opening." });
+      }
+      update.business_hours = { open, close, timezone: "Asia/Manila" };
+    }
     if (typeof req.body?.backup_schedule === "string") {
       if (["daily", "weekly", "monthly"].includes(req.body.backup_schedule)) {
         update.backup_schedule = req.body.backup_schedule;
@@ -1164,6 +1173,7 @@ router.patch("/system-settings", authMiddleware, roleMiddleware(["admin", "super
       success: true,
       maintenance_mode: settings.maintenance_mode === true,
       global_permissions: settings.global_permissions || null,
+      business_hours: settings.business_hours || { open: "08:00", close: "18:00", timezone: "Asia/Manila" },
       backup_schedule: settings.backup_schedule || "weekly",
       backup_schedule_time: settings.backup_schedule_time || "00:00",
       next_backup_at: getNextScheduledBackupAt(

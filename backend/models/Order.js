@@ -547,6 +547,9 @@ const OrderSchema = new mongoose.Schema(
       trim: true,
       default: "",
     },
+    inspection_duration_minutes: { type: Number, min: 30, default: 30 },
+    inspection_travel_minutes: { type: Number, min: 0, default: 0 },
+    installation_duration_minutes: { type: Number, min: 1, default: 60 },
     estimated_installation_date: {
       type: Date,
       default: null,
@@ -555,6 +558,10 @@ const OrderSchema = new mongoose.Schema(
       type: String,
       trim: true,
       default: "",
+    },
+    project_additional_charges: {
+      type: [{ name: { type: String, trim: true, required: true }, amount: { type: Number, min: 0, required: true }, note: { type: String, trim: true, default: "" } }],
+      default: [],
     },
     inspection_notes: {
       type: String,

@@ -5,6 +5,7 @@ import { getInstallationDateError, getMinimumInstallationDate } from "@/lib/inst
 import { calculateProjectProgressFromStages } from "@/lib/orderTimeline";
 import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
 import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
+import { getSystemSettings } from "@/api/users";
 
 const focusableSelectors = [
   "button",
@@ -154,6 +155,8 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
   });
+  const [installationTime, setInstallationTime] = useState(project.estimated_installation_time || project.rawOrder?.estimated_installation_time || "");
+  const [businessHours, setBusinessHours] = useState({ open: "08:00", close: "18:00" });
   const inspectionDate = project.inspection_date || project.rawOrder?.inspection_date;
   const [stages, setStages] = useState(initialStages);
   const [uploadProgress, setUploadProgress] = useState(0);
@@ -201,6 +204,14 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const previousActiveElement = useRef(null);
 
   useEffect(() => {
+    let active = true;
+    getSystemSettings().then((settings) => {
+      if (active && settings?.business_hours) setBusinessHours(settings.business_hours);
+    }).catch(() => {});
+    return () => { active = false; };
+  }, []);
+
+  useEffect(() => {
     const projectStages = Array.isArray(project.stages)
       ? project.stages
       : Array.isArray(project.progress_stages) ? project.progress_stages : [];
@@ -215,9 +226,11 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       return Number.isNaN(date.getTime()) ? "" : date.toISOString().slice(0, 10);
     })();
     const initialNotes = project.progress_notes || project.rawOrder?.progress_notes || "";
+    const initialInstallationTime = project.estimated_installation_time || project.rawOrder?.estimated_installation_time || "";
     initialEditValues.current = {
       status: project.status || "Pending",
       installationDate: initialInstallationDate,
+      installationTime: initialInstallationTime,
       additionalNotes: initialNotes,
       stages: nextStages.map((stage) => ({
         ...stage,
@@ -227,17 +240,19 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     };
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStages(nextStages);
+    setInstallationTime(initialInstallationTime);
     initialProgressSnapshot.current = createUnsavedSnapshot({
       progress: project.progress || 0,
       status: project.status || "Pending",
       installationDate: initialInstallationDate,
+      installationTime: initialInstallationTime,
       additionalNotes: initialNotes,
       stages: nextStages,
     });
     setNewMainStageAfterKey(currentStage?.key || "");
   }, [project.stages, project.progress_stages]);
 
-  const currentProgressSnapshot = createUnsavedSnapshot({ progress, status, installationDate, stages, additionalNotes });
+  const currentProgressSnapshot = createUnsavedSnapshot({ progress, status, installationDate, installationTime, stages, additionalNotes });
   const hasUnsavedChanges = initialProgressSnapshot.current !== null && currentProgressSnapshot !== initialProgressSnapshot.current;
   const requestClose = useCallback(() => {
     if (isSaving) return;
@@ -1014,6 +1029,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     if (initial.installationDate !== installationDate) {
       changes.push(`Estimated installation date: ${displayDate(initial.installationDate)} → ${displayDate(installationDate)}`);
     }
+    if (initial.installationTime !== installationTime) changes.push(`Estimated installation time: ${initial.installationTime || "Not set"} → ${installationTime || "Not set"}`);
     if (initial.status !== status) changes.push(`Project status: ${initial.status} → ${status}`);
     if (initial.additionalNotes !== additionalNotes) changes.push("Project progress notes were updated.");
 
@@ -1107,6 +1123,10 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       setErrorMessage(installationDateError);
       return;
     }
+    if (installationDate && !installationTime) {
+      setErrorMessage("Choose an installation start time.");
+      return;
+    }
     setIsSaving(true);
     setUploadProgress(0);
 
@@ -1121,6 +1141,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
           status,
           progress_notes: additionalNotes,
           installation: installationDate ? new Date(`${installationDate}T00:00:00.000Z`).toISOString() : "",
+          installationTime,
           stages: payloadStages,
         },
         fileContexts,
@@ -1235,6 +1256,15 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
               }}
               className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
             />
+            <label htmlFor="progress-installation-time" className="mb-1.5 mt-3 block text-sm font-medium text-slate-700">Est. Installation Time</label>
+            <input
+              id="progress-installation-time"
+              type="time"
+              value={installationTime}
+              onChange={(event) => { setInstallationTime(event.target.value); if (errorMessage) setErrorMessage(""); }}
+              className="w-full rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-800 outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-100"
+            />
+            <p className="mt-1.5 text-xs text-slate-500">Appointments must fit within {businessHours.open || "08:00"}–{businessHours.close || "18:00"} (Asia/Manila). Duration: {project.rawOrder?.installation_duration_minutes || 60} minutes.</p>
             {minimumInstallationDate && (
               <p className="mt-1.5 text-xs text-slate-500">
                 Must be after the Site Inspection Date. Earliest allowed date is {formatDateToMMDDYYYY(minimumInstallationDate)}.

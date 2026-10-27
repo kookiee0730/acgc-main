@@ -89,6 +89,7 @@ export const buildContractSnapshot = (order = {}) => {
     dimensions: `${width} x ${height} ${firstItem.unit || "in"}`.trim(),
     quantity,
     projectCost,
+    additionalCharges: (order.project_additional_charges || []).map((charge) => ({ name: charge.name || "Additional charge", amount: Number(charge.amount) || 0, note: charge.note || "" })),
     downpayment,
     paymentTerms: order.payment_terms || "",
     inspectionDate,
