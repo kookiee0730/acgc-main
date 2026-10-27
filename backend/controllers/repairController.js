@@ -14,6 +14,18 @@ const money = (value, label = "Amount") => {
 const statusError = (message, status = 409) => Object.assign(new Error(message), { status });
 const event = (repair, name, detail, actor) => repair.history.push({ event: name, detail: text(detail), actor: actor?.id || null, actorRole: actor?.role || "system" });
 const repairTotal = (repair) => Math.round(Math.max(0, Number(repair.quotation?.total) || 0) * 100) / 100;
+const parsePaymentDate = (value) => {
+  const dateKey = text(value, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(dateKey)) throw statusError("Enter the date the payment was received.", 400);
+  const parsed = new Date(`${dateKey}T12:00:00.000Z`);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== dateKey) throw statusError("Enter a valid payment date.", 400);
+  const manilaTodayParts = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Manila", year: "numeric", month: "2-digit", day: "2-digit" }).formatToParts(new Date());
+  const manilaToday = Object.fromEntries(manilaTodayParts.map(({ type, value }) => [type, value]));
+  const todayKey = `${manilaToday.year}-${manilaToday.month}-${manilaToday.day}`;
+  if (dateKey > todayKey) throw statusError("Payment date cannot be in the future.", 400);
+  return parsed;
+};
+const paymentMethodNeedsReference = (method) => ["bank transfer", "gcash", "online payment"].includes(text(method, 80).toLowerCase());
 const verifiedRepairAmount = (repair) => {
   const stored = Number(repair.payment?.verifiedAmount);
   if (Number.isFinite(stored) && stored > 0) return Math.round(stored * 100) / 100;
@@ -22,7 +34,7 @@ const verifiedRepairAmount = (repair) => {
   if (repair.payment?.proofReviewStatus === "approved" && repair.payment?.status === "received") return Math.round((Number(repair.payment.proofAmount) || Number(repair.completion?.amountPaid) || 0) * 100) / 100;
   return 0;
 };
-const updateVerifiedPayment = (repair, actor, { amount, method, reference = "", source = "admin_recorded", proofUrl = "" }) => {
+const updateVerifiedPayment = (repair, actor, { amount, paymentDate, method, reference = "", source = "admin_recorded", proofUrl = "" }) => {
   const total = repairTotal(repair);
   const previous = verifiedRepairAmount(repair);
   const next = Math.round((previous + amount) * 100) / 100;
@@ -30,7 +42,7 @@ const updateVerifiedPayment = (repair, actor, { amount, method, reference = "", 
   if (amount <= 0) throw statusError("Payment amount must be greater than zero.", 400);
   if (amount > Math.max(0, Math.round((total - previous) * 100) / 100)) throw statusError("Payment amount exceeds the remaining repair balance.", 400);
   const verifiedAt = new Date();
-  repair.payment.records = [...(repair.payment.records || []), { id: new mongoose.Types.ObjectId().toString(), amount, method: text(method, 80), reference: text(reference, 180), source, proofUrl: text(proofUrl, 1200), verifiedAt, verifiedBy: actor.id || null, verifiedByRole: actor.role || "admin" }];
+  repair.payment.records = [...(repair.payment.records || []), { id: new mongoose.Types.ObjectId().toString(), amount, paymentDate, method: text(method, 80), reference: text(reference, 180), source, proofUrl: text(proofUrl, 1200), verifiedAt, verifiedBy: actor.id || null, verifiedByRole: actor.role || "admin" }];
   repair.payment.verifiedAmount = next;
   repair.payment.method = text(method, 80);
   repair.payment.status = remaining === 0 ? "paid" : next > 0 ? "partial" : "pending";
@@ -42,7 +54,9 @@ const updateVerifiedPayment = (repair, actor, { amount, method, reference = "", 
 };
 const isFullyPaidRepair = (repair) => {
   if (repair.workflowType !== "paid" || verifiedRepairAmount(repair) < repairTotal(repair)) return false;
-  const currentVerification = repair.payment?.status === "paid" && Boolean(repair.payment?.verifiedAt && repair.payment?.verifiedBy);
+  const completeVerifiedRecords = (repair.payment?.records || []).filter((record) => Number(record.amount) > 0 && record.paymentDate && record.method && record.verifiedAt && record.verifiedBy);
+  const recordsTotal = completeVerifiedRecords.reduce((sum, record) => sum + Number(record.amount), 0);
+  const currentVerification = repair.payment?.status === "paid" && recordsTotal >= repairTotal(repair) && Boolean(repair.payment?.verifiedAt && repair.payment?.verifiedBy);
   const legacyAdminVerification = repair.payment?.status === "received" && repair.payment?.proofReviewStatus === "approved"
     && Boolean(repair.payment?.proofReviewedAt)
     && (repair.history || []).some((entry) => entry.event === "payment_proof_approved" && entry.actor);
@@ -60,7 +74,7 @@ const publicCustomer = (repair) => ({
     proofTransactionNumber: repair.payment?.proofTransactionNumber || "", proofSubmittedAt: repair.payment?.proofSubmittedAt || null,
     proofReviewedAt: repair.payment?.proofReviewedAt || null, proofReviewStatus: repair.payment?.proofReviewStatus || "none",
     proofRejectionReason: repair.payment?.proofRejectionReason || "",
-    records: (repair.payment?.records || []).map(({ amount, method, reference, source, verifiedAt }) => ({ amount, method, reference, source, verifiedAt })),
+    records: (repair.payment?.records || []).map(({ amount, paymentDate, method, reference, source, verifiedAt }) => ({ amount, paymentDate, method, reference, source, verifiedAt })),
   },
   schedule: repair.schedule, completion: repair.completion, invoiceNumber: repair.invoiceNumber,
   receipt: repair.receipt?.number ? { number: repair.receipt.number, issuedAt: repair.receipt.issuedAt, amountPaidAtIssue: repair.receipt.amountPaidAtIssue } : null,
@@ -407,17 +421,27 @@ export const reviewRepairPaymentProof = async (req, res) => {
 
   const action = req.body?.action;
   if (action === "approve") {
-    const proofAmount = money(repair.payment.proofAmount, "Verified payment amount");
+    let proofAmount;
+    try { proofAmount = money(req.body?.amount ?? repair.payment.proofAmount, "Verified payment amount"); }
+    catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
+    if (req.body?.confirmed !== true) return res.status(400).json({ success: false, message: "Confirm that the payment was received and verified." });
     const outstanding = Math.max(0, Math.round((repairTotal(repair) - verifiedRepairAmount(repair)) * 100) / 100);
     if (proofAmount <= 0 || proofAmount > outstanding) return res.status(409).json({ success: false, message: "The submitted proof exceeds the remaining repair balance or has no payable amount." });
     if (proofAmount >= outstanding && req.body?.confirmFullyPaid !== true) return res.status(400).json({ success: false, code: "CONFIRM_FULL_PAYMENT", message: "Confirm that the repair has been fully paid before verifying this payment." });
-    const method = text(req.body?.method || "Online payment", 80);
-    const result = updateVerifiedPayment(repair, req.user, { amount: proofAmount, method, reference: repair.payment.proofTransactionNumber, source: "customer_proof", proofUrl: repair.payment.proofUrl });
+    const method = text(req.body?.method, 80);
+    if (!["Cash", "Bank transfer", "GCash", "Other", "Online payment"].includes(method)) return res.status(400).json({ success: false, message: "Choose a valid payment method." });
+    const reference = text(req.body?.reference || repair.payment.proofTransactionNumber, 180);
+    if (paymentMethodNeedsReference(method) && !reference) return res.status(400).json({ success: false, message: `Enter the transaction reference for ${method}.` });
+    if (reference && repair.payment.records?.some((record) => String(record.reference || "").trim() === reference)) return res.status(409).json({ success: false, message: "This transaction reference has already been recorded." });
+    let paymentDate;
+    try { paymentDate = parsePaymentDate(req.body?.paymentDate); }
+    catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
+    const result = updateVerifiedPayment(repair, req.user, { amount: proofAmount, paymentDate, method, reference, source: "customer_proof", proofUrl: repair.payment.proofUrl });
     repair.payment.proofReviewStatus = "approved";
     repair.payment.proofRejectionReason = "";
     repair.payment.proofReviewedAt = new Date();
     repair.payment.proofReviewedBy = req.user.id;
-    event(repair, "payment_proof_approved", `Payment proof verified for PHP ${proofAmount.toFixed(2)}. Verified total: PHP ${result.paid.toFixed(2)}; remaining balance: PHP ${result.remaining.toFixed(2)}.`, req.user);
+    event(repair, "payment_proof_approved", `Administrator verified PHP ${proofAmount.toFixed(2)} by ${method} received on ${paymentDate.toISOString().slice(0, 10)}${reference ? ` (reference ${reference})` : ""}. Verified total: PHP ${result.paid.toFixed(2)}; remaining balance: PHP ${result.remaining.toFixed(2)}.`, req.user);
   } else if (action === "reject") {
     const reason = text(req.body?.reason, 1200);
     if (!reason) return res.status(400).json({ success: false, message: "Provide a reason for rejecting this payment proof." });
@@ -451,16 +475,21 @@ export const recordRepairPayment = async (req, res) => {
   catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
   const method = text(req.body?.method, 80);
   const reference = text(req.body?.reference, 180);
-  if (!method) return res.status(400).json({ success: false, message: "Select the payment method." });
+  if (!["Cash", "Bank transfer", "GCash", "Other", "Online payment"].includes(method)) return res.status(400).json({ success: false, message: "Choose a valid payment method." });
+  if (req.body?.confirmed !== true) return res.status(400).json({ success: false, message: "Confirm that the payment was received and verified." });
+  if (paymentMethodNeedsReference(method) && !reference) return res.status(400).json({ success: false, message: `Enter the transaction reference for ${method}.` });
+  let paymentDate;
+  try { paymentDate = parsePaymentDate(req.body?.paymentDate); }
+  catch (error) { return res.status(error.status || 400).json({ success: false, message: error.message }); }
   if (reference && repair.payment.records?.some((record) => String(record.reference || "").trim() === reference)) return res.status(409).json({ success: false, message: "This transaction reference has already been recorded." });
   const remaining = Math.max(0, Math.round((repairTotal(repair) - verifiedRepairAmount(repair)) * 100) / 100);
   if (amount <= 0 || amount > remaining) return res.status(400).json({ success: false, message: `Enter an amount greater than zero and no more than the remaining balance of PHP ${remaining.toFixed(2)}.` });
   if (amount >= remaining && req.body?.confirmFullyPaid !== true) return res.status(400).json({ success: false, code: "CONFIRM_FULL_PAYMENT", message: "Confirm that the repair has been fully paid before verifying this payment." });
   try {
-    const result = updateVerifiedPayment(repair, req.user, { amount, method, reference, source: "admin_recorded" });
+    const result = updateVerifiedPayment(repair, req.user, { amount, paymentDate, method, reference, source: "admin_recorded" });
     const record = repair.payment.records.at(-1);
     record.requestId = requestId;
-    event(repair, "payment_verified", `Administrator verified a payment of PHP ${amount.toFixed(2)} by ${method}. Paid: PHP ${result.paid.toFixed(2)} of PHP ${result.total.toFixed(2)}; remaining: PHP ${result.remaining.toFixed(2)}.`, req.user);
+    event(repair, "payment_verified", `Administrator verified PHP ${amount.toFixed(2)} by ${method} received on ${paymentDate.toISOString().slice(0, 10)}${reference ? ` (reference ${reference})` : ""}. Paid: PHP ${result.paid.toFixed(2)} of PHP ${result.total.toFixed(2)}; remaining: PHP ${result.remaining.toFixed(2)}.`, req.user);
     await repair.save();
     void quoteCustomer(repair, `Repair payment updated: ${repair.productName}`, `ACGC verified PHP ${amount.toFixed(2)} for repair ${repair.repairTrackingId}. Total paid: PHP ${result.paid.toFixed(2)} of PHP ${result.total.toFixed(2)}. Remaining balance: PHP ${result.remaining.toFixed(2)}. Payment status: ${repair.payment.status}.`);
     return res.json({ success: true, repair: publicAdmin(repair) });
@@ -474,7 +503,7 @@ export const generateRepairReceipt = async (req, res) => {
   const repair = await getRepair(req.params.repairId);
   if (!repair) return res.status(404).json({ success: false, message: "Repair request not found." });
   const warrantyEligible = repair.workflowType === "warranty" && repair.status === "completed" && repair.payment?.status === "not_required";
-  if (!warrantyEligible && !isFullyPaidRepair(repair)) return res.status(409).json({ success: false, message: "Receipt generation is unavailable until the administrator verifies that the repair has been fully paid." });
+  if (!warrantyEligible && !repair.receipt?.number && !isFullyPaidRepair(repair)) return res.status(409).json({ success: false, message: "Receipt generation is unavailable until complete admin-verified payment records cover the repair charge." });
   const reprinted = Boolean(repair.receipt?.number);
   if (!repair.receipt?.number) {
     const issuedAt = new Date();
