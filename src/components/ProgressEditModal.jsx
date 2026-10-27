@@ -28,7 +28,6 @@ const getMainStagePresets = () => [
 
 const VALID_STAGE_STATUSES = ["pending", "in_progress", "done", "delayed", "on_hold"];
 
-
 const normalizeStage = (source = {}, key, name, defaultStatus = "pending") => {
   const status = source.status && VALID_STAGE_STATUSES.includes(source.status)
     ? source.status
@@ -210,8 +209,8 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       ? project.stages
       : Array.isArray(project.progress_stages) ? project.progress_stages : [];
     const nextStages = normalizeProjectStages(projectStages);
-    const currentStage = nextStages.find((stage) => String(stage.status || "").trim().toLowerCase().replace(/[_\s]+/g, "-") === "in-progress")
-      || nextStages.find((stage) => !(stage.completed && stage.saved && !stage.canUndoCompletion))
+    const currentStage = nextStages.find((stage) => !stage.completed && String(stage.status || "").trim().toLowerCase().replace(/[_\s]+/g, "-") === "in-progress")
+      || nextStages.find((stage) => !stage.completed)
       || nextStages.at(-1);
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setStages(nextStages);
@@ -291,14 +290,12 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     return hasLaterStageStarted(index);
   };
 
-  const currentStageIndex = stages.findIndex(
-    (stage) => !(stage.completed && stage.saved && !stage.canUndoCompletion)
-  );
+  const currentStageIndex = stages.findIndex((stage) => !stage.completed);
   const activeStageIndex = currentStageIndex === -1 ? stages.length - 1 : currentStageIndex;
 
   const isStageEditable = (index) => {
     const stage = stages[index];
-    return index === activeStageIndex && !(stage?.completed && stage?.saved && !stage?.canUndoCompletion);
+    return index === activeStageIndex && !stage?.completed;
   };
 
   const isCoreMainStage = (stage) => PARENT_STAGE_DEFINITIONS.some(({ key }) => key === stage?.key);
