@@ -205,6 +205,65 @@ export const calculateStageProgressPercent = (steps = []) => {
   return Math.round((1 / visibleSteps.length) * 100);
 };
 
+const progressStageDefinitions = [
+  { key: "cutting", name: "cutting" },
+  { key: "assembly", name: "assembly" },
+  { key: "fabrication", name: "fabrication" },
+  { key: "installation", name: "installation" },
+];
+
+const isProgressStageDone = (stage) => (
+  stage?.completed === true || ["done", "completed"].includes(normalizeStageStatus(stage?.status))
+);
+
+const getCoreProgressStageKey = (stage) => {
+  const identity = [stage?.key, stage?.name]
+    .filter(Boolean)
+    .join("_")
+    .trim()
+    .toLowerCase()
+    .replace(/[\s-]+/g, "_");
+  if (identity.split("_").includes("processing")) return "fabrication";
+  if (identity.includes("site_inspection")) return "installation";
+  if (identity.includes("installation_scheduling")) return null;
+  return progressStageDefinitions.find(({ key }) => identity.split("_").includes(key))?.key || null;
+};
+
+export const calculateProjectProgressFromStages = (stageRows = []) => {
+  const sourceStages = Array.isArray(stageRows) ? stageRows.filter(Boolean) : [];
+  const normalizedStages = [];
+  const coreKeys = new Set();
+
+  sourceStages.forEach((stage) => {
+    const coreKey = getCoreProgressStageKey(stage);
+    if (coreKey) {
+      if (coreKeys.has(coreKey)) return;
+      coreKeys.add(coreKey);
+      normalizedStages.push({ ...stage, key: coreKey });
+      return;
+    }
+    normalizedStages.push(stage);
+  });
+
+  progressStageDefinitions.forEach(({ key }) => {
+    if (coreKeys.has(key)) return;
+    coreKeys.add(key);
+    normalizedStages.push({ key, completed: false, status: key === "cutting" ? "in_progress" : "pending", subStages: [] });
+  });
+
+  const totalProgress = normalizedStages.reduce((total, stage) => {
+    if (isProgressStageDone(stage)) return total + 1;
+    const subStages = Array.isArray(stage?.subStages) ? stage.subStages : [];
+    if (subStages.length === 0) return total;
+    return total + subStages.filter(isProgressStageDone).length / subStages.length;
+  }, 0);
+
+  let percentage = Math.round((totalProgress / normalizedStages.length) * 100);
+  const installation = normalizedStages.find((stage) => getCoreProgressStageKey(stage) === "installation");
+  if (installation && !isProgressStageDone(installation)) percentage = Math.min(percentage, 90);
+  return percentage;
+};
+
 const getBatchMilestoneIndex = (order, hasProductionStarted) => {
   const status = String(order?.status || "").toLowerCase();
   const contractStatus = String(order?.contract_status || "").toLowerCase();
@@ -310,7 +369,10 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0, { ap
               ? "in-progress"
               : "pending",
             date: formatDateTimeToMMDDYYYY(sub.date),
-            notes: sub.description || null,
+            completionNote: String(sub.completionNote || "").trim(),
+            notes: subCompleted && String(sub.completionNote || "").trim()
+              ? String(sub.completionNote).trim()
+              : sub.description || null,
             images: Array.isArray(sub.images) ? sub.images : [],
           };
         })
@@ -329,7 +391,10 @@ export const buildBatchProductTimelineStages = (order, item, itemIndex = 0, { ap
       deadlineDelayed: isOverdue && !completed,
       date: stepStatus === "completed" ? formatDateTimeToMMDDYYYY(sourceStage?.date || sourceStage?.installationCompletedAt) || "Completed" : stepStatus === "in-progress" ? "In progress" : "Pending",
       assignedTo: definition.key.includes("installation") ? "Installation Team" : "Production Team",
-      notes: sourceStage?.delayReason || sourceStage?.delayNotes || `Current phase: ${definition.label}`,
+      completionNote: String(sourceStage?.completionNote || "").trim(),
+      notes: completed && String(sourceStage?.completionNote || "").trim()
+        ? String(sourceStage.completionNote).trim()
+        : sourceStage?.delayReason || sourceStage?.delayNotes || `Current phase: ${definition.label}`,
       ...(sourceStage ? { photoRequirement: sourceStage.photoRequirement === "required" ? "required" : "optional" } : {}),
       delayReason: latestDelayEntry?.reason || sourceStage?.delayReason || (isOverdue && !completed ? "The estimated installation date has passed." : ""),
       delayNotes: latestDelayEntry?.notes || sourceStage?.delayNotes || "",
@@ -441,7 +506,10 @@ export const buildOrderTimelineStages = (order) => {
               ? "in-progress"
               : "pending",
             date: formatDateTimeToMMDDYYYY(sub.date),
-            notes: sub.description || null,
+            completionNote: String(sub.completionNote || "").trim(),
+            notes: (sub.completed || ["done", "completed"].includes(normalizeStageStatus(sub.status))) && String(sub.completionNote || "").trim()
+              ? String(sub.completionNote).trim()
+              : sub.description || null,
             images: Array.isArray(sub.images) ? sub.images : [],
             photoRequirement: sub.photoRequirement === "required" ? "required" : "optional",
           }))
@@ -532,7 +600,10 @@ export const buildOrderTimelineStages = (order) => {
             : sourceStage.proposedInstallationDate && sourceStage.proposedInstallationTime
             ? `Please agree or request a change for the proposed installation on ${formatDateToMMDDYYYY(sourceStage.proposedInstallationDate)} at ${sourceStage.proposedInstallationTime}.`
             : "Awaiting installation agreement."
-          : schedulingNotes || defaultNotes,
+          : completed && String(sourceStage.completionNote || "").trim()
+            ? String(sourceStage.completionNote).trim()
+            : schedulingNotes || defaultNotes,
+        completionNote: String(sourceStage.completionNote || "").trim(),
         images: Array.isArray(sourceStage.images) ? sourceStage.images : [],
         subStages: visibleSubStages,
         proposedInstallationDate: formatDateToMMDDYYYY(sourceStage.proposedInstallationDate),

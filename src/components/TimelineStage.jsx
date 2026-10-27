@@ -80,6 +80,7 @@ export default function TimelineStage({
     ? "bg-emerald-600"
     : darkMode ? "bg-slate-700" : "bg-slate-200";
   const note = stage?.note || stage?.notes || "";
+  const completionNote = status === "done" ? String(stage?.completionNote || "").trim() : "";
   const statusText = status === "done"
     ? `Completed · ${formatCompletedAt(stage?.completedAt || stage?.date)}`
     : status === "current"
@@ -112,6 +113,7 @@ export default function TimelineStage({
       <div className="min-w-0 pt-0.5">
         <p className={`break-words text-sm font-semibold leading-5 ${labelClass}`}>{stage?.label || stage?.name || "Project stage"}</p>
         <p className={`mt-0.5 break-words text-xs leading-5 ${statusTextClass}`}>{statusText}</p>
+        {completionNote && <p className={`mt-1 break-words text-xs leading-5 ${darkMode ? "text-slate-300" : "text-slate-600"}`}><span className="font-semibold">Completion note:</span> {completionNote}</p>}
                 {status !== "done" && stage?.photoRequirement && (stage.photoRequirement === "required" || onUploadProgressPhoto) && (
                   <div className={`mt-2 rounded-lg border p-2.5 text-xs ${darkMode ? "border-slate-700 bg-slate-900 text-slate-300" : "border-slate-200 bg-white text-slate-600"}`}>
                     {stage.photoRequirement === "required" && (
@@ -176,6 +178,7 @@ export default function TimelineStage({
               const subName = subStage?.name || `Sub-stage ${index + 1}`;
               const subPhotos = getTimelineStagePhotos(subStage);
               const subNote = subStage?.note || subStage?.notes || "";
+              const subCompletionNote = subStatus === "done" ? String(subStage?.completionNote || "").trim() : "";
               const subStatusText = subStatus === "done"
                 ? `Completed · ${formatCompletedAt(subStage?.completedAt || subStage?.date)}`
                 : subStatus === "current"
@@ -201,6 +204,7 @@ export default function TimelineStage({
                   <div className="min-w-0">
                     <p className={`break-words text-xs font-medium leading-5 ${darkMode ? "text-slate-200" : "text-slate-800"}`}>{subName}</p>
                     <p className={`break-words text-[11px] leading-4 ${isSubDelayed ? darkMode ? "text-rose-300" : "text-rose-700" : darkMode ? "text-slate-400" : "text-slate-500"}`}>{subStatusText}</p>
+                    {subCompletionNote && <p className={`mt-1 break-words text-[11px] leading-4 ${darkMode ? "text-slate-300" : "text-slate-600"}`}><span className="font-semibold">Completion note:</span> {subCompletionNote}</p>}
                     {isSubDelayed && (
                       <dl className={`mt-1 grid gap-y-0.5 text-[10px] leading-4 ${darkMode ? "text-slate-400" : "text-slate-500"}`}>
                         <div className="flex flex-wrap gap-x-1"><dt>Date reported</dt><dd>{subDateReported || "Not recorded"}</dd></div>

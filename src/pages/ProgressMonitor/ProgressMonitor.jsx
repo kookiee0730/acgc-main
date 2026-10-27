@@ -25,7 +25,7 @@ import AdminPageHeader from "../../components/layout/AdminPageHeader";
 import { useAuth } from "@/contexts/AuthContext";
 import { useAdminTheme } from "@/contexts/AdminThemeContext";
 import { recordActivity } from "@/lib/activityLog";
-import { buildBatchProductTimelineStages, calculateStageProgressPercent, isInstallationDeadlineOverdue } from "@/lib/orderTimeline";
+import { calculateProjectProgressFromStages, isInstallationDeadlineOverdue } from "@/lib/orderTimeline";
 
 const normalizeStageStatus = (value) =>
   String(value ?? "")
@@ -257,7 +257,7 @@ const buildProjectRows = (order) => {
       installation: formatDateToMMMDDYYYY(order.estimated_installation_date) || "TBD",
       estimated_installation_date: order.estimated_installation_date,
       progress: stages.length > 0
-        ? calculateStageProgressPercent(buildBatchProductTimelineStages(order, item || { progress_stages: stages }, index, { applyDeadlineDelay: false }))
+        ? calculateProjectProgressFromStages(stages)
         : itemProgress ?? mapProgressFromStatus(order.status, order.progress),
       isOverdue: isInstallationDeadlineOverdue(projectTimelineOrder),
       stages,

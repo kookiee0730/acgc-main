@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { X, UploadCloud, Plus, CheckCircle2, Lock, Trash2, AlertTriangle, ChevronDown, Scissors, Wrench, Package, Truck, Check, Pencil } from "lucide-react";
 import { formatDateToMMDDYYYY, formatDateTimeToMMDDYYYY, getTodayIso } from "@/lib/dateUtils";
 import { getInstallationDateError, getMinimumInstallationDate } from "@/lib/installationSchedule";
+import { calculateProjectProgressFromStages } from "@/lib/orderTimeline";
 import UnsavedChangesDialog from "@/components/UnsavedChangesDialog";
 import { createUnsavedSnapshot } from "@/lib/unsavedSnapshot";
 
@@ -44,8 +45,6 @@ const normalizeStage = (source = {}, key, name, defaultStatus = "pending") => {
     status: effectiveStatus,
     completed,
     saved: completed,
-    canUndoCompletion: completed,
-    previousStatus: null,
     date: source.date ? new Date(source.date) : null,
     installationStartedAt: source.installationStartedAt ? new Date(source.installationStartedAt) : null,
     installationCompletedAt: source.installationCompletedAt ? new Date(source.installationCompletedAt) : null,
@@ -85,8 +84,6 @@ const normalizeStage = (source = {}, key, name, defaultStatus = "pending") => {
             newFiles: [],
             imagePreviews: Array.isArray(subStage.images) ? subStage.images : [],
             saved: true,
-            canUndoCompletion: Boolean(subStage.completed),
-            previousStatus: null,
           };
         })
       : [],
@@ -151,7 +148,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
   const [progress, setProgress] = useState(project.progress || 0);
   const [status, setStatus] = useState(project.status || "Pending");
   const [additionalNotes, setAdditionalNotes] = useState(project.progress_notes || project.rawOrder?.progress_notes || "");
-  const [completionCorrectionReason, setCompletionCorrectionReason] = useState("");
   const [installationDate, setInstallationDate] = useState(() => {
     const value = project.estimated_installation_date || project.rawOrder?.estimated_installation_date;
     if (!value) return "";
@@ -197,9 +193,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     return new Date(now.getTime() - now.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
   });
   const [completionNote, setCompletionNote] = useState("");
-  const [correctionTarget, setCorrectionTarget] = useState(null);
-  const [correctionReasonInput, setCorrectionReasonInput] = useState("");
-  const [correctionModalError, setCorrectionModalError] = useState("");
   const minimumInstallationDate = getMinimumInstallationDate(inspectionDate);
   const modalRef = useRef(null);
   const previousActiveElement = useRef(null);
@@ -302,7 +295,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
 
   const startEditingMainStage = (stageIndex) => {
     const stage = stages[stageIndex];
-    if (!stage || isCoreMainStage(stage)) return;
+    if (!stage || isCoreMainStage(stage) || stage.completed) return;
     setEditingMainStageIndex(stageIndex);
     setEditedMainStageName(stage.name);
     setErrorMessage("");
@@ -341,7 +334,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
 
   const openRemoveMainStageConfirmation = (stageIndex) => {
     const stage = stages[stageIndex];
-    if (!stage || isCoreMainStage(stage)) return;
+    if (!stage || isCoreMainStage(stage) || stage.completed) return;
     setRemoveMainStageIndex(stageIndex);
     setErrorMessage("");
     setShowRemoveMainStageModal(true);
@@ -526,26 +519,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     setNewSubStagePreviews((prev) => prev.filter((_, i) => i !== index));
   };
 
-  const getCompletedSubStageFraction = (stage) => {
-    if (!Array.isArray(stage.subStages) || stage.subStages.length === 0) return 0;
-    const completedCount = stage.subStages.filter((sub) => sub.completed).length;
-    return completedCount / stage.subStages.length;
-  };
-
-  const calculateProgress = useCallback(() => {
-    if (!Array.isArray(stages) || stages.length === 0) return 0;
-    const stageProgress = stages.reduce((sum, stage) => {
-      if (stage.completed) return sum + 1;
-      return sum + getCompletedSubStageFraction(stage);
-    }, 0);
-    let pct = Math.round((stageProgress / stages.length) * 100);
-    // If installation stage exists and is not completed, avoid showing 100%
-    const installation = stages.find((s) => s.key === "installation");
-    if (installation && !installation.completed) {
-      pct = Math.min(pct, 90);
-    }
-    return pct;
-  }, [stages]);
+  const calculateProgress = useCallback(() => calculateProjectProgressFromStages(stages), [stages]);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect
@@ -560,17 +534,12 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       const updated = { ...current, ...patch };
 
       if (patch.status) {
-        if (patch.status === "done" && !current.saved) {
-          updated.previousStatus = current.previousStatus || current.status;
-          updated.completed = true;
-          updated.date = new Date();
-        } else if (patch.status === "done" && current.saved) {
+        if (patch.status === "done") {
           updated.completed = true;
           updated.date = new Date();
         } else {
           updated.completed = false;
           updated.date = null;
-          delete updated.previousStatus;
         }
 
         if (current.status === "delayed" && patch.status !== "delayed") {
@@ -599,17 +568,12 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
       const current = subs[subIndex] || {};
       const updated = { ...current, ...patch };
       if (patch.status) {
-        if (patch.status === "done" && !current.saved) {
-          updated.previousStatus = current.previousStatus || current.status;
-          updated.completed = true;
-          updated.date = new Date();
-        } else if (patch.status === "done" && current.saved) {
+        if (patch.status === "done") {
           updated.completed = true;
           updated.date = new Date();
         } else {
           updated.completed = false;
           updated.date = null;
-          delete updated.previousStatus;
         }
       }
       subs[subIndex] = updated;
@@ -912,73 +876,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
     setErrorMessage("");
   };
 
-  const undoStageCompletion = (stageIndex) => {
-    const stage = stages[stageIndex];
-    if (!stage || !stage.completed || (stage.saved && !stage.canUndoCompletion)) return;
-    if (stage.saved) {
-      setCorrectionTarget({ type: "stage", stageIndex, name: stage.name });
-      setCorrectionReasonInput("");
-      setCorrectionModalError("");
-      return;
-    }
-    updateStage(stageIndex, {
-      status: stage.previousStatus || "pending",
-      completed: false,
-      date: null,
-      previousStatus: null,
-    });
-  };
-
-  const undoSubStageCompletion = (stageIndex, subIndex) => {
-    const sub = stages[stageIndex]?.subStages[subIndex];
-    if (!sub || !sub.completed) return;
-    if (sub.saved) {
-      setCorrectionTarget({ type: "substage", stageIndex, subIndex, name: sub.name });
-      setCorrectionReasonInput("");
-      setCorrectionModalError("");
-      return;
-    }
-    updateSubStage(stageIndex, subIndex, {
-      status: sub.previousStatus || "pending",
-      completed: false,
-      date: null,
-      previousStatus: null,
-    });
-  };
-
-  const cancelCompletionCorrection = () => {
-    setCorrectionTarget(null);
-    setCorrectionReasonInput("");
-    setCorrectionModalError("");
-  };
-
-  const confirmCompletionCorrection = () => {
-    const reason = correctionReasonInput.trim();
-    if (!reason) {
-      setCorrectionModalError("Enter a reason to continue.");
-      return;
-    }
-    setCompletionCorrectionReason(reason);
-    if (correctionTarget?.type === "stage") {
-      const stage = stages[correctionTarget.stageIndex];
-      updateStage(correctionTarget.stageIndex, {
-        status: stage.previousStatus || "pending",
-        completed: false,
-        date: null,
-        previousStatus: null,
-      });
-    } else if (correctionTarget?.type === "substage") {
-      const sub = stages[correctionTarget.stageIndex]?.subStages[correctionTarget.subIndex];
-      updateSubStage(correctionTarget.stageIndex, correctionTarget.subIndex, {
-        status: sub?.previousStatus || "pending",
-        completed: false,
-        date: null,
-        previousStatus: null,
-      });
-    }
-    cancelCompletionCorrection();
-  };
-
   const buildPayloadStages = () => {
     const schedulingDone = stages.some(
       (stage) => stage.key === "installation_scheduling" && stage.completed
@@ -1084,7 +981,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
           progress,
           status,
           progress_notes: additionalNotes,
-          correctionReason: completionCorrectionReason,
           installation: installationDate ? new Date(`${installationDate}T00:00:00.000Z`).toISOString() : "",
           stages: payloadStages,
         },
@@ -1388,14 +1284,14 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                     ) : (
                       <div className="flex flex-wrap items-center justify-between gap-2">
                         <span className="text-xs font-medium text-slate-500">Added stage</span>
-                        <div className="flex gap-2">
+                        {!stage.completed && <div className="flex gap-2">
                           <button type="button" onClick={() => startEditingMainStage(stageIndex)} aria-label={`Edit added stage ${stage.name}`} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-slate-300 bg-white px-3 text-xs font-semibold text-slate-700 hover:bg-slate-100">
                             <Pencil size={14} aria-hidden="true" /> Edit
                           </button>
                           <button type="button" onClick={() => openRemoveMainStageConfirmation(stageIndex)} aria-label={`Remove added stage ${stage.name}`} className="inline-flex min-h-9 items-center gap-1.5 rounded-lg border border-red-200 bg-red-50 px-3 text-xs font-semibold text-red-700 hover:bg-red-100">
                             <Trash2 size={14} aria-hidden="true" /> Remove
                           </button>
-                        </div>
+                        </div>}
                       </div>
                     )}
                   </div>
@@ -1554,7 +1450,7 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                           ) : (
                             <>
                               {stage.subStages.map((sub, subIndex) => {
-                                const subLocked = sub.completed && sub.saved;
+                                const subLocked = sub.completed;
                                 const subEditable = (stageEditable || canManageSubStages(stageIndex)) && !subLocked;
                                 return (
                                   <div
@@ -1716,37 +1612,25 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                                     </div>
 
                                     {/* Action Buttons */}
-                                    {subEditable && (
+                                    {subEditable && !sub.completed && (
                                       <div className="mt-4 flex justify-end gap-3">
-                                        {sub.completed && (!sub.saved || sub.canUndoCompletion) ? (
-                                          <button
-                                            type="button"
-                                            onClick={() => undoSubStageCompletion(stageIndex, subIndex)}
-                                            className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 px-3 py-2 text-sm font-semibold"
-                                          >
-                                            Undo Completion
-                                          </button>
-                                        ) : (
-                                          <>
-                                            <button
-                                              type="button"
-                                              onClick={() => openRemoveSubStageModal(stageIndex, subIndex)}
-                                              className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 px-3 py-2 text-sm font-semibold"
-                                            >
-                                              <Trash2 size={14} />
-                                              Remove
-                                            </button>
-                                            <button
-                                              type="button"
-                                              disabled={!canMarkSubStageDone(stageIndex, subIndex)}
-                                              onClick={() => handleMarkSubStageDone(stageIndex, subIndex)}
-                                              className="inline-flex items-center gap-2 rounded-full bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
-                                            >
-                                              <CheckCircle2 size={14} />
-                                              Mark as Done
-                                            </button>
-                                          </>
-                                        )}
+                                        <button
+                                          type="button"
+                                          onClick={() => openRemoveSubStageModal(stageIndex, subIndex)}
+                                          className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 px-3 py-2 text-sm font-semibold"
+                                        >
+                                          <Trash2 size={14} />
+                                          Remove
+                                        </button>
+                                        <button
+                                          type="button"
+                                          disabled={!canMarkSubStageDone(stageIndex, subIndex)}
+                                          onClick={() => handleMarkSubStageDone(stageIndex, subIndex)}
+                                          className="inline-flex items-center gap-2 rounded-full bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-50"
+                                        >
+                                          <CheckCircle2 size={14} />
+                                          Mark as Done
+                                        </button>
                                       </div>
                                     )}
                                   </div>
@@ -1791,15 +1675,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
                       {stage.key === "installation" ? "Mark Installation as Done" : `Mark ${stage.name} Done`}
                     </button>
                   )}
-                  {(stage.completed && !stage.saved) || (stage.completed && stage.saved && stage.canUndoCompletion) ? (
-                    <button
-                      type="button"
-                      onClick={() => undoStageCompletion(stageIndex)}
-                      className="inline-flex items-center gap-2 rounded-full border border-slate-300 bg-white text-slate-700 hover:bg-slate-100 px-4 py-2 text-sm font-semibold"
-                    >
-                      Undo Completion
-                    </button>
-                  ) : null}
                 </div>
                 </div>
               </details>
@@ -1811,27 +1686,6 @@ export default function ProgressEditModal({ project, onClose, onSave, canUploadP
         {errorMessage && (
           <div className="rounded-xl bg-red-50 border border-red-200 p-3 text-sm text-red-700 mt-4">
             {errorMessage}
-          </div>
-        )}
-
-        {correctionTarget && (
-          <div className="fixed inset-0 z-[90] flex items-center justify-center bg-slate-950/55 p-4" role="presentation" onClick={(event) => { if (event.target === event.currentTarget) cancelCompletionCorrection(); }}>
-            <section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl" role="alertdialog" aria-modal="true" aria-labelledby="completion-correction-title" aria-describedby="completion-correction-description">
-              <div className="flex items-start gap-3">
-                <span className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-amber-100 text-amber-700"><AlertTriangle size={20} /></span>
-                <div>
-                  <h3 id="completion-correction-title" className="text-lg font-semibold text-slate-900">Correct completion</h3>
-                  <p id="completion-correction-description" className="mt-1 text-sm text-slate-600">You’re correcting the completed {correctionTarget.name} {correctionTarget.type === "substage" ? "sub-stage" : "stage"}. This change will be checked against dependent work before it is saved.</p>
-                </div>
-              </div>
-              <label htmlFor="completion-correction-reason" className="mt-4 block text-sm font-semibold text-slate-700">Correction reason <span className="text-red-600">*</span></label>
-              <textarea id="completion-correction-reason" autoFocus value={correctionReasonInput} onChange={(event) => { setCorrectionReasonInput(event.target.value); setCorrectionModalError(""); }} maxLength={1000} rows={3} placeholder="Explain why this completion needs to be corrected" className="mt-1 w-full resize-y rounded-lg border border-slate-300 px-3 py-2 text-sm text-slate-900 outline-none focus:border-amber-500 focus:ring-2 focus:ring-amber-100" />
-              <div className="mt-1 flex justify-between text-xs text-slate-500"><span>{correctionModalError || "This reason will be recorded in progress history."}</span><span>{correctionReasonInput.length}/1000</span></div>
-              <div className="mt-5 flex justify-end gap-2">
-                <button type="button" onClick={cancelCompletionCorrection} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-sm font-semibold text-slate-700 hover:bg-slate-50">Cancel</button>
-                <button type="button" onClick={confirmCompletionCorrection} className="rounded-lg bg-amber-700 px-4 py-2 text-sm font-semibold text-white hover:bg-amber-800">Confirm correction</button>
-              </div>
-            </section>
           </div>
         )}
 

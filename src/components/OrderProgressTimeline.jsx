@@ -298,6 +298,11 @@ export default function OrderProgressTimeline({
                               : getStepIcon(step.key, isCompleted, step.active)}
                         </span>
                         <span className={`max-w-full break-words text-[12.5px] font-medium leading-tight ${labelClass}`}>{step.label}</span>
+                        {isCompleted && step.completionNote && (
+                          <span className="max-w-full break-words text-[10px] leading-4 text-muted-foreground">
+                            Completion note: {step.completionNote}
+                          </span>
+                        )}
                         {step.status === "delayed" && (
                           <span className="rounded-full border border-rose-300 bg-rose-50 px-2 py-0.5 text-[10px] font-medium text-rose-800 dark:border-rose-800 dark:bg-rose-950/40 dark:text-rose-200">Delayed</span>
                         )}

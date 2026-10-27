@@ -488,8 +488,8 @@ export default function OrderTimeline({ order, onOrderChange, audience = "custom
 
                         {sub?.notes && (
                           <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                            <p className="text-sm font-semibold text-slate-900">Description</p>
-                            <p className="mt-2 text-sm text-slate-600">{sub.notes}</p>
+                            <p className="text-sm font-semibold text-slate-900">{sub.completionNote ? "Completion note" : "Description"}</p>
+                            <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{sub.completionNote || sub.notes}</p>
                           </div>
                         )}
 
@@ -542,8 +542,8 @@ export default function OrderTimeline({ order, onOrderChange, audience = "custom
 
                     {selectedStep.notes && (
                       <div className="mt-4 rounded-3xl border border-slate-200 bg-slate-50 p-4">
-                        <p className="text-sm font-semibold text-slate-900">Notes</p>
-                        <p className="mt-2 text-sm text-slate-600">{selectedStep.notes}</p>
+                        <p className="text-sm font-semibold text-slate-900">{selectedStep.completionNote ? "Completion note" : "Notes"}</p>
+                        <p className="mt-2 whitespace-pre-wrap text-sm text-slate-600">{selectedStep.completionNote || selectedStep.notes}</p>
                         {/* If customer already responded, show a status message instead of buttons */}
                         {currentScheduleResponse === "accepted" ? (
                           <div className="mt-3 rounded-lg border border-emerald-100 bg-emerald-50 p-4 text-sm text-slate-800">
